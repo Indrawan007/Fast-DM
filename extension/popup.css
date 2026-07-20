@@ -1,0 +1,265 @@
+/* ===== Reset & Base ===== */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  width: 340px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  background: #1e1e2e;
+  color: #cdd6f4;
+}
+
+/* ===== Container ===== */
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* ===== Header ===== */
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: #181825;
+  border-bottom: 1px solid #313244;
+}
+
+.logo {
+  font-size: 20px;
+}
+
+.title {
+  font-size: 15px;
+  font-weight: 700;
+  flex: 1;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  transition: background-color 0.3s;
+}
+
+.status-dot.connected {
+  background: #a6e3a1;
+  box-shadow: 0 0 6px rgba(166, 227, 161, 0.5);
+}
+
+.status-dot.disconnected {
+  background: #f38ba8;
+  box-shadow: 0 0 6px rgba(243, 139, 168, 0.5);
+}
+
+/* ===== Sections ===== */
+.section {
+  padding: 10px 16px;
+  background: #1e1e2e;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #a6adc8;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* ===== Input Group ===== */
+.input-group {
+  display: flex;
+  gap: 6px;
+}
+
+.input-group input {
+  flex: 1;
+  padding: 8px 12px;
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 6px;
+  color: #cdd6f4;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.input-group input:focus {
+  border-color: #89b4fa;
+}
+
+.input-group input::placeholder {
+  color: #6c7086;
+}
+
+/* ===== Buttons ===== */
+.btn-primary {
+  padding: 8px 14px;
+  background: #89b4fa;
+  color: #1e1e2e;
+  border: none;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-primary:hover {
+  background: #b4d0fb;
+}
+
+.btn-primary:active {
+  background: #74a8f7;
+}
+
+.btn-small {
+  padding: 4px 10px;
+  background: #313244;
+  color: #cdd6f4;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-small:hover {
+  background: #45475a;
+}
+
+/* ===== Video List ===== */
+.list {
+  max-height: 180px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.list::-webkit-scrollbar-thumb {
+  background: #45475a;
+  border-radius: 2px;
+}
+
+.video-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: #313244;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.video-item:hover {
+  background: #45475a;
+}
+
+.video-item .video-name {
+  flex: 1;
+  font-size: 11px;
+  color: #bac2de;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-item .video-dl-btn {
+  padding: 3px 8px;
+  background: #89b4fa;
+  color: #1e1e2e;
+  border: none;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.video-item .video-dl-btn:hover {
+  background: #b4d0fb;
+}
+
+.empty-text {
+  text-align: center;
+  padding: 16px;
+  color: #6c7086;
+  font-size: 12px;
+}
+
+/* ===== Toggle ===== */
+.toggle-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+}
+
+.toggle-row input[type="checkbox"] {
+  display: none;
+}
+
+.toggle-slider {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  background: #45475a;
+  border-radius: 10px;
+  transition: background 0.3s;
+}
+
+.toggle-slider::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  background: #6c7086;
+  border-radius: 50%;
+  transition: all 0.3s;
+}
+
+.toggle-row input:checked + .toggle-slider {
+  background: #89b4fa;
+}
+
+.toggle-row input:checked + .toggle-slider::after {
+  left: 19px;
+  background: #1e1e2e;
+}
+
+/* ===== Footer ===== */
+.footer {
+  padding: 8px 16px;
+  background: #181825;
+  border-top: 1px solid #313244;
+  text-align: center;
+}
+
+#status-text {
+  font-size: 11px;
+  color: #6c7086;
+}

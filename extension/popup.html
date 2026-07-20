@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <div class="header">
+      <span class="logo">⚡</span>
+      <span class="title">Fast DM</span>
+      <span id="status-dot" class="status-dot disconnected"></span>
+    </div>
+
+    <!-- Quick Download -->
+    <div class="section">
+      <div class="input-group">
+        <input
+          type="text"
+          id="url-input"
+          placeholder="Paste download URL..."
+          spellcheck="false"
+        >
+        <button id="download-btn" class="btn-primary">⬇</button>
+      </div>
+    </div>
+
+    <!-- Detected Videos -->
+    <div class="section">
+      <div class="section-header">
+        <span>🎬 Detected Videos</span>
+        <button id="scan-btn" class="btn-small">Scan</button>
+      </div>
+      <div id="video-list" class="list">
+        <div class="empty-text">Click "Scan" to detect videos</div>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div class="section">
+      <div class="section-header">
+        <span>⚙ Settings</span>
+      </div>
+      <label class="toggle-row">
+        <span>Intercept Downloads</span>
+        <input type="checkbox" id="toggle-intercept" checked>
+        <span class="toggle-slider"></span>
+      </label>
+      <label class="toggle-row">
+        <span>Extension Enabled</span>
+        <input type="checkbox" id="toggle-enabled" checked>
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <span id="status-text">Checking connection...</span>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
