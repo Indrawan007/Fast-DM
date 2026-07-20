@@ -64,6 +64,7 @@ row:hover { background-color: #3d3f55; }
 .status-error       { background-color: #4d1e1e; color: #f38ba8; }
 .status-paused      { background-color: #4d3a1e; color: #fab387; }
 .status-cancelled   { background-color: #3a3a3a; color: #6c7086; }
+.status-resolving   { background-color: #1e3a4d; color: #74c7ec; }
 
 .detail-label {
     color: #6c7086;
@@ -245,15 +246,26 @@ class DownloadRow(Gtk.ListBoxRow):
         self.cancel_btn.set_visible(stoppable)
         self.open_btn.set_visible(done)
 
+# gui/manager.py
+# Ganti SELURUH method update() di class DownloadRow dengan ini:
+
     def update(self, d):
         """Update all widgets — must be called from main (GTK) thread."""
         self._set_progress(d)
         self._set_details(d)
 
+        # Filename bisa berubah setelah resolve
+        self.filename_lbl.set_markup(
+            "<b>{}</b>".format(
+                GLib.markup_escape_text(d["filename"])
+            )
+        )
+
         # Status badge
         ctx = self.status_lbl.get_style_context()
         for cls in ("status-downloading", "status-completed",
-                    "status-error", "status-paused", "status-cancelled"):
+                    "status-error", "status-paused", "status-cancelled",
+                    "status-resolving"):
             ctx.remove_class(cls)
 
         status = d["status"]
@@ -268,8 +280,23 @@ class DownloadRow(Gtk.ListBoxRow):
             ctx.add_class("status-paused")
         elif status == "cancelled":
             ctx.add_class("status-cancelled")
+        elif status == "resolving":
+            ctx.add_class("status-resolving")
 
         self._update_buttons(status)
+
+# Dan ganti method _update_buttons() juga:
+
+    def _update_buttons(self, status):
+        active    = status in ("downloading", "resolving")
+        paused    = status == "paused"
+        done      = status == "completed"
+        stoppable = active or paused
+
+        self.pause_btn.set_visible(active)
+        self.resume_btn.set_visible(paused)
+        self.cancel_btn.set_visible(stoppable)
+        self.open_btn.set_visible(done)
 
 
 # --------------------------------------------------------------------------

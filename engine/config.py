@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 class Config:
-    """Singleton konfigurasi dengan lazy loading."""
+    """Singleton konfigurasi."""
 
     _instance = None
     _CONFIG_DIR = Path.home() / ".config" / "fast-dm"
@@ -14,20 +14,19 @@ class Config:
 
     DEFAULTS = {
         "download_dir": str(Path.home() / "Downloads"),
-        "max_connections": 16,
-        "max_concurrent": 3,
-        "min_split_size": "1M",
-        "chunk_size": "1M",
-        "max_overall_speed": "0",
+        "max_connections": 16,        # Max koneksi per file (aria2 max 16)
+        "max_concurrent": 3,          # File simultan
+        "min_split_size": "1M",     # Lebih kecil = lebih banyak split = lebih cepat
+        "chunk_size": "1M",           # Piece length
+        "max_overall_speed": "0",     # 0 = unlimited
         "retry_count": 5,
         "retry_wait": 3,
-        "timeout": 30,
+        "timeout": 15,                # Lebih agresif (was 30)
         "continue_download": True,
         "auto_file_renaming": True,
-        "disk_cache_size": "64M",
-        "file_allocation": "falloc",
+        "disk_cache_size": "128M",    # Lebih besar (was 64M)
+        "file_allocation": "falloc",  # fallocate (instan di ext4)
         "native_host_name": "com.fastdm.native",
-        "socket_port": 6800,
         "log_level": "warn",
         "video_extensions": [
             ".mp4", ".mkv", ".webm", ".avi", ".mov",
@@ -73,7 +72,7 @@ class Config:
         try:
             return self._data[name]
         except KeyError:
-            raise AttributeError(f"Config has no '{name}'")
+            raise AttributeError("Config has no '{}'".format(name))
 
     def __setattr__(self, name, value):
         if name.startswith("_") or name in ("DEFAULTS",):

@@ -7,23 +7,28 @@ import time
 import os
 import re
 import signal
+import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Optional
 from pathlib import Path
+from urllib.parse import urlparse, unquote
+import sys
 
 from engine.config import Config
 from engine.utils import (
     extract_filename_from_url,
+    resolve_filename,
     format_size,
     format_speed,
     format_eta,
     sanitize_filename,
+    _content_type_to_ext,
 )
 
 
 class DownloadStatus(Enum):
     QUEUED      = "queued"
+    RESOLVING   = "resolving"
     DOWNLOADING = "downloading"
     PAUSED      = "paused"
     COMPLETED   = "completed"
@@ -33,7 +38,6 @@ class DownloadStatus(Enum):
 
 @dataclass
 class DownloadItem:
-    """Representasi satu download task."""
     id:          str
     url:         str
     filename:    str
@@ -48,10 +52,11 @@ class DownloadItem:
     connections: int   = 0
     created_at:  float = field(default_factory=time.time)
     headers:     dict  = field(default_factory=dict)
+    final_url:   str   = ""
 
-    # Internal — tidak di-compare / repr
-    _process: object = field(default=None, repr=False, compare=False)
-    _thread:  object = field(default=None, repr=False, compare=False)
+    _process:    object = field(default=None, repr=False, compare=False)
+    _thread:     object = field(default=None, repr=False, compare=False)
+    _input_file: object = field(default=None, repr=False, compare=False)
 
     def to_dict(self):
         return {
@@ -75,48 +80,38 @@ class DownloadItem:
 
 
 class DownloadEngine:
-    """Engine download utama menggunakan aria2c sebagai backend."""
+
+    CHROME_UA = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    )
 
     def __init__(self):
         self.cfg = Config()
-        self._downloads = {}          # id -> DownloadItem
+        self._downloads = {}
         self._lock      = threading.Lock()
         self._counter   = 0
         self._on_update   = None
         self._on_complete = None
-
-    # ------------------------------------------------------------------
-    # Callbacks
-    # ------------------------------------------------------------------
+        self._tmp_dir = os.path.join(tempfile.gettempdir(), "fast-dm")
+        os.makedirs(self._tmp_dir, exist_ok=True)
 
     def set_callbacks(self, on_update=None, on_complete=None):
         self._on_update   = on_update
         self._on_complete = on_complete
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def add_download(self, url, filename=None, save_dir=None,
                      headers=None, auto_start=True):
-        """Tambah download baru. Returns download ID."""
         dl_id = self._generate_id()
-
-        filename = sanitize_filename(filename) if filename \
-                   else extract_filename_from_url(url)
         save_dir = save_dir or self.cfg.download_dir
-
         Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-        # Handle duplicate filename
-        filepath = Path(save_dir) / filename
-        if filepath.exists() and self.cfg.auto_file_renaming:
-            base, ext = os.path.splitext(filename)
-            counter = 1
-            while filepath.exists():
-                filename = "{}_{}{}".format(base, counter, ext)
-                filepath = Path(save_dir) / filename
-                counter += 1
+        if filename:
+            filename = sanitize_filename(filename)
+        if not filename:
+            filename = extract_filename_from_url(url)
+        if not filename:
+            filename = "download_{}".format(int(time.time()))
 
         item = DownloadItem(
             id=dl_id, url=url, filename=filename,
@@ -128,18 +123,18 @@ class DownloadEngine:
 
         if auto_start:
             self.start_download(dl_id)
-
         return dl_id
 
     def start_download(self, dl_id):
         with self._lock:
             item = self._downloads.get(dl_id)
-            if not item:
-                return
-            if item.status == DownloadStatus.DOWNLOADING:
+            if not item or item.status == DownloadStatus.DOWNLOADING:
                 return
 
-        item.status = DownloadStatus.DOWNLOADING
+        item.status = DownloadStatus.RESOLVING
+        if self._on_update:
+            self._on_update(item.to_dict())
+
         t = threading.Thread(
             target=self._download_worker,
             args=(dl_id,),
@@ -152,10 +147,13 @@ class DownloadEngine:
     def pause_download(self, dl_id):
         with self._lock:
             item = self._downloads.get(dl_id)
-            if not item or item.status != DownloadStatus.DOWNLOADING:
+            if not item:
+                return
+            if item.status not in (DownloadStatus.DOWNLOADING,
+                                    DownloadStatus.RESOLVING):
                 return
         item.status = DownloadStatus.PAUSED
-        item.speed  = 0
+        item.speed = 0
         self._kill_process(item)
 
     def resume_download(self, dl_id):
@@ -172,14 +170,7 @@ class DownloadEngine:
                 return
         item.status = DownloadStatus.CANCELLED
         self._kill_process(item)
-
-        partial   = Path(item.save_dir) / item.filename
-        aria2ctrl = Path(item.save_dir) / "{}.aria2".format(item.filename)
-        for f in (partial, aria2ctrl):
-            try:
-                f.unlink(missing_ok=True)
-            except OSError:
-                pass
+        self._cleanup(item)
 
     def remove_download(self, dl_id):
         self.cancel_download(dl_id)
@@ -192,83 +183,187 @@ class DownloadEngine:
 
     def get_all_downloads(self):
         with self._lock:
-            return [item.to_dict() for item in self._downloads.values()]
+            return [it.to_dict() for it in self._downloads.values()]
 
     def get_active_count(self):
         return sum(
-            1 for item in self._downloads.values()
-            if item.status == DownloadStatus.DOWNLOADING
+            1 for it in self._downloads.values()
+            if it.status in (DownloadStatus.DOWNLOADING,
+                              DownloadStatus.RESOLVING)
         )
 
     def shutdown(self):
         with self._lock:
             items = list(self._downloads.values())
         for item in items:
-            if item.status == DownloadStatus.DOWNLOADING:
+            if item.status in (DownloadStatus.DOWNLOADING,
+                                DownloadStatus.RESOLVING):
                 item.status = DownloadStatus.PAUSED
                 self._kill_process(item)
 
-    # ------------------------------------------------------------------
-    # Internal helpers
     # ------------------------------------------------------------------
 
     def _generate_id(self):
         self._counter += 1
         return "dl_{}_{}".format(int(time.time()), self._counter)
 
-    def _build_aria2_cmd(self, item):
-        """Build command aria2c yang dioptimasi."""
-        cmd = [
-            "aria2c",
-            "--max-connection-per-server={}".format(self.cfg.max_connections),
-            "--split={}".format(self.cfg.max_connections),
-            "--min-split-size={}".format(self.cfg.min_split_size),
-            "--piece-length={}".format(self.cfg.chunk_size),
-            "--max-overall-download-limit={}".format(self.cfg.max_overall_speed),
-            "--max-tries={}".format(self.cfg.retry_count),
-            "--retry-wait={}".format(self.cfg.retry_wait),
-            "--timeout={}".format(self.cfg.timeout),
-            "--connect-timeout={}".format(self.cfg.timeout),
-            "--disk-cache={}".format(self.cfg.disk_cache_size),
-            "--file-allocation={}".format(self.cfg.file_allocation),
-            "--enable-mmap=true",
-            "--optimize-concurrent-downloads=true",
-            "--stream-piece-selector=geom",
-            "--dir={}".format(item.save_dir),
-            "--out={}".format(item.filename),
-            "--console-log-level=error",
-            "--summary-interval=1",
-            "--human-readable=false",
-            "--show-console-readout=true",
-            "--continue=true",
-            "--auto-file-renaming=false",
-            "--allow-overwrite=true",
-            "--check-certificate=true",
-            "--max-resume-failure-tries=5",
-            "--uri-selector=adaptive",
-        ]
+    def _cleanup(self, item):
+        for suffix in ("", ".aria2"):
+            p = Path(item.save_dir) / "{}{}".format(item.filename, suffix)
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if item._input_file:
+            try:
+                os.unlink(item._input_file)
+            except OSError:
+                pass
+            item._input_file = None
+
+    def _resolve_filename(self, item):
+        """Resolve nama file asli dari server."""
+        try:
+            resolved = resolve_filename(
+                item.url, item.headers, self.CHROME_UA
+            )
+            if resolved:
+                fn = resolved.get("filename", "")
+                if fn and fn != item.filename:
+                    print("[FastDM] Resolved filename: {} -> {}".format(
+                        item.filename, fn), file=sys.stderr)
+                    item.filename = fn
+
+                if resolved.get("final_url"):
+                    item.final_url = resolved["final_url"]
+
+                cl = resolved.get("content_length", 0)
+                if cl and cl > 0:
+                    item.total_size = cl
+
+                # Jika filename masih tanpa ekstensi, tebak dari content-type
+                ct = resolved.get("content_type", "")
+                if ct and '.' not in item.filename:
+                    ext = _content_type_to_ext(ct)
+                    if ext:
+                        item.filename = "{}{}".format(item.filename, ext)
+                        print("[FastDM] Added extension: {}".format(
+                            item.filename), file=sys.stderr)
+
+        except Exception as e:
+            print("[FastDM] Resolve warning: {}".format(e), file=sys.stderr)
+
+        # Handle duplicate
+        filepath = Path(item.save_dir) / item.filename
+        if filepath.exists() and self.cfg.auto_file_renaming:
+            base, ext = os.path.splitext(item.filename)
+            counter = 1
+            while filepath.exists():
+                item.filename = "{}_{}{}".format(base, counter, ext)
+                filepath = Path(item.save_dir) / item.filename
+                counter += 1
+
+    def _create_input_file(self, item):
+        """Buat aria2c input file (untuk URL panjang)."""
+        download_url = item.final_url if item.final_url else item.url
+        input_path = os.path.join(self._tmp_dir, "{}.txt".format(item.id))
+
+        lines = [download_url]
+        lines.append("  dir={}".format(item.save_dir))
+        lines.append("  out={}".format(item.filename))
+        lines.append("  continue=true")
+        lines.append("  allow-overwrite=true")
+        lines.append("  auto-file-renaming=false")
 
         for key, value in item.headers.items():
             kl = key.lower()
             if kl == "user-agent":
-                cmd.append("--user-agent={}".format(value))
+                pass
             elif kl == "referer":
-                cmd.append("--referer={}".format(value))
+                lines.append("  referer={}".format(value))
             elif kl == "cookie":
-                cmd.append("--header=Cookie: {}".format(value))
+                lines.append("  header=Cookie: {}".format(value))
             else:
-                cmd.append("--header={}: {}".format(key, value))
+                lines.append("  header={}: {}".format(key, value))
 
-        cmd.append(item.url)
+        with open(input_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines) + '\n')
+
+        item._input_file = input_path
+        return input_path
+
+    def _build_aria2_cmd(self, item):
+        """Build aria2c command yang kompatibel semua versi."""
+        max_conn = self.cfg.max_connections
+        input_file = self._create_input_file(item)
+
+        cmd = [
+            "aria2c",
+            "--input-file={}".format(input_file),
+
+            # Multi-connection
+            "--max-connection-per-server={}".format(max_conn),
+            "--split={}".format(max_conn),
+            "--min-split-size=1M",
+            "--piece-length=1M",
+
+            # Network
+            "--timeout=30",
+            "--connect-timeout=15",
+            "--lowest-speed-limit=1K",
+            "--max-tries={}".format(self.cfg.retry_count),
+            "--retry-wait={}".format(self.cfg.retry_wait),
+            "--max-resume-failure-tries=5",
+
+            # Disk
+            "--disk-cache=64M",
+            "--file-allocation={}".format(self.cfg.file_allocation),
+
+            # Identity
+            "--user-agent={}".format(self.CHROME_UA),
+
+            # Output
+            "--console-log-level=notice",
+            "--summary-interval=1",
+            "--human-readable=false",
+            "--show-console-readout=true",
+            "--download-result=full",
+
+            # Speed limit
+            "--max-overall-download-limit={}".format(
+                self.cfg.max_overall_speed
+            ),
+
+            # Safety
+            "--check-integrity=false",
+            "--check-certificate=false",
+        ]
+
         return cmd
 
     def _download_worker(self, dl_id):
-        """Worker thread — jalankan aria2c dan parse output."""
         item = self._downloads.get(dl_id)
         if not item:
             return
 
+        # Step 1: Resolve filename
+        self._resolve_filename(item)
+        if self._on_update:
+            self._on_update(item.to_dict())
+
+        if item.status in (DownloadStatus.CANCELLED, DownloadStatus.PAUSED):
+            return
+
+        item.status = DownloadStatus.DOWNLOADING
+        if self._on_update:
+            self._on_update(item.to_dict())
+
+        # Step 2: Download
         cmd = self._build_aria2_cmd(item)
+
+        print("[FastDM] Downloading: {}".format(item.filename), file=sys.stderr)
+        print("[FastDM] Save to: {}/{}".format(item.save_dir, item.filename),
+              file=sys.stderr)
 
         try:
             process = subprocess.Popen(
@@ -281,21 +376,46 @@ class DownloadEngine:
             )
             item._process = process
 
+            # ── Parse output dan cek rename oleh aria2c ──
             self._parse_aria2_output(item, process)
 
             returncode = process.wait()
+            print("[FastDM] aria2c exit: {}".format(returncode), file=sys.stderr)
 
             if returncode == 0:
+                # Cek apakah aria2c me-rename file
+                self._check_actual_filename(item)
                 item.status   = DownloadStatus.COMPLETED
                 item.progress = 100.0
                 item.speed    = 0
                 item.eta      = 0
+
             elif item.status in (DownloadStatus.CANCELLED,
                                   DownloadStatus.PAUSED):
                 pass
+
+            elif returncode == 13:
+                check_file = Path(item.save_dir) / item.filename
+                if check_file.exists() and check_file.stat().st_size > 0:
+                    item.status   = DownloadStatus.COMPLETED
+                    item.progress = 100.0
+                    item.speed    = 0
+                    item.eta      = 0
+                else:
+                    item.status    = DownloadStatus.ERROR
+                    item.error_msg = "File already exists"
             else:
+                exit_msgs = {
+                    2:  "Timeout", 3:  "Not found (404)",
+                    5:  "Too slow", 6:  "Network error",
+                    9:  "Not enough disk space",
+                    19: "DNS failed", 24: "Too many redirects",
+                    25: "Auth failed", 30: "TLS error",
+                }
+                msg = exit_msgs.get(returncode,
+                                    "Exit code {}".format(returncode))
                 item.status    = DownloadStatus.ERROR
-                item.error_msg = "aria2c exit code: {}".format(returncode)
+                item.error_msg = msg
 
         except FileNotFoundError:
             item.status    = DownloadStatus.ERROR
@@ -303,25 +423,69 @@ class DownloadEngine:
         except Exception as exc:
             item.status    = DownloadStatus.ERROR
             item.error_msg = str(exc)
+            import traceback
+            traceback.print_exc()
 
         item._process = None
+
+        # Cleanup temp file
+        if item._input_file:
+            try:
+                os.unlink(item._input_file)
+            except OSError:
+                pass
+            item._input_file = None
 
         if self._on_complete:
             self._on_complete(item.to_dict())
         if self._on_update:
             self._on_update(item.to_dict())
 
+    def _check_actual_filename(self, item):
+        """
+        Setelah download selesai, cek apakah file ada
+        dengan nama yang kita tentukan. Jika tidak,
+        cari file terbaru di folder download.
+        """
+        expected = Path(item.save_dir) / item.filename
+        if expected.exists():
+            return
+
+        # Cari file yang baru saja dibuat (< 5 detik lalu)
+        now = time.time()
+        newest = None
+        newest_time = 0
+
+        try:
+            for f in Path(item.save_dir).iterdir():
+                if f.is_file() and not f.name.endswith('.aria2'):
+                    mtime = f.stat().st_mtime
+                    if (now - mtime) < 5 and mtime > newest_time:
+                        newest = f
+                        newest_time = mtime
+        except OSError:
+            return
+
+        if newest and newest.name != item.filename:
+            print("[FastDM] aria2c saved as: {} (expected: {})".format(
+                newest.name, item.filename), file=sys.stderr)
+            item.filename = newest.name
+
     def _parse_aria2_output(self, item, process):
-        """Parse aria2c stdout untuk progress real-time."""
-        # Pola utama: [#gid downloaded/total(pct%) CN:n DL:speed ETA:t]
-        re_main  = re.compile(
-            r'\[#\w+\s+(\d+)B/(\d+)B\((\d+)%\)\s+CN:(\d+)\s+DL:(\d+)B'
-            r'(?:\s+ETA:(\S+))?'
+        re_progress = re.compile(r'(\d+)B/(\d+)B\((\d+)%\)')
+        re_speed    = re.compile(r'DL:(\d+)')
+        re_cn       = re.compile(r'CN:(\d+)')
+        re_eta      = re.compile(r'ETA:(\S+)')
+        re_size     = re.compile(r'\[#\w+\s+(\d+)B/')
+
+        # Pattern: aria2c menampilkan nama file yang dipakai
+        re_saveas = re.compile(
+            r'(?:Saving|Download|File)\s.*?(?:as|to|named?)[:\s]+(.+)',
+            re.I
         )
-        re_prog  = re.compile(r'(\d+)B/(\d+)B\((\d+)%\)')
-        re_speed = re.compile(r'DL:(\d+)B')
-        re_cn    = re.compile(r'CN:(\d+)')
-        re_eta   = re.compile(r'ETA:(\S+)')
+
+        last_update = 0.0
+        update_interval = 0.2
 
         for line in process.stdout:
             if item.status in (DownloadStatus.CANCELLED,
@@ -332,66 +496,76 @@ class DownloadEngine:
             if not line:
                 continue
 
-            m = re_main.search(line)
+            # Debug: print non-progress lines
+            if not line.startswith('[') and not line.startswith('***'):
+                print("[FastDM] aria2c: {}".format(line), file=sys.stderr)
+
+            # Cek apakah aria2c menampilkan nama file
+            m = re_saveas.search(line)
             if m:
-                item.downloaded  = int(m.group(1))
-                item.total_size  = int(m.group(2))
-                item.progress    = float(m.group(3))
-                item.connections = int(m.group(4))
-                item.speed       = int(m.group(5))
-                if m.group(6):
-                    item.eta = self._parse_eta(m.group(6))
+                path = m.group(1).strip()
+                basename = os.path.basename(path)
+                cleaned = sanitize_filename(basename)
+                if cleaned and '.' in cleaned:
+                    if cleaned != item.filename:
+                        print("[FastDM] aria2c filename: {}".format(cleaned),
+                              file=sys.stderr)
+                        item.filename = cleaned
+
+            # Parse progress
+            mp = re_progress.search(line)
+            if mp:
+                item.downloaded = int(mp.group(1))
+                item.total_size = int(mp.group(2))
+                item.progress   = float(mp.group(3))
             else:
-                mp = re_prog.search(line)
-                if mp:
-                    item.downloaded = int(mp.group(1))
-                    item.total_size = int(mp.group(2))
-                    item.progress   = float(mp.group(3))
-
-                ms = re_speed.search(line)
+                ms = re_size.search(line)
                 if ms:
-                    item.speed = int(ms.group(1))
+                    item.downloaded = int(ms.group(1))
 
-                mc = re_cn.search(line)
-                if mc:
-                    item.connections = int(mc.group(1))
+            ms = re_speed.search(line)
+            if ms:
+                item.speed = int(ms.group(1))
 
-                me = re_eta.search(line)
-                if me:
-                    item.eta = self._parse_eta(me.group(1))
+            mc = re_cn.search(line)
+            if mc:
+                item.connections = int(mc.group(1))
 
-            if self._on_update:
+            me = re_eta.search(line)
+            if me:
+                item.eta = self._parse_eta(me.group(1))
+
+            if item.total_size > 0 and item.progress == 0 and item.downloaded > 0:
+                item.progress = min(
+                    99.9, (item.downloaded / item.total_size) * 100
+                )
+
+            now = time.monotonic()
+            if self._on_update and (now - last_update) >= update_interval:
                 self._on_update(item.to_dict())
+                last_update = now
 
     @staticmethod
     def _parse_eta(eta_str):
-        """Parse ETA string ke detik. '1h2m3s' → 3723"""
         total = 0
         h = re.search(r'(\d+)h', eta_str)
         m = re.search(r'(\d+)m', eta_str)
         s = re.search(r'(\d+)s', eta_str)
-        if h:
-            total += int(h.group(1)) * 3600
-        if m:
-            total += int(m.group(1)) * 60
-        if s:
-            total += int(s.group(1))
+        if h: total += int(h.group(1)) * 3600
+        if m: total += int(m.group(1)) * 60
+        if s: total += int(s.group(1))
         if not h and not m and not s:
-            try:
-                total = int(eta_str)
-            except ValueError:
-                pass
+            try: total = int(eta_str)
+            except ValueError: pass
         return total
 
     def _kill_process(self, item):
-        """Kill proses aria2c dengan bersih."""
         proc = item._process
         if proc and proc.poll() is None:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 proc.wait(timeout=5)
-            except (ProcessLookupError, subprocess.TimeoutExpired,
-                    OSError):
+            except (ProcessLookupError, subprocess.TimeoutExpired, OSError):
                 try:
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 except (ProcessLookupError, OSError):
