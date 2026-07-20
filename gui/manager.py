@@ -314,6 +314,18 @@ class ManagerWindow(Gtk.Window):
         self.set_position(Gtk.WindowPosition.CENTER)
         self.connect("delete-event", self._on_quit)
 
+        # ── Set window icon ──
+        try:
+            import os
+            script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            icon_path = os.path.join(script_dir, "fast-dm-icon.png")
+            if not os.path.exists(icon_path):
+                icon_path = os.path.join(script_dir, "extension", "icons", "icon128.png")
+            if os.path.exists(icon_path):
+                self.set_icon_from_file(icon_path)
+        except Exception:
+            pass
+
         # Apply CSS
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS)
