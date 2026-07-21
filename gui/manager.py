@@ -462,30 +462,46 @@ class ManagerWindow(Gtk.Window):
 
         row = DownloadRow(dl_data)
 
-        # Connect buttons
+        # ── Pause: hentikan sementara ──
         row.pause_btn.connect(
             "clicked", lambda _b: self.engine.pause_download(dl_id))
+
+        # ── Resume: lanjutkan dari pause/error ──
         row.resume_btn.connect(
             "clicked", lambda _b: self.engine.resume_download(dl_id))
+
+        # ── Retry: coba ulang dari error ──
         row.retry_btn.connect(
             "clicked", lambda _b: self.engine.retry_download(dl_id))
-        row.cancel_btn.connect(
-            "clicked", lambda _b: self.engine.cancel_download(dl_id))
+
+        # ── Cancel: batalkan DAN hapus file partial ──
+        def on_cancel(_b):
+            self.engine.cancel_download(dl_id)
+        row.cancel_btn.connect("clicked", on_cancel)
+
+        # ── Open Folder: buka lokasi file ──
         row.open_btn.connect(
             "clicked", lambda _b, d=dl_data: self._open_folder(d))
-        row.remove_btn.connect(
-            "clicked", lambda _b: self._remove_row(dl_id))
+
+        # ── Remove: hapus dari daftar, file TETAP ada ──
+        def on_remove(_b):
+            r = self._rows.pop(dl_id, None)
+            if r:
+                self.listbox.remove(r)
+            self.engine.clear_download(dl_id)
+        row.remove_btn.connect("clicked", on_remove)
 
         self._rows[dl_id] = row
         self.listbox.prepend(row)
         self.listbox.show_all()
 
     def _remove_row(self, dl_id):
-        """Remove row dari list dan engine."""
+        """Remove row dari list. TIDAK hapus file yang sudah didownload."""
         row = self._rows.pop(dl_id, None)
         if row:
             self.listbox.remove(row)
-        self.engine.remove_download(dl_id)
+        # Pakai clear_download, bukan remove_download
+        self.engine.clear_download(dl_id)
 
     def _open_folder(self, dl_data):
         subprocess.Popen(
@@ -495,13 +511,21 @@ class ManagerWindow(Gtk.Window):
         )
 
     def _on_clear_done(self, _w):
+        """
+        Hapus semua entri yang sudah COMPLETED atau CANCELLED dari daftar.
+        File yang sudah didownload TETAP ADA di disk.
+        """
         done_ids = []
         for dl_id in list(self._rows.keys()):
             d = self.engine.get_download(dl_id)
             if d and d["status"] in ("completed", "cancelled"):
                 done_ids.append(dl_id)
+
         for dl_id in done_ids:
-            self._remove_row(dl_id)
+            row = self._rows.pop(dl_id, None)
+            if row:
+                self.listbox.remove(row)
+            self.engine.clear_download(dl_id)
 
     # Engine callbacks
     def _cb_update(self, dl_data):
