@@ -595,3 +595,87 @@ def is_video_url(url, content_type=""):
     except Exception:
         pass
     return False
+
+def _validate_url(url):
+    """
+    Validasi URL sebelum diteruskan ke aria2c.
+
+    Cek:
+    1. Scheme harus http/https/ftp
+    2. Tidak ada karakter berbahaya (command injection)
+    3. Panjang URL masuk akal (max 8192 karakter)
+    4. Hostname tidak kosong
+    """
+    if not url or not isinstance(url, str):
+        return False, "URL is empty or invalid type"
+
+    # Batas panjang URL
+    if len(url) > 8192:
+        return False, "URL too long (max 8192 chars)"
+
+    # Cek scheme
+    url_lower = url.lower().strip()
+    allowed_schemes = ("http://", "https://", "ftp://")
+    if not any(url_lower.startswith(s) for s in allowed_schemes):
+        return False, "URL scheme not allowed. Use http/https/ftp"
+
+    # Parse URL
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+
+        # Hostname tidak boleh kosong
+        if not parsed.hostname:
+            return False, "URL has no hostname"
+
+        # Hostname tidak boleh localhost / loopback
+        # (mencegah SSRF ke service lokal)
+        blocked_hosts = {
+            "localhost", "127.0.0.1", "::1",
+            "0.0.0.0", "[::]",
+        }
+        if parsed.hostname.lower() in blocked_hosts:
+            return False, "URL points to local address (blocked)"
+
+        # Cek port jika ada (hanya port standar)
+        if parsed.port:
+            if parsed.port not in (
+                80, 443, 8080, 8443, 21,   # HTTP, HTTPS, alt, FTP
+                2052, 2053, 2082, 2083,      # Cloudflare alt ports
+                8000, 8001, 8888, 3000,      # Common dev ports
+                1024, 65535                  # Range check
+            ):
+                # Izinkan semua port >= 1024 (non-privileged)
+                if parsed.port < 1024:
+                    return False, "Port {} not allowed".format(parsed.port)
+
+    except Exception as e:
+        return False, "URL parse error: {}".format(e)
+
+    # Cek karakter berbahaya yang bisa inject command ke aria2c
+    # aria2c menerima input via file, tapi tetap perlu dibersihkan
+    dangerous_patterns = [
+        '\x00',          # null byte
+        '\r', '\n',      # newline (bisa inject ke input file)
+        '`',             # backtick
+        '$(',            # command substitution
+        '${',            # variable expansion
+    ]
+    for pattern in dangerous_patterns:
+        if pattern in url:
+            return False, "URL contains dangerous characters"
+
+    return True, ""
+
+
+def sanitize_header_value(value):
+    """
+    Sanitasi nilai header HTTP.
+    Hapus karakter yang bisa inject header baru.
+    """
+    if not value or not isinstance(value, str):
+        return ""
+    # Hapus CRLF (HTTP header injection)
+    value = value.replace('\r', '').replace('\n', '')
+    # Batasi panjang
+    return value[:2048]

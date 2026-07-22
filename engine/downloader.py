@@ -317,67 +317,129 @@ class DownloadEngine:
                     counter += 1
 
     def _create_input_file(self, item):
-        """Buat aria2c input file."""
+        """
+        Buat aria2c input file dengan sanitasi penuh.
+        
+        KEAMANAN:
+        - Header value di-sanitasi (hapus CRLF injection)
+        - Filename di-sanitasi (hapus path traversal)
+        - URL sudah divalidasi sebelum sampai sini
+        """
+        from engine.utils import sanitize_header_value
+
         download_url = item.final_url if item.final_url else item.url
         input_path = os.path.join(self._tmp_dir, "{}.txt".format(item.id))
 
+        # Pastikan filename tidak ada path traversal
+        safe_filename = os.path.basename(item.filename)
+        safe_filename = safe_filename.replace('/', '_').replace('\\', '_')
+        if not safe_filename:
+            safe_filename = "download_{}".format(int(time.time()))
+
+        # Pastikan save_dir adalah path absolut yang valid
+        safe_dir = os.path.realpath(item.save_dir)
+        # Tidak boleh keluar dari home directory
+        home = os.path.expanduser("~")
+        allowed_dirs = [home, "/tmp", "/var/tmp"]
+        dir_allowed = any(
+            safe_dir.startswith(d) for d in allowed_dirs
+        )
+        if not dir_allowed:
+            safe_dir = str(Path.home() / "Downloads")
+
         lines = [download_url]
-        lines.append("  dir={}".format(item.save_dir))
-        lines.append("  out={}".format(item.filename))
+        lines.append("  dir={}".format(safe_dir))
+        lines.append("  out={}".format(safe_filename))
         lines.append("  continue=true")
         lines.append("  allow-overwrite=true")
         lines.append("  auto-file-renaming=false")
 
+        # Sanitasi setiap header
         for key, value in item.headers.items():
-            kl = key.lower()
+            # Sanitasi key: hanya alfanumerik dan tanda hubung
+            safe_key = re.sub(r'[^a-zA-Z0-9\-]', '', str(key))
+            if not safe_key:
+                continue
+
+            safe_value = sanitize_header_value(str(value))
+            if not safe_value:
+                continue
+
+            kl = safe_key.lower()
             if kl == "user-agent":
-                pass
+                pass  # Handled globally
             elif kl == "referer":
-                lines.append("  referer={}".format(value))
+                lines.append("  referer={}".format(safe_value))
             elif kl == "cookie":
-                lines.append("  header=Cookie: {}".format(value))
+                lines.append("  header=Cookie: {}".format(safe_value))
             else:
-                lines.append("  header={}: {}".format(key, value))
+                lines.append("  header={}: {}".format(safe_key, safe_value))
 
         with open(input_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines) + '\n')
+
+        # Pastikan file hanya bisa dibaca oleh owner
+        os.chmod(input_path, 0o600)
 
         item._input_file = input_path
         return input_path
 
     def _build_aria2_cmd(self, item):
+        """
+        Build aria2c command yang aman.
+        
+        KEAMANAN:
+        - check-certificate=true (SSL verify aktif)
+        - Tidak ada shell=True (no shell injection)
+        - URL via input file (no command line exposure)
+        """
         max_conn = self.cfg.max_connections
         input_file = self._create_input_file(item)
 
         cmd = [
             "aria2c",
             "--input-file={}".format(input_file),
+
+            # ── Multi-connection ──
             "--max-connection-per-server={}".format(max_conn),
             "--split={}".format(max_conn),
             "--min-split-size=1M",
             "--piece-length=1M",
+
+            # ── Network ──
             "--timeout=30",
             "--connect-timeout=15",
             "--lowest-speed-limit=1K",
             "--max-tries={}".format(self.cfg.retry_count),
             "--retry-wait={}".format(self.cfg.retry_wait),
             "--max-resume-failure-tries=5",
+
+            # ── Disk ──
             "--disk-cache=64M",
             "--file-allocation={}".format(self.cfg.file_allocation),
+
+            # ── Identity ──
             "--user-agent={}".format(self.CHROME_UA),
+
+            # ── Output ──
             "--console-log-level=notice",
             "--summary-interval=1",
             "--human-readable=false",
             "--show-console-readout=true",
             "--download-result=full",
+
+            # ── Speed limit ──
             "--max-overall-download-limit={}".format(
                 self.cfg.max_overall_speed
             ),
+
+            # ── SECURITY: SSL verification aktif ──
+            "--check-certificate=true",
             "--check-integrity=false",
-            "--check-certificate=false",
         ]
 
         return cmd
+
 
     def _download_worker(self, dl_id):
         item = self._downloads.get(dl_id)

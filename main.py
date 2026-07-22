@@ -24,20 +24,28 @@ _SOCKET_PATH = "/tmp/fast-dm.sock"
 
 def _start_socket_server(engine, window):
     """
-    Listen pada Unix socket untuk menerima request dari native host.
-    Dijalankan di daemon thread agar tidak memblokir GTK main loop.
+    Unix socket server dengan keamanan:
+    - Permission 0o600 (hanya owner)
+    - Validasi pesan yang masuk
     """
     import socket
     import threading
+    from engine.native_host import get_secret_token
+    from engine.utils import _validate_url
+
+    SOCKET_PATH = "/tmp/fast-dm-{}.sock".format(os.getuid())
 
     try:
-        os.unlink(_SOCKET_PATH)
+        os.unlink(SOCKET_PATH)
     except FileNotFoundError:
         pass
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(_SOCKET_PATH)
-    os.chmod(_SOCKET_PATH, 0o600)
+    server.bind(SOCKET_PATH)
+
+    # Hanya owner yang bisa akses socket
+    os.chmod(SOCKET_PATH, 0o600)
+
     server.listen(5)
     server.settimeout(1.0)
 
@@ -52,23 +60,52 @@ def _start_socket_server(engine, window):
 
             try:
                 chunks = []
+                conn.settimeout(5.0)  # Timeout per koneksi
                 while True:
                     chunk = conn.recv(4096)
                     if not chunk:
                         break
                     chunks.append(chunk)
+                    # Batas ukuran pesan (max 64KB)
+                    if sum(len(c) for c in chunks) > 65536:
+                        break
                 conn.close()
 
                 data = b"".join(chunks)
                 if data:
-                    msg = json.loads(data.decode("utf-8"))
+                    try:
+                        msg = json.loads(data.decode("utf-8"))
+                    except json.JSONDecodeError:
+                        continue
+
+                    # Validasi action
+                    action = msg.get("action", "")
+                    allowed = {
+                        "download", "ping", "list",
+                        "pause", "resume", "cancel"
+                    }
+                    if action not in allowed:
+                        continue
+
+                    # Validasi URL jika ada
+                    url = msg.get("url", "")
+                    if url:
+                        ok, _ = _validate_url(url)
+                        if not ok:
+                            continue
+
                     _handle_message(msg, engine, window)
+
             except Exception:
                 pass
 
-    t = threading.Thread(target=_listen, daemon=True, name="socket-server")
+    t = threading.Thread(
+        target=_listen, daemon=True, name="socket-server"
+    )
     t.start()
 
+    # Simpan path socket untuk cleanup
+    return SOCKET_PATH
 
 def _handle_message(msg, engine, window=None):
     """Dispatch message dari extension ke engine/window."""
