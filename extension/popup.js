@@ -1,33 +1,29 @@
-/**
- * Fast DM - Popup Logic
- */
-
 document.addEventListener("DOMContentLoaded", () => {
-  const urlInput = document.getElementById("url-input");
-  const downloadBtn = document.getElementById("download-btn");
-  const scanBtn = document.getElementById("scan-btn");
-  const videoList = document.getElementById("video-list");
-  const statusDot = document.getElementById("status-dot");
-  const statusText = document.getElementById("status-text");
+  const urlInput        = document.getElementById("url-input");
+  const downloadBtn     = document.getElementById("download-btn");
+  const scanBtn         = document.getElementById("scan-btn");
+  const videoList       = document.getElementById("video-list");
+  const statusDot       = document.getElementById("status-dot");
+  const statusText      = document.getElementById("status-text");
   const toggleIntercept = document.getElementById("toggle-intercept");
-  const toggleEnabled = document.getElementById("toggle-enabled");
+  const toggleEnabled   = document.getElementById("toggle-enabled");
 
-  // ===== Check Connection =====
+  // ── Check Connection + Auto Register ──
   function checkConnection() {
     chrome.runtime.sendMessage({ action: "ping" }, (response) => {
       if (chrome.runtime.lastError || !response || !response.success) {
         statusDot.className = "status-dot disconnected";
-        statusText.textContent = "Fast DM is not running";
+        statusText.textContent = "Fast DM is not running. Launch: fast-dm";
       } else {
         statusDot.className = "status-dot connected";
-        statusText.textContent = "Connected to Fast DM";
+        statusText.textContent = "Connected to Fast DM ✓";
       }
     });
   }
 
   checkConnection();
 
-  // ===== Download URL =====
+  // ── Download URL ──
   downloadBtn.addEventListener("click", () => {
     const url = urlInput.value.trim();
     if (!url) return;
@@ -42,10 +38,10 @@ document.addEventListener("DOMContentLoaded", () => {
             urlInput.placeholder = "Paste download URL...";
           }, 2000);
         } else {
-          urlInput.placeholder = "✕ Failed to send";
+          urlInput.placeholder = "✕ Failed — is Fast DM running?";
           setTimeout(() => {
             urlInput.placeholder = "Paste download URL...";
-          }, 2000);
+          }, 3000);
         }
       }
     );
@@ -55,7 +51,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (e.key === "Enter") downloadBtn.click();
   });
 
-  // Paste from clipboard on focus
+  // Auto-paste
   urlInput.addEventListener("focus", async () => {
     try {
       const text = await navigator.clipboard.readText();
@@ -65,12 +61,10 @@ document.addEventListener("DOMContentLoaded", () => {
           urlInput.select();
         }
       }
-    } catch (e) {
-      // Clipboard permission denied - ignore
-    }
+    } catch (e) { /* ignore */ }
   });
 
-  // ===== Scan Videos =====
+  // ── Scan Videos ──
   scanBtn.addEventListener("click", () => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
@@ -80,14 +74,16 @@ document.addEventListener("DOMContentLoaded", () => {
         { action: "detectVideos" },
         (response) => {
           if (chrome.runtime.lastError) {
-            videoList.innerHTML = '<div class="empty-text">Cannot scan this page</div>';
+            videoList.innerHTML =
+              '<div class="empty-text">Cannot scan this page</div>';
             return;
           }
 
           const videos = response?.videos || [];
 
           if (videos.length === 0) {
-            videoList.innerHTML = '<div class="empty-text">No videos detected</div>';
+            videoList.innerHTML =
+              '<div class="empty-text">No videos detected</div>';
             return;
           }
 
@@ -133,11 +129,11 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // ===== Settings =====
+  // ── Settings ──
   chrome.runtime.sendMessage({ action: "getConfig" }, (cfg) => {
     if (cfg) {
       toggleIntercept.checked = cfg.interceptDownloads !== false;
-      toggleEnabled.checked = cfg.enabled !== false;
+      toggleEnabled.checked   = cfg.enabled !== false;
     }
   });
 

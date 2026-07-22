@@ -1,8 +1,3 @@
-/**
- * Fast Download Manager - Background Service Worker
- * v2: Mengirim filename dari Content-Disposition & URL ke native host
- */
-
 const NATIVE_HOST_NAME = "com.fastdm.native";
 
 const DEFAULT_CONFIG = {
@@ -34,7 +29,71 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 
-// ========== Native Messaging ==========
+// ═══════════════════════════════════════════════
+// Auto-Register Extension ID
+// ═══════════════════════════════════════════════
+
+/**
+ * Kirim Extension ID ke native host saat pertama kali jalan.
+ * Native host akan otomatis update manifest.
+ */
+function registerExtensionId() {
+  const extId = chrome.runtime.id;
+  if (!extId) return;
+
+  chrome.storage.local.get("registered", (result) => {
+    // Selalu kirim register saat startup untuk memastikan
+    // manifest selalu up-to-date
+    sendToNative({
+      action: "register",
+      extension_id: extId
+    }).then((response) => {
+      if (response && response.success) {
+        chrome.storage.local.set({ registered: true });
+        console.log("[FastDM] Extension registered:", extId);
+      }
+    }).catch((err) => {
+      console.log("[FastDM] Register will retry on next connection:", err.message);
+    });
+  });
+}
+
+// Register saat extension di-load
+registerExtensionId();
+
+// Register ulang saat Chrome restart
+chrome.runtime.onStartup.addListener(() => {
+  registerExtensionId();
+});
+
+// Register saat pertama kali install
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason === "install" || details.reason === "update") {
+    registerExtensionId();
+  }
+
+  // Context menus
+  chrome.contextMenus.create({
+    id: "fastdm-download-link",
+    title: "⚡ Download with Fast DM",
+    contexts: ["link"],
+  });
+  chrome.contextMenus.create({
+    id: "fastdm-download-video",
+    title: "⚡ Download Video with Fast DM",
+    contexts: ["video", "audio"],
+  });
+  chrome.contextMenus.create({
+    id: "fastdm-download-image",
+    title: "⚡ Download Image with Fast DM",
+    contexts: ["image"],
+  });
+});
+
+
+// ═══════════════════════════════════════════════
+// Native Messaging
+// ═══════════════════════════════════════════════
 
 function sendToNative(message) {
   return new Promise((resolve, reject) => {
@@ -50,11 +109,7 @@ function sendToNative(message) {
   });
 }
 
-/**
- * Kirim download ke Fast DM dengan nama file yang benar.
- */
 async function sendDownload(url, filename = null, headers = {}) {
-  // Jika filename belum ada, extract dari URL
   if (!filename) {
     try {
       const urlObj = new URL(url);
@@ -62,10 +117,7 @@ async function sendDownload(url, filename = null, headers = {}) {
       const parts = path.split("/").filter(Boolean);
       if (parts.length > 0) {
         const last = parts[parts.length - 1];
-        // Hanya pakai jika terlihat seperti nama file (ada ekstensi)
-        if (last.includes(".")) {
-          filename = last;
-        }
+        if (last.includes(".")) filename = last;
       }
     } catch (e) { /* ignore */ }
   }
@@ -75,6 +127,7 @@ async function sendDownload(url, filename = null, headers = {}) {
     url: url,
     filename: filename,
     headers: headers,
+    extension_id: chrome.runtime.id,
   };
 
   try {
@@ -96,7 +149,9 @@ function showBadge(text, color) {
 }
 
 
-// ========== Download Interception ==========
+// ═══════════════════════════════════════════════
+// Download Interception
+// ═══════════════════════════════════════════════
 
 chrome.downloads.onCreated.addListener((downloadItem) => {
   if (!config.enabled || !config.interceptDownloads) return;
@@ -108,21 +163,14 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
     chrome.downloads.cancel(downloadItem.id, () => {
       chrome.downloads.erase({ id: downloadItem.id });
 
-      // ── Extract filename dari browser download item ──
       let filename = null;
-
-      // Chrome menyediakan filename di downloadItem
       if (downloadItem.filename) {
-        // downloadItem.filename berisi full path, ambil basename
         const parts = downloadItem.filename.replace(/\\/g, "/").split("/");
         filename = parts[parts.length - 1];
       }
 
-      // Headers dari browser
       const headers = {};
-      if (downloadItem.referrer) {
-        headers["Referer"] = downloadItem.referrer;
-      }
+      if (downloadItem.referrer) headers["Referer"] = downloadItem.referrer;
 
       sendDownload(url, filename, headers);
     });
@@ -136,7 +184,6 @@ function shouldInterceptUrl(url, fileSize, mimeType) {
     if (urlLower.includes(pattern)) return false;
   }
 
-  // Cek ekstensi di URL path (bukan query string)
   try {
     const path = new URL(url).pathname.toLowerCase();
     const allExts = [...config.videoExtensions, ...config.fileExtensions];
@@ -145,7 +192,6 @@ function shouldInterceptUrl(url, fileSize, mimeType) {
     }
   } catch (e) { /* ignore */ }
 
-  // Cek MIME type
   if (mimeType) {
     const interceptMimes = [
       "video/", "audio/",
@@ -160,47 +206,24 @@ function shouldInterceptUrl(url, fileSize, mimeType) {
     }
   }
 
-  // Cek file size
   if (fileSize && fileSize > config.interceptMinSize) return true;
 
   return false;
 }
 
 
-// ========== Context Menu ==========
-
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: "fastdm-download-link",
-    title: "⚡ Download with Fast DM",
-    contexts: ["link"],
-  });
-  chrome.contextMenus.create({
-    id: "fastdm-download-video",
-    title: "⚡ Download Video with Fast DM",
-    contexts: ["video", "audio"],
-  });
-  chrome.contextMenus.create({
-    id: "fastdm-download-image",
-    title: "⚡ Download Image with Fast DM",
-    contexts: ["image"],
-  });
-});
+// ═══════════════════════════════════════════════
+// Context Menu
+// ═══════════════════════════════════════════════
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   let url = null;
   let filename = null;
 
   switch (info.menuItemId) {
-    case "fastdm-download-link":
-      url = info.linkUrl;
-      break;
-    case "fastdm-download-video":
-      url = info.srcUrl;
-      break;
-    case "fastdm-download-image":
-      url = info.srcUrl;
-      break;
+    case "fastdm-download-link":  url = info.linkUrl; break;
+    case "fastdm-download-video": url = info.srcUrl;  break;
+    case "fastdm-download-image": url = info.srcUrl;  break;
   }
 
   if (!url) return;
@@ -208,7 +231,6 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   const headers = {};
   if (info.pageUrl) headers["Referer"] = info.pageUrl;
 
-  // Extract filename dari URL (bersih, tanpa query string)
   try {
     const path = new URL(url).pathname;
     const decoded = decodeURIComponent(path);
@@ -219,17 +241,13 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     }
   } catch (e) { /* ignore */ }
 
-  // Untuk image, jika tidak ada filename, coba dari alt text
-  if (!filename && info.menuItemId === "fastdm-download-image") {
-    // Fallback
-    filename = null;
-  }
-
   sendDownload(url, filename, headers);
 });
 
 
-// ========== Messages ==========
+// ═══════════════════════════════════════════════
+// Messages
+// ═══════════════════════════════════════════════
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "download") {
@@ -259,5 +277,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(r => sendResponse(r))
       .catch(e => sendResponse({ success: false, error: e.message }));
     return true;
+  }
+  if (message.action === "getExtensionId") {
+    sendResponse({ id: chrome.runtime.id });
+    return false;
   }
 });

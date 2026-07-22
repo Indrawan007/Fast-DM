@@ -108,10 +108,16 @@ def _start_socket_server(engine, window):
     return SOCKET_PATH
 
 def _handle_message(msg, engine, window=None):
-    """Dispatch message dari extension ke engine/window."""
+    """Dispatch message dari extension."""
     action = msg.get("action", "")
 
-    if action == "download":
+    if action == "register":
+        ext_id = msg.get("extension_id", "")
+        from engine.native_host import register_extension_id
+        ok, message = register_extension_id(ext_id)
+        return {"success": ok, "message": message}
+
+    elif action == "download":
         url      = msg.get("url", "")
         filename = msg.get("filename")
         headers  = msg.get("headers", {})
@@ -122,7 +128,9 @@ def _handle_message(msg, engine, window=None):
                 url, filename=filename, headers=headers
             )
         else:
-            dl_id = engine.add_download(url, filename=filename, headers=headers)
+            dl_id = engine.add_download(
+                url, filename=filename, headers=headers
+            )
         return {"success": True, "id": dl_id}
 
     elif action == "ping":
