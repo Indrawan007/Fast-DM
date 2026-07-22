@@ -1,9 +1,5 @@
 
----
 
-# Versi README yang lebih rapi dan lebih singkat
-
-Kalau kamu mau tampilan yang lebih simpel, pakai ini:
 
 ```md
 # Fast-DM
