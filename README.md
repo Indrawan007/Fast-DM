@@ -1,10 +1,7 @@
-
-
-
 ```md
 # Fast-DM
 
-Fast-DM adalah aplikasi **Download Manager untuk Linux** dengan dukungan **browser extension** untuk mempermudah pengiriman link download ke aplikasi.
+Fast-DM adalah aplikasi **Download Manager untuk Linux** dengan dukungan **browser extension** untuk mempermudah pengiriman tautan unduh ke aplikasi.
 
 ## Download
 👉 https://github.com/Indrawan007/Fast-DM/releases/tag/v.1.1.0
