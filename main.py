@@ -6,7 +6,6 @@ import os
 import json
 import signal
 
-# Pastikan direktori project ada di path
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
@@ -14,38 +13,26 @@ if _HERE not in sys.path:
 from engine import DownloadEngine, NativeHost, Config
 from engine.utils import check_aria2
 
+_SOCKET_PATH = "/tmp/fast-dm-{}.sock".format(os.getuid())
 
-# --------------------------------------------------------------------------
-# IPC via Unix Domain Socket
-# --------------------------------------------------------------------------
 
-_SOCKET_PATH = "/tmp/fast-dm.sock"
-
+# ══════════════════════════════════════════════════════════
+# Socket Server
+# ══════════════════════════════════════════════════════════
 
 def _start_socket_server(engine, window):
-    """
-    Unix socket server dengan keamanan:
-    - Permission 0o600 (hanya owner)
-    - Validasi pesan yang masuk
-    """
+    """Unix socket server — terima request dari native host."""
     import socket
     import threading
-    from engine.native_host import get_secret_token
-    from engine.utils import _validate_url
-
-    SOCKET_PATH = "/tmp/fast-dm-{}.sock".format(os.getuid())
 
     try:
-        os.unlink(SOCKET_PATH)
+        os.unlink(_SOCKET_PATH)
     except FileNotFoundError:
         pass
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(SOCKET_PATH)
-
-    # Hanya owner yang bisa akses socket
-    os.chmod(SOCKET_PATH, 0o600)
-
+    server.bind(_SOCKET_PATH)
+    os.chmod(_SOCKET_PATH, 0o600)
     server.listen(5)
     server.settimeout(1.0)
 
@@ -60,13 +47,12 @@ def _start_socket_server(engine, window):
 
             try:
                 chunks = []
-                conn.settimeout(5.0)  # Timeout per koneksi
+                conn.settimeout(5.0)
                 while True:
                     chunk = conn.recv(4096)
                     if not chunk:
                         break
                     chunks.append(chunk)
-                    # Batas ukuran pesan (max 64KB)
                     if sum(len(c) for c in chunks) > 65536:
                         break
                 conn.close()
@@ -78,37 +64,21 @@ def _start_socket_server(engine, window):
                     except json.JSONDecodeError:
                         continue
 
-                    # Validasi action
-                    action = msg.get("action", "")
-                    allowed = {
-                        "download", "ping", "list",
-                        "pause", "resume", "cancel"
-                    }
-                    if action not in allowed:
-                        continue
-
-                    # Validasi URL jika ada
-                    url = msg.get("url", "")
-                    if url:
-                        ok, _ = _validate_url(url)
-                        if not ok:
-                            continue
-
                     _handle_message(msg, engine, window)
 
             except Exception:
                 pass
 
-    t = threading.Thread(
-        target=_listen, daemon=True, name="socket-server"
-    )
+    t = threading.Thread(target=_listen, daemon=True, name="socket-server")
     t.start()
 
-    # Simpan path socket untuk cleanup
-    return SOCKET_PATH
+
+# ══════════════════════════════════════════════════════════
+# Message Handler
+# ══════════════════════════════════════════════════════════
 
 def _handle_message(msg, engine, window=None):
-    """Dispatch message dari extension."""
+    """Dispatch message dari extension ke engine/window."""
     action = msg.get("action", "")
 
     if action == "register":
@@ -154,9 +124,9 @@ def _handle_message(msg, engine, window=None):
     return {"success": False, "error": "Unknown action: {}".format(action)}
 
 
-# --------------------------------------------------------------------------
+# ══════════════════════════════════════════════════════════
 # GUI Mode
-# --------------------------------------------------------------------------
+# ══════════════════════════════════════════════════════════
 
 def run_gui():
     import gi
@@ -174,19 +144,35 @@ def run_gui():
     Gtk.main()
 
 
-# --------------------------------------------------------------------------
+# ══════════════════════════════════════════════════════════
 # Native Host Mode
-# --------------------------------------------------------------------------
+# ══════════════════════════════════════════════════════════
 
 def run_native_host():
     """
-    Spawn oleh Chrome saat extension mengirim message.
-    Forward pesan ke GUI process via Unix socket.
+    Spawn oleh Chrome saat extension kirim message.
+    Forward ke GUI via Unix socket.
     """
     import socket
     import time
 
     def _forward(msg):
+        # Handle register langsung di sini juga
+        # (GUI mungkin belum berjalan saat register pertama kali)
+        action = msg.get("action", "")
+
+        if action == "register":
+            ext_id = msg.get("extension_id", "")
+            from engine.native_host import register_extension_id
+            ok, message = register_extension_id(ext_id)
+            # Juga coba forward ke GUI jika sedang berjalan
+            _try_forward_to_gui(msg)
+            return {"success": ok, "message": message}
+
+        return _try_forward_to_gui(msg)
+
+    def _try_forward_to_gui(msg):
+        """Coba kirim ke GUI process via socket."""
         try:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.settimeout(3)
@@ -197,7 +183,7 @@ def run_native_host():
             return {"success": True}
 
         except (ConnectionRefusedError, FileNotFoundError):
-            # GUI belum jalan — launch it
+            # GUI tidak berjalan — launch
             import subprocess
             subprocess.Popen(
                 [sys.executable, os.path.abspath(__file__)],
@@ -216,26 +202,26 @@ def run_native_host():
                 sock.shutdown(socket.SHUT_WR)
                 sock.close()
                 return {"success": True, "note": "GUI started"}
-            except Exception as exc2:
-                return {"success": False, "error": str(exc2)}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
 
-        except Exception as exc:
-            return {"success": False, "error": str(exc)}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     host = NativeHost(_forward)
     host.run()
 
 
-# --------------------------------------------------------------------------
+# ══════════════════════════════════════════════════════════
 # Entry Point
-# --------------------------------------------------------------------------
+# ══════════════════════════════════════════════════════════
 
 def main():
     if not check_aria2():
-        print("=" * 55)
+        print("=" * 50)
         print("ERROR: aria2c not found.")
-        print("Install it with:  sudo apt install aria2")
-        print("=" * 55)
+        print("Install: sudo apt install aria2")
+        print("=" * 50)
         sys.exit(1)
 
     signal.signal(signal.SIGINT, signal.SIG_DFL)
