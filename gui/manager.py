@@ -496,11 +496,10 @@ class ManagerWindow(Gtk.Window):
         self.listbox.show_all()
 
     def _remove_row(self, dl_id):
-        """Remove row dari list. TIDAK hapus file yang sudah didownload."""
+        """Remove dari daftar. File TETAP ada di disk."""
         row = self._rows.pop(dl_id, None)
         if row:
             self.listbox.remove(row)
-        # Pakai clear_download, bukan remove_download
         self.engine.clear_download(dl_id)
 
     def _open_folder(self, dl_data):
@@ -511,17 +510,13 @@ class ManagerWindow(Gtk.Window):
         )
 
     def _on_clear_done(self, _w):
-        """
-        Hapus semua entri yang sudah COMPLETED atau CANCELLED dari daftar.
-        File yang sudah didownload TETAP ADA di disk.
-        """
-        done_ids = []
+        to_remove = []
         for dl_id in list(self._rows.keys()):
             d = self.engine.get_download(dl_id)
             if d and d["status"] in ("completed", "cancelled"):
-                done_ids.append(dl_id)
+                to_remove.append(dl_id)
 
-        for dl_id in done_ids:
+        for dl_id in to_remove:
             row = self._rows.pop(dl_id, None)
             if row:
                 self.listbox.remove(row)

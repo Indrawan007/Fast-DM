@@ -220,6 +220,29 @@ class DownloadEngine:
         with self._lock:
             self._downloads.pop(dl_id, None)
 
+    def clear_download(self, dl_id):
+        with self._lock:
+            item = self._downloads.get(dl_id)
+            if not item:
+                return
+
+            # Jika masih aktif, pause dulu
+            if item.status in (DownloadStatus.DOWNLOADING,
+                                DownloadStatus.RESOLVING):
+                item.status = DownloadStatus.PAUSED
+                self._kill_process(item)
+
+            # Cleanup HANYA temp input file, BUKAN file download
+            if item._input_file:
+                try:
+                    os.unlink(item._input_file)
+                except OSError:
+                    pass
+                item._input_file = None
+
+            # Hapus dari daftar
+            self._downloads.pop(dl_id, None)
+
     def get_download(self, dl_id):
         item = self._downloads.get(dl_id)
         return item.to_dict() if item else None
