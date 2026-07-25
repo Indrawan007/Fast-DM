@@ -1,15 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Fast Download Manager",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "description": "Intercept downloads and send to Fast DM for maximum speed",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzcnUNRMxVZs2b05va7W7R5vKtJBHx5yGEPKJPGVRNGWfZ5QlbWYMvOJrDwDyhbrq27HZ7Z1u8Q1q+PjlFYTzITmC8kw5Z4ZxF55ccyKKRTrXk4UC+WGbPuNX0Ewd32CYu0wNUmZGOH0POhTWZHT4JB0lwDa2TWaQ5U8E8CT8iO7PKnE7cOir2f55O3vQHpPGtVQ/BiI1b3TWWdueD3KKWeWZEtN0FTkSddSXDyPYrKpz7alSMVPb/umpXnJZK81msU4DhGI6gbZ9VpO5onP7Z4Mq1lciIGu+ITYAq+UPKJmc6+96YGCwujPYRxk5j+iN0IUHGloSXXGYIt0KJDH1xwIDAQAB",
   "permissions": [
     "downloads",
     "nativeMessaging",
     "storage",
     "activeTab",
-    "contextMenus",
-    "webRequest"
+    "contextMenus"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -19,8 +19,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],

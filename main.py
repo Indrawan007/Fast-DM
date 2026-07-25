@@ -16,69 +16,7 @@ from engine.utils import check_aria2
 _SOCKET_PATH = "/tmp/fast-dm-{}.sock".format(os.getuid())
 
 
-# ══════════════════════════════════════════════════════════
-# Socket Server
-# ══════════════════════════════════════════════════════════
-
-def _start_socket_server(engine, window):
-    """Unix socket server — terima request dari native host."""
-    import socket
-    import threading
-
-    try:
-        os.unlink(_SOCKET_PATH)
-    except FileNotFoundError:
-        pass
-
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(_SOCKET_PATH)
-    os.chmod(_SOCKET_PATH, 0o600)
-    server.listen(5)
-    server.settimeout(1.0)
-
-    def _listen():
-        while True:
-            try:
-                conn, _ = server.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-
-            try:
-                chunks = []
-                conn.settimeout(5.0)
-                while True:
-                    chunk = conn.recv(4096)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    if sum(len(c) for c in chunks) > 65536:
-                        break
-                conn.close()
-
-                data = b"".join(chunks)
-                if data:
-                    try:
-                        msg = json.loads(data.decode("utf-8"))
-                    except json.JSONDecodeError:
-                        continue
-
-                    _handle_message(msg, engine, window)
-
-            except Exception:
-                pass
-
-    t = threading.Thread(target=_listen, daemon=True, name="socket-server")
-    t.start()
-
-
-# ══════════════════════════════════════════════════════════
-# Message Handler
-# ══════════════════════════════════════════════════════════
-
 def _handle_message(msg, engine, window=None):
-    """Dispatch message dari extension ke engine/window."""
     action = msg.get("action", "")
 
     if action == "register":
@@ -124,11 +62,62 @@ def _handle_message(msg, engine, window=None):
     return {"success": False, "error": "Unknown action: {}".format(action)}
 
 
-# ══════════════════════════════════════════════════════════
-# GUI Mode
-# ══════════════════════════════════════════════════════════
+def _start_socket_server(engine, window):
+    import socket
+    import threading
+
+    try:
+        os.unlink(_SOCKET_PATH)
+    except FileNotFoundError:
+        pass
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(_SOCKET_PATH)
+    os.chmod(_SOCKET_PATH, 0o600)
+    server.listen(5)
+    server.settimeout(1.0)
+
+    def _listen():
+        while True:
+            try:
+                conn, _ = server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+            try:
+                chunks = []
+                conn.settimeout(5.0)
+                while True:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    if sum(len(c) for c in chunks) > 65536:
+                        break
+                conn.close()
+
+                data = b"".join(chunks)
+                if data:
+                    try:
+                        msg = json.loads(data.decode("utf-8"))
+                    except json.JSONDecodeError:
+                        continue
+                    _handle_message(msg, engine, window)
+
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_listen, daemon=True, name="socket-server")
+    t.start()
+
 
 def run_gui():
+    # ── Auto-setup NMH sebelum GUI muncul ──
+    from engine.setup import check_and_setup
+    check_and_setup()
+
     import gi
     gi.require_version("Gtk", "3.0")
     from gi.repository import Gtk
@@ -144,35 +133,27 @@ def run_gui():
     Gtk.main()
 
 
-# ══════════════════════════════════════════════════════════
-# Native Host Mode
-# ══════════════════════════════════════════════════════════
-
 def run_native_host():
-    """
-    Spawn oleh Chrome saat extension kirim message.
-    Forward ke GUI via Unix socket.
-    """
     import socket
     import time
 
+    # ── Auto-setup saat native host dipanggil juga ──
+    from engine.setup import check_and_setup
+    check_and_setup()
+
     def _forward(msg):
-        # Handle register langsung di sini juga
-        # (GUI mungkin belum berjalan saat register pertama kali)
         action = msg.get("action", "")
 
         if action == "register":
             ext_id = msg.get("extension_id", "")
             from engine.native_host import register_extension_id
             ok, message = register_extension_id(ext_id)
-            # Juga coba forward ke GUI jika sedang berjalan
             _try_forward_to_gui(msg)
             return {"success": ok, "message": message}
 
         return _try_forward_to_gui(msg)
 
     def _try_forward_to_gui(msg):
-        """Coba kirim ke GUI process via socket."""
         try:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.settimeout(3)
@@ -183,7 +164,6 @@ def run_native_host():
             return {"success": True}
 
         except (ConnectionRefusedError, FileNotFoundError):
-            # GUI tidak berjalan — launch
             import subprocess
             subprocess.Popen(
                 [sys.executable, os.path.abspath(__file__)],
@@ -193,7 +173,6 @@ def run_native_host():
             )
             time.sleep(2.0)
 
-            # Retry
             try:
                 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 sock.settimeout(3)
@@ -211,10 +190,6 @@ def run_native_host():
     host = NativeHost(_forward)
     host.run()
 
-
-# ══════════════════════════════════════════════════════════
-# Entry Point
-# ══════════════════════════════════════════════════════════
 
 def main():
     if not check_aria2():
