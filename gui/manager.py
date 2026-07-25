@@ -3,6 +3,7 @@
 import os
 import subprocess
 import threading
+import time
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -12,161 +13,353 @@ from engine import DownloadEngine, DownloadStatus, Config
 from engine.utils import format_size, format_speed, format_eta
 
 
-CSS = b"""
-window { background-color: #1e1e2e; }
+# ══════════════════════════════════════════════════════════
+# CSS Theme — Modern Glassmorphism + Catppuccin Mocha
+# ══════════════════════════════════════════════════════════
 
-.header {
-    background-color: #181825;
-    padding: 10px 16px;
-    border-bottom: 1px solid #313244;
+CSS = """
+
+/* ── Window ── */
+window {
+    background-color: #11111b;
+}
+
+/* ── Header Bar ── */
+.header-box {
+    background: linear-gradient(135deg, #1e1e2e 0%, #181825 100%);
+    padding: 14px 20px;
+    border-bottom: 1px solid rgba(137, 180, 250, 0.15);
 }
 .header-title {
     color: #cdd6f4;
-    font-size: 15px;
-    font-weight: bold;
+    font-size: 16px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+}
+.header-subtitle {
+    color: #585b70;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
 }
 
-.toolbar {
+/* ── Toolbar ── */
+.toolbar-box {
     background-color: #181825;
-    padding: 8px 12px;
-    border-bottom: 1px solid #313244;
+    padding: 10px 16px;
+    border-bottom: 1px solid rgba(69, 71, 90, 0.5);
+}
+.url-entry {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 13px;
+    transition: all 200ms ease;
+}
+.url-entry:focus {
+    border-color: #89b4fa;
+    box-shadow: 0 0 0 2px rgba(137, 180, 250, 0.2);
 }
 
-list { background-color: #1e1e2e; }
+/* ── Buttons ── */
+.btn-download {
+    padding: 10px 20px;
+    background: linear-gradient(135deg, #89b4fa 0%, #74c7ec 100%);
+    color: #11111b;
+    border: none;
+    border-radius: 10px;
+    font-weight: 800;
+    font-size: 13px;
+    letter-spacing: 0.3px;
+    transition: all 200ms ease;
+}
+.btn-download:hover {
+    background: linear-gradient(135deg, #b4d0fb 0%, #89dceb 100%);
+}
+.btn-download:active {
+    background: linear-gradient(135deg, #74a8f7 0%, #5cb8d6 100%);
+}
+.btn-clear {
+    padding: 10px 16px;
+    background-color: transparent;
+    color: #6c7086;
+    border: 1px solid #313244;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    transition: all 200ms ease;
+}
+.btn-clear:hover {
+    background-color: #1e1e2e;
+    color: #a6adc8;
+    border-color: #45475a;
+}
 
-row {
-    background-color: #313244;
-    border-radius: 8px;
-    margin: 3px 8px;
+/* ── Download List ── */
+.download-list {
+    background-color: #11111b;
+}
+
+/* ── Download Card ── */
+.download-card {
+    background-color: #1e1e2e;
+    border-radius: 12px;
+    border: 1px solid #313244;
+    margin: 4px 12px;
     padding: 0;
+    transition: all 200ms ease;
 }
-row:hover { background-color: #3d3f55; }
+.download-card:hover {
+    background-color: #232336;
+    border-color: #45475a;
+}
 
+.card-inner {
+    padding: 14px 16px;
+}
+
+/* ── Filename ── */
 .filename-label {
     color: #cdd6f4;
-    font-weight: 600;
+    font-weight: 700;
     font-size: 13px;
 }
-.status-label {
-    font-size: 10px;
-    font-weight: bold;
-    padding: 2px 7px;
-    border-radius: 4px;
-    background-color: #45475a;
-    color: #a6adc8;
-}
-.status-downloading { background-color: #1e4d8c; color: #89b4fa; }
-.status-completed   { background-color: #1e4d2e; color: #a6e3a1; }
-.status-error       { background-color: #4d1e1e; color: #f38ba8; }
-.status-paused      { background-color: #4d3a1e; color: #fab387; }
-.status-cancelled   { background-color: #3a3a3a; color: #6c7086; }
-.status-resolving   { background-color: #1e3a4d; color: #74c7ec; }
 
-.detail-label {
-    color: #6c7086;
-    font-size: 11px;
+/* ── Status Badge ── */
+.badge {
+    font-size: 9px;
+    font-weight: 800;
+    padding: 3px 10px;
+    border-radius: 20px;
+    letter-spacing: 0.8px;
 }
+.badge-downloading {
+    background-color: rgba(137, 180, 250, 0.15);
+    color: #89b4fa;
+}
+.badge-resolving {
+    background-color: rgba(116, 199, 236, 0.15);
+    color: #74c7ec;
+}
+.badge-completed {
+    background-color: rgba(166, 227, 161, 0.15);
+    color: #a6e3a1;
+}
+.badge-error {
+    background-color: rgba(243, 139, 168, 0.15);
+    color: #f38ba8;
+}
+.badge-paused {
+    background-color: rgba(250, 179, 135, 0.15);
+    color: #fab387;
+}
+.badge-cancelled {
+    background-color: rgba(108, 112, 134, 0.15);
+    color: #6c7086;
+}
+
+/* ── Progress Bar ── */
+.progress-trough {
+    min-height: 4px;
+    border-radius: 2px;
+    background-color: #313244;
+}
+progressbar trough {
+    min-height: 4px;
+    border-radius: 2px;
+    background-color: #313244;
+}
+progressbar progress {
+    min-height: 4px;
+    border-radius: 2px;
+    background-image: linear-gradient(90deg, #89b4fa, #74c7ec);
+    transition: all 300ms ease;
+}
+progressbar.completed progress {
+    background-image: linear-gradient(90deg, #a6e3a1, #94e2d5);
+}
+progressbar.error progress {
+    background-image: linear-gradient(90deg, #f38ba8, #eba0ac);
+}
+progressbar.paused progress {
+    background-image: linear-gradient(90deg, #fab387, #f9e2af);
+}
+
+/* ── Detail Labels ── */
+.detail-label {
+    color: #585b70;
+    font-size: 11px;
+    font-weight: 500;
+}
+.detail-speed {
+    color: #89b4fa;
+    font-size: 11px;
+    font-weight: 700;
+}
+.progress-text {
+    color: #a6adc8;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+/* ── Error Message ── */
 .error-label {
     color: #f38ba8;
     font-size: 11px;
+    font-weight: 500;
     font-style: italic;
 }
 .retry-label {
     color: #fab387;
     font-size: 11px;
+    font-weight: 500;
 }
-
-progressbar trough {
-    min-height: 6px;
-    border-radius: 3px;
-    background-color: #45475a;
-}
-progressbar progress {
-    min-height: 6px;
-    border-radius: 3px;
-    background-color: #89b4fa;
-}
-progressbar.error progress {
-    background-color: #f38ba8;
-}
-progressbar.completed progress {
-    background-color: #a6e3a1;
-}
-
-.btn-pause  { padding: 3px 10px; font-size: 11px;
-              background: #313244; color: #fab387;
-              border: 1px solid #fab387; border-radius: 4px; }
-.btn-resume { padding: 3px 10px; font-size: 11px;
-              background: #313244; color: #a6e3a1;
-              border: 1px solid #a6e3a1; border-radius: 4px; }
-.btn-retry  { padding: 3px 10px; font-size: 11px;
-              background: #313244; color: #89b4fa;
-              border: 1px solid #89b4fa; border-radius: 4px;
-              font-weight: bold; }
-.btn-retry:hover { background: #1e4d8c; }
-.btn-cancel { padding: 3px 10px; font-size: 11px;
-              background: #313244; color: #f38ba8;
-              border: 1px solid #f38ba8; border-radius: 4px; }
-.btn-open   { padding: 3px 10px; font-size: 11px;
-              background: #89b4fa; color: #1e1e2e;
-              border: none; border-radius: 4px; font-weight: bold; }
-.btn-remove { padding: 3px 10px; font-size: 11px;
-              background: #313244; color: #6c7086;
-              border: 1px solid #45475a; border-radius: 4px; }
-
-.url-entry {
-    background-color: #313244;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    border-radius: 6px;
-    padding: 7px 11px;
-    font-size: 13px;
-}
-.url-entry:focus { border-color: #89b4fa; }
-
-.btn-add {
-    padding: 7px 16px;
-    background: #89b4fa;
-    color: #1e1e2e;
-    border: none;
-    border-radius: 6px;
-    font-weight: bold;
-    font-size: 13px;
-}
-.btn-add:hover { background: #b4d0fb; }
-
-.btn-clear {
-    padding: 7px 14px;
-    background: #313244;
-    color: #a6adc8;
-    border: 1px solid #45475a;
-    border-radius: 6px;
+.error-icon {
+    color: #f38ba8;
     font-size: 12px;
 }
 
-.statsbar {
-    background-color: #181825;
-    border-top: 1px solid #313244;
-    padding: 5px 16px;
+/* ── Action Buttons ── */
+.btn-action {
+    padding: 5px 14px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    border: none;
+    transition: all 150ms ease;
+    letter-spacing: 0.3px;
 }
-.stats-label { color: #6c7086; font-size: 11px; }
+
+.btn-pause {
+    background-color: rgba(250, 179, 135, 0.12);
+    color: #fab387;
+    border: 1px solid rgba(250, 179, 135, 0.25);
+}
+.btn-pause:hover {
+    background-color: rgba(250, 179, 135, 0.25);
+}
+
+.btn-resume {
+    background-color: rgba(166, 227, 161, 0.12);
+    color: #a6e3a1;
+    border: 1px solid rgba(166, 227, 161, 0.25);
+}
+.btn-resume:hover {
+    background-color: rgba(166, 227, 161, 0.25);
+}
+
+.btn-retry {
+    background-color: rgba(137, 180, 250, 0.12);
+    color: #89b4fa;
+    border: 1px solid rgba(137, 180, 250, 0.25);
+}
+.btn-retry:hover {
+    background-color: rgba(137, 180, 250, 0.25);
+}
+
+.btn-cancel {
+    background-color: rgba(243, 139, 168, 0.08);
+    color: #f38ba8;
+    border: 1px solid rgba(243, 139, 168, 0.2);
+}
+.btn-cancel:hover {
+    background-color: rgba(243, 139, 168, 0.2);
+}
+
+.btn-open {
+    background: linear-gradient(135deg, #89b4fa 0%, #74c7ec 100%);
+    color: #11111b;
+    border: none;
+}
+.btn-open:hover {
+    background: linear-gradient(135deg, #b4d0fb 0%, #89dceb 100%);
+}
+
+.btn-remove {
+    background-color: transparent;
+    color: #585b70;
+    border: 1px solid #313244;
+}
+.btn-remove:hover {
+    background-color: #1e1e2e;
+    color: #6c7086;
+}
+
+/* ── Stats Bar ── */
+.stats-box {
+    background-color: #181825;
+    padding: 8px 20px;
+    border-top: 1px solid rgba(69, 71, 90, 0.5);
+}
+.stats-label {
+    color: #45475a;
+    font-size: 11px;
+    font-weight: 600;
+}
+.stats-value {
+    color: #6c7086;
+    font-size: 11px;
+    font-weight: 700;
+}
+.stats-speed-value {
+    color: #89b4fa;
+    font-size: 11px;
+    font-weight: 800;
+}
+
+/* ── Placeholder ── */
+.placeholder-icon {
+    color: #313244;
+    font-size: 48px;
+}
+.placeholder-title {
+    color: #45475a;
+    font-size: 15px;
+    font-weight: 700;
+}
+.placeholder-subtitle {
+    color: #313244;
+    font-size: 12px;
+}
+
+/* ── Scrollbar ── */
+scrolledwindow scrollbar {
+    background-color: transparent;
+}
+scrolledwindow scrollbar slider {
+    background-color: #313244;
+    border-radius: 10px;
+    min-width: 4px;
+    min-height: 20px;
+}
+scrolledwindow scrollbar slider:hover {
+    background-color: #45475a;
+}
 """
 
+
+# ══════════════════════════════════════════════════════════
+# Download Row Widget
+# ══════════════════════════════════════════════════════════
 
 class DownloadRow(Gtk.ListBoxRow):
 
     def __init__(self, dl_data):
         super().__init__()
         self.dl_id = dl_data["id"]
+        self.get_style_context().add_class("download-card")
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        outer.set_margin_top(8)
-        outer.set_margin_bottom(8)
-        outer.set_margin_start(12)
-        outer.set_margin_end(12)
+        # No selection highlight
+        self.set_selectable(False)
+        self.set_activatable(False)
 
-        # ── Row 1: filename + status ──
-        row1 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        outer.get_style_context().add_class("card-inner")
+
+        # ── Row 1: Filename + Badge ──
+        row1 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
 
         self.filename_lbl = Gtk.Label(xalign=0.0)
         self.filename_lbl.set_markup(
@@ -177,31 +370,53 @@ class DownloadRow(Gtk.ListBoxRow):
         self.filename_lbl.get_style_context().add_class("filename-label")
 
         self.status_lbl = Gtk.Label(label=dl_data["status"].upper())
-        self.status_lbl.get_style_context().add_class("status-label")
+        self.status_lbl.get_style_context().add_class("badge")
+        self._update_badge(dl_data["status"])
 
         row1.pack_start(self.filename_lbl, True, True, 0)
         row1.pack_end(self.status_lbl, False, False, 0)
 
-        # ── Row 2: progress bar ──
+        # ── Row 2: Progress bar + percentage ──
+        row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+
         self.progress_bar = Gtk.ProgressBar()
-        self.progress_bar.set_show_text(True)
+        self.progress_bar.set_hexpand(True)
+        self.progress_bar.set_show_text(False)
         self._set_progress(dl_data)
 
-        # ── Row 3: details ──
-        row3 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
-        self.size_lbl  = Gtk.Label(xalign=0.0)
-        self.speed_lbl = Gtk.Label(xalign=0.0)
-        self.eta_lbl   = Gtk.Label(xalign=0.0)
-        self.conn_lbl  = Gtk.Label(xalign=0.0)
-        for lbl in (self.size_lbl, self.speed_lbl,
-                    self.eta_lbl, self.conn_lbl):
-            lbl.get_style_context().add_class("detail-label")
-            row3.pack_start(lbl, False, False, 0)
+        self.pct_label = Gtk.Label()
+        self.pct_label.get_style_context().add_class("progress-text")
+        self.pct_label.set_text("{:.1f}%".format(dl_data["progress"]))
+        self.pct_label.set_width_chars(6)
+        self.pct_label.set_xalign(1.0)
+
+        row2.pack_start(self.progress_bar, True, True, 0)
+        row2.pack_end(self.pct_label, False, False, 0)
+
+        # ── Row 3: Details ──
+        row3 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+
+        self.size_lbl = Gtk.Label(xalign=0.0)
+        self.size_lbl.get_style_context().add_class("detail-label")
+        self.size_lbl.set_hexpand(True)
+
+        self.speed_lbl = Gtk.Label(xalign=1.0)
+        self.speed_lbl.get_style_context().add_class("detail-speed")
+
+        self.eta_lbl = Gtk.Label(xalign=1.0)
+        self.eta_lbl.get_style_context().add_class("detail-label")
+        self.eta_lbl.set_margin_start(16)
+
         self._set_details(dl_data)
 
-        # ── Row 3b: error message (hidden by default) ──
-        self.error_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.error_icon = Gtk.Label(label="⚠")
+        row3.pack_start(self.size_lbl, True, True, 0)
+        row3.pack_end(self.eta_lbl, False, False, 0)
+        row3.pack_end(self.speed_lbl, False, False, 0)
+
+        # ── Row 3b: Error ──
+        self.error_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.error_icon = Gtk.Label(label="●")
+        self.error_icon.get_style_context().add_class("error-icon")
         self.error_lbl = Gtk.Label(xalign=0.0)
         self.error_lbl.set_ellipsize(Pango.EllipsizeMode.END)
         self.error_lbl.set_hexpand(True)
@@ -211,23 +426,17 @@ class DownloadRow(Gtk.ListBoxRow):
         self.error_box.set_no_show_all(True)
         self.error_box.hide()
 
-        # ── Row 4: buttons ──
+        # ── Row 4: Buttons ──
         row4 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         row4.set_halign(Gtk.Align.END)
+        row4.set_margin_top(4)
 
-        self.pause_btn  = Gtk.Button(label="⏸ Pause")
-        self.resume_btn = Gtk.Button(label="▶ Resume")
-        self.retry_btn  = Gtk.Button(label="🔄 Retry")
-        self.cancel_btn = Gtk.Button(label="✕ Cancel")
-        self.open_btn   = Gtk.Button(label="📂 Open Folder")
-        self.remove_btn = Gtk.Button(label="🗑 Remove")
-
-        self.pause_btn.get_style_context().add_class("btn-pause")
-        self.resume_btn.get_style_context().add_class("btn-resume")
-        self.retry_btn.get_style_context().add_class("btn-retry")
-        self.cancel_btn.get_style_context().add_class("btn-cancel")
-        self.open_btn.get_style_context().add_class("btn-open")
-        self.remove_btn.get_style_context().add_class("btn-remove")
+        self.pause_btn  = self._make_btn("Pause",   "btn-pause")
+        self.resume_btn = self._make_btn("Resume",  "btn-resume")
+        self.retry_btn  = self._make_btn("Retry",   "btn-retry")
+        self.cancel_btn = self._make_btn("Cancel",  "btn-cancel")
+        self.open_btn   = self._make_btn("Open Folder", "btn-open")
+        self.remove_btn = self._make_btn("Remove",  "btn-remove")
 
         for btn in (self.retry_btn, self.resume_btn, self.pause_btn,
                     self.cancel_btn, self.open_btn, self.remove_btn):
@@ -235,7 +444,7 @@ class DownloadRow(Gtk.ListBoxRow):
 
         # ── Assemble ──
         outer.pack_start(row1, False, False, 0)
-        outer.pack_start(self.progress_bar, False, False, 0)
+        outer.pack_start(row2, False, False, 0)
         outer.pack_start(row3, False, False, 0)
         outer.pack_start(self.error_box, False, False, 0)
         outer.pack_start(row4, False, False, 0)
@@ -243,26 +452,62 @@ class DownloadRow(Gtk.ListBoxRow):
 
         self._update_buttons(dl_data["status"])
 
+    def _make_btn(self, label, css_class):
+        btn = Gtk.Button(label=label)
+        ctx = btn.get_style_context()
+        ctx.add_class("btn-action")
+        ctx.add_class(css_class)
+        return btn
+
     def _set_progress(self, d):
         pct = float(d["progress"])
         self.progress_bar.set_fraction(min(pct / 100.0, 1.0))
-        self.progress_bar.set_text("{:.1f}%".format(pct))
 
         ctx = self.progress_bar.get_style_context()
-        ctx.remove_class("error")
-        ctx.remove_class("completed")
-        if d["status"] == "error":
-            ctx.add_class("error")
-        elif d["status"] == "completed":
+        for c in ("completed", "error", "paused"):
+            ctx.remove_class(c)
+        status = d["status"]
+        if status == "completed":
             ctx.add_class("completed")
+        elif status == "error":
+            ctx.add_class("error")
+        elif status == "paused":
+            ctx.add_class("paused")
 
     def _set_details(self, d):
         self.size_lbl.set_text(
             "{} / {}".format(d["downloaded_fmt"], d["total_size_fmt"])
         )
-        self.speed_lbl.set_text(d["speed_fmt"])
-        self.eta_lbl.set_text("ETA: {}".format(d["eta_fmt"]))
-        self.conn_lbl.set_text("CN: {}".format(d["connections"]))
+        speed = d["speed"]
+        if speed > 0:
+            self.speed_lbl.set_text(d["speed_fmt"])
+        else:
+            self.speed_lbl.set_text("")
+
+        eta = d.get("eta", 0)
+        if eta > 0 and d["status"] == "downloading":
+            self.eta_lbl.set_text("{}".format(d["eta_fmt"]))
+        else:
+            self.eta_lbl.set_text("")
+
+    def _update_badge(self, status):
+        ctx = self.status_lbl.get_style_context()
+        for c in ("badge-downloading", "badge-completed", "badge-error",
+                   "badge-paused", "badge-cancelled", "badge-resolving"):
+            ctx.remove_class(c)
+
+        badge_map = {
+            "downloading": "badge-downloading",
+            "completed":   "badge-completed",
+            "error":       "badge-error",
+            "paused":      "badge-paused",
+            "cancelled":   "badge-cancelled",
+            "resolving":   "badge-resolving",
+            "queued":      "badge-paused",
+        }
+        cls = badge_map.get(status)
+        if cls:
+            ctx.add_class(cls)
 
     def _update_buttons(self, status):
         active    = status in ("downloading", "resolving")
@@ -270,12 +515,11 @@ class DownloadRow(Gtk.ListBoxRow):
         error     = status == "error"
         done      = status == "completed"
         cancelled = status == "cancelled"
-        stoppable = active or paused
 
         self.pause_btn.set_visible(active)
         self.resume_btn.set_visible(paused)
         self.retry_btn.set_visible(error)
-        self.cancel_btn.set_visible(stoppable or error)
+        self.cancel_btn.set_visible(active or paused or error)
         self.open_btn.set_visible(done)
         self.remove_btn.set_visible(done or cancelled or error)
 
@@ -283,41 +527,25 @@ class DownloadRow(Gtk.ListBoxRow):
         self._set_progress(d)
         self._set_details(d)
 
-        # Update filename (bisa berubah setelah resolve)
+        self.pct_label.set_text("{:.1f}%".format(d["progress"]))
+
         self.filename_lbl.set_markup(
             "<b>{}</b>".format(GLib.markup_escape_text(d["filename"]))
         )
 
-        # Status badge
         status = d["status"]
         self.status_lbl.set_text(status.upper())
-
-        ctx = self.status_lbl.get_style_context()
-        for cls in ("status-downloading", "status-completed",
-                    "status-error", "status-paused", "status-cancelled",
-                    "status-resolving"):
-            ctx.remove_class(cls)
-
-        status_map = {
-            "downloading": "status-downloading",
-            "completed":   "status-completed",
-            "error":       "status-error",
-            "paused":      "status-paused",
-            "cancelled":   "status-cancelled",
-            "resolving":   "status-resolving",
-        }
-        cls = status_map.get(status)
-        if cls:
-            ctx.add_class(cls)
+        self._update_badge(status)
 
         # Error message
         err = d.get("error_msg", "")
         if err and status == "error":
             self.error_lbl.set_text(err)
+            self.error_lbl.get_style_context().remove_class("retry-label")
+            self.error_lbl.get_style_context().add_class("error-label")
             self.error_box.set_no_show_all(False)
             self.error_box.show_all()
         elif err and status == "downloading":
-            # Retry message
             self.error_lbl.set_text(err)
             self.error_lbl.get_style_context().remove_class("error-label")
             self.error_lbl.get_style_context().add_class("retry-label")
@@ -325,20 +553,22 @@ class DownloadRow(Gtk.ListBoxRow):
             self.error_box.show_all()
         else:
             self.error_box.hide()
-            self.error_lbl.get_style_context().remove_class("retry-label")
-            self.error_lbl.get_style_context().add_class("error-label")
 
         self._update_buttons(status)
 
 
+# ══════════════════════════════════════════════════════════
+# Main Window
+# ══════════════════════════════════════════════════════════
+
 class ManagerWindow(Gtk.Window):
 
     def __init__(self, engine):
-        super().__init__(title="⚡ Fast Download Manager")
+        super().__init__(title="Fast Download Manager")
         self.engine = engine
-        self._rows  = {}
+        self._rows = {}
 
-        self.set_default_size(760, 560)
+        self.set_default_size(780, 580)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.connect("delete-event", self._on_quit)
 
@@ -357,7 +587,7 @@ class ManagerWindow(Gtk.Window):
 
         # CSS
         provider = Gtk.CssProvider()
-        provider.load_from_data(CSS)
+        provider.load_from_data(CSS.encode("utf-8"))
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(),
             provider,
@@ -374,30 +604,42 @@ class ManagerWindow(Gtk.Window):
     def _build_ui(self):
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 
-        # Header
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        header.get_style_context().add_class("header")
-        title = Gtk.Label(label="⚡  Fast Download Manager")
+        # ── Header ──
+        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        header.get_style_context().add_class("header-box")
+
+        title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+
+        title = Gtk.Label(label="⚡ Fast Download Manager")
         title.get_style_context().add_class("header-title")
-        header.pack_start(title, False, False, 0)
+        title.set_halign(Gtk.Align.START)
+
+        subtitle = Gtk.Label(label="POWERED BY ARIA2")
+        subtitle.get_style_context().add_class("header-subtitle")
+        subtitle.set_halign(Gtk.Align.START)
+        subtitle.set_valign(Gtk.Align.END)
+
+        title_row.pack_start(title, False, False, 0)
+        title_row.pack_start(subtitle, False, False, 4)
+
+        header.pack_start(title_row, False, False, 0)
         root.pack_start(header, False, False, 0)
 
-        # URL toolbar
+        # ── Toolbar ──
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        toolbar.get_style_context().add_class("toolbar")
+        toolbar.get_style_context().add_class("toolbar-box")
 
         self.url_entry = Gtk.Entry()
-        self.url_entry.set_placeholder_text(
-            "Paste URL here, or use the Chrome extension…")
+        self.url_entry.set_placeholder_text("Paste download URL here…")
         self.url_entry.set_hexpand(True)
         self.url_entry.get_style_context().add_class("url-entry")
         self.url_entry.connect("activate", self._on_add_url)
 
-        add_btn = Gtk.Button(label="⬇  Download")
-        add_btn.get_style_context().add_class("btn-add")
+        add_btn = Gtk.Button(label="Download")
+        add_btn.get_style_context().add_class("btn-download")
         add_btn.connect("clicked", self._on_add_url)
 
-        clear_btn = Gtk.Button(label="🗑  Clear Done")
+        clear_btn = Gtk.Button(label="Clear Done")
         clear_btn.get_style_context().add_class("btn-clear")
         clear_btn.connect("clicked", self._on_clear_done)
 
@@ -406,38 +648,83 @@ class ManagerWindow(Gtk.Window):
         toolbar.pack_start(clear_btn, False, False, 0)
         root.pack_start(toolbar, False, False, 0)
 
-        # Download list
+        # ── Download List ──
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroll.set_vexpand(True)
 
         self.listbox = Gtk.ListBox()
         self.listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.listbox.get_style_context().add_class("download-list")
 
-        placeholder = Gtk.Label()
-        placeholder.set_markup(
-            "\n\n<span foreground='#45475a' size='large'>"
-            "No downloads yet\n\n"
-            "<small>Paste a URL above, right-click a link in Chrome,\n"
-            "or click the ⚡ extension icon.</small></span>\n\n")
-        placeholder.set_justify(Gtk.Justification.CENTER)
+        # Placeholder
+        placeholder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        placeholder.set_valign(Gtk.Align.CENTER)
+        placeholder.set_margin_top(60)
+        placeholder.set_margin_bottom(60)
+
+        ph_icon = Gtk.Label(label="⚡")
+        ph_icon.get_style_context().add_class("placeholder-icon")
+
+        ph_title = Gtk.Label(label="No downloads yet")
+        ph_title.get_style_context().add_class("placeholder-title")
+
+        ph_sub = Gtk.Label(
+            label="Paste a URL above or use the browser extension"
+        )
+        ph_sub.get_style_context().add_class("placeholder-subtitle")
+
+        placeholder.pack_start(ph_icon, False, False, 0)
+        placeholder.pack_start(ph_title, False, False, 0)
+        placeholder.pack_start(ph_sub, False, False, 0)
+        placeholder.show_all()
+
         self.listbox.set_placeholder(placeholder)
 
         scroll.add(self.listbox)
         root.pack_start(scroll, True, True, 0)
 
-        # Stats bar
-        statsbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=20)
-        statsbar.get_style_context().add_class("statsbar")
-        self.lbl_active = Gtk.Label(label="Active: 0")
-        self.lbl_speed  = Gtk.Label(label="Speed: 0 B/s")
-        self.lbl_total  = Gtk.Label(label="Total: 0")
-        for lbl in (self.lbl_active, self.lbl_speed, self.lbl_total):
-            lbl.get_style_context().add_class("stats-label")
-            statsbar.pack_start(lbl, False, False, 0)
+        # ── Stats Bar ──
+        statsbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=24)
+        statsbar.get_style_context().add_class("stats-box")
+
+        # Active
+        stat1 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        lbl_a = Gtk.Label(label="Active")
+        lbl_a.get_style_context().add_class("stats-label")
+        self.lbl_active = Gtk.Label(label="0")
+        self.lbl_active.get_style_context().add_class("stats-value")
+        stat1.pack_start(lbl_a, False, False, 0)
+        stat1.pack_start(self.lbl_active, False, False, 0)
+
+        # Speed
+        stat2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        lbl_s = Gtk.Label(label="Speed")
+        lbl_s.get_style_context().add_class("stats-label")
+        self.lbl_speed = Gtk.Label(label="0 B/s")
+        self.lbl_speed.get_style_context().add_class("stats-speed-value")
+        stat2.pack_start(lbl_s, False, False, 0)
+        stat2.pack_start(self.lbl_speed, False, False, 0)
+
+        # Total
+        stat3 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        lbl_t = Gtk.Label(label="Total")
+        lbl_t.get_style_context().add_class("stats-label")
+        self.lbl_total = Gtk.Label(label="0")
+        self.lbl_total.get_style_context().add_class("stats-value")
+        stat3.pack_start(lbl_t, False, False, 0)
+        stat3.pack_start(self.lbl_total, False, False, 0)
+
+        statsbar.pack_start(stat1, False, False, 0)
+        statsbar.pack_start(stat2, False, False, 0)
+        statsbar.pack_start(stat3, False, False, 0)
         root.pack_start(statsbar, False, False, 0)
 
         self.add(root)
+
+    # ──────────────────────────────────────────────────────
+    # Download management
+    # ──────────────────────────────────────────────────────
 
     def _on_add_url(self, _w):
         url = self.url_entry.get_text().strip()
@@ -451,7 +738,8 @@ class ManagerWindow(Gtk.Window):
 
     def add_download_from_extension(self, url, filename=None, headers=None):
         dl_id = self.engine.add_download(
-            url, filename=filename, headers=headers)
+            url, filename=filename, headers=headers
+        )
         GLib.idle_add(self._add_row, dl_id)
         return dl_id
 
@@ -462,28 +750,20 @@ class ManagerWindow(Gtk.Window):
 
         row = DownloadRow(dl_data)
 
-        # ── Pause: hentikan sementara ──
         row.pause_btn.connect(
             "clicked", lambda _b: self.engine.pause_download(dl_id))
-
-        # ── Resume: lanjutkan dari pause/error ──
         row.resume_btn.connect(
             "clicked", lambda _b: self.engine.resume_download(dl_id))
-
-        # ── Retry: coba ulang dari error ──
         row.retry_btn.connect(
             "clicked", lambda _b: self.engine.retry_download(dl_id))
 
-        # ── Cancel: batalkan DAN hapus file partial ──
         def on_cancel(_b):
             self.engine.cancel_download(dl_id)
         row.cancel_btn.connect("clicked", on_cancel)
 
-        # ── Open Folder: buka lokasi file ──
         row.open_btn.connect(
             "clicked", lambda _b, d=dl_data: self._open_folder(d))
 
-        # ── Remove: hapus dari daftar, file TETAP ada ──
         def on_remove(_b):
             r = self._rows.pop(dl_id, None)
             if r:
@@ -496,7 +776,6 @@ class ManagerWindow(Gtk.Window):
         self.listbox.show_all()
 
     def _remove_row(self, dl_id):
-        """Remove dari daftar. File TETAP ada di disk."""
         row = self._rows.pop(dl_id, None)
         if row:
             self.listbox.remove(row)
@@ -522,7 +801,10 @@ class ManagerWindow(Gtk.Window):
                 self.listbox.remove(row)
             self.engine.clear_download(dl_id)
 
-    # Engine callbacks
+    # ──────────────────────────────────────────────────────
+    # Callbacks from engine (any thread)
+    # ──────────────────────────────────────────────────────
+
     def _cb_update(self, dl_data):
         GLib.idle_add(self._gtk_update, dl_data)
 
@@ -539,11 +821,13 @@ class ManagerWindow(Gtk.Window):
         downloads = self.engine.get_all_downloads()
         active = [d for d in downloads if d["status"] == "downloading"]
         total_speed = sum(d["speed"] for d in active)
-        self.lbl_active.set_text("Active: {}".format(len(active)))
-        self.lbl_speed.set_text("Speed: {}".format(
+
+        self.lbl_active.set_text(str(len(active)))
+        self.lbl_speed.set_text(
             "{}/s".format(format_size(total_speed))
-            if total_speed else "0 B/s"))
-        self.lbl_total.set_text("Total: {}".format(len(downloads)))
+            if total_speed else "0 B/s"
+        )
+        self.lbl_total.set_text(str(len(downloads)))
 
     def _on_quit(self, *_):
         self.engine.shutdown()
