@@ -180,6 +180,8 @@ class DownloadEngine:
         t.start()
 
     def pause_download(self, dl_id):
+        """Pause download — kill aria2c, simpan progress untuk resume."""
+        item = None
         with self._lock:
             item = self._downloads.get(dl_id)
             if not item:
@@ -187,9 +189,24 @@ class DownloadEngine:
             if item.status not in (DownloadStatus.DOWNLOADING,
                                     DownloadStatus.RESOLVING):
                 return
-        item.status = DownloadStatus.PAUSED
-        item.speed = 0
+            # Set status DULU sebelum kill
+            item.status = DownloadStatus.PAUSED
+            item.speed = 0
+
+        # Kill di luar lock agar tidak deadlock
         self._kill_process(item)
+
+        # Cleanup temp input file, BUKAN file download
+        if item._input_file:
+            try:
+                os.unlink(item._input_file)
+            except OSError:
+                pass
+            item._input_file = None
+
+        # Notify GUI
+        if self._on_update:
+            self._on_update(item.to_dict())
 
     def resume_download(self, dl_id):
         """Resume download dari PAUSED atau ERROR state."""
@@ -207,13 +224,39 @@ class DownloadEngine:
         self.resume_download(dl_id)
 
     def cancel_download(self, dl_id):
+        """Cancel download — kill proses dan hapus file partial."""
+        item = None
         with self._lock:
             item = self._downloads.get(dl_id)
             if not item:
                 return
-        item.status = DownloadStatus.CANCELLED
+            # Set status DULU sebelum kill
+            item.status = DownloadStatus.CANCELLED
+            item.speed = 0
+
+        # Kill di luar lock
         self._kill_process(item)
-        self._cleanup(item, remove_partial=True)
+
+        # Hapus file partial + control file
+        for suffix in ("", ".aria2"):
+            p = Path(item.save_dir) / "{}{}".format(item.filename, suffix)
+            try:
+                if p.exists():
+                    p.unlink()
+            except OSError:
+                pass
+
+        # Cleanup temp input file
+        if item._input_file:
+            try:
+                os.unlink(item._input_file)
+            except OSError:
+                pass
+            item._input_file = None
+
+        # Notify GUI
+        if self._on_update:
+            self._on_update(item.to_dict())
 
     def remove_download(self, dl_id):
         self.cancel_download(dl_id)
@@ -473,8 +516,12 @@ class DownloadEngine:
         attempt = 0
 
         while attempt <= max_auto_retry:
+            # ── Cek cancel/pause SEBELUM mulai ──
             if item.status in (DownloadStatus.CANCELLED,
                                 DownloadStatus.PAUSED):
+                self._cleanup_temp(item)
+                if self._on_update:
+                    self._on_update(item.to_dict())
                 return
 
             # ── Resolve filename (hanya sekali) ──
@@ -484,8 +531,12 @@ class DownloadEngine:
                     self._on_update(item.to_dict())
                 self._resolve_filename(item)
 
+            # ── Cek cancel/pause setelah resolve ──
             if item.status in (DownloadStatus.CANCELLED,
                                 DownloadStatus.PAUSED):
+                self._cleanup_temp(item)
+                if self._on_update:
+                    self._on_update(item.to_dict())
                 return
 
             item.status = DownloadStatus.DOWNLOADING
@@ -508,13 +559,19 @@ class DownloadEngine:
 
             returncode = self._run_aria2c(item, cmd)
 
+            # ── Cek cancel/pause setelah aria2c selesai ──
+            if item.status in (DownloadStatus.CANCELLED,
+                                DownloadStatus.PAUSED):
+                self._cleanup_temp(item)
+                if self._on_update:
+                    self._on_update(item.to_dict())
+                return
+
             # ── Handle result ──
             if returncode is None:
-                # Process was killed (pause/cancel)
                 break
 
             if returncode == 0:
-                # Sukses!
                 self._check_actual_filename(item)
                 item.status   = DownloadStatus.COMPLETED
                 item.progress = 100.0
@@ -523,7 +580,6 @@ class DownloadEngine:
                 break
 
             elif returncode == 13:
-                # File exists
                 check_file = Path(item.save_dir) / item.filename
                 if check_file.exists() and check_file.stat().st_size > 0:
                     item.status   = DownloadStatus.COMPLETED
@@ -537,7 +593,6 @@ class DownloadEngine:
                     break
 
             elif returncode in self.RETRYABLE_CODES:
-                # Error yang bisa di-retry otomatis
                 attempt += 1
                 if attempt <= max_auto_retry:
                     wait = min(attempt * 3, 15)
@@ -547,33 +602,32 @@ class DownloadEngine:
                     if self._on_update:
                         self._on_update(item.to_dict())
 
-                    # Tunggu sebelum retry
+                    # Tunggu, tapi cek cancel/pause setiap detik
                     for _ in range(wait):
                         if item.status in (DownloadStatus.CANCELLED,
                                             DownloadStatus.PAUSED):
+                            self._cleanup_temp(item)
+                            if self._on_update:
+                                self._on_update(item.to_dict())
                             return
                         time.sleep(1)
 
-                    # Cleanup temp input file sebelum retry
-                    self._cleanup(item, remove_partial=False)
+                    self._cleanup_temp(item)
                     continue
                 else:
-                    # Max retry reached
                     item.status    = DownloadStatus.ERROR
                     item.error_msg = self._get_error_message(returncode)
                     break
 
             elif returncode in self.FATAL_CODES:
-                # Fatal — tidak perlu retry
                 item.status    = DownloadStatus.ERROR
                 item.error_msg = self._get_error_message(returncode)
                 break
 
             else:
-                # Unknown error — coba retry sekali
                 attempt += 1
                 if attempt <= 1:
-                    self._cleanup(item, remove_partial=False)
+                    self._cleanup_temp(item)
                     time.sleep(2)
                     continue
                 item.status    = DownloadStatus.ERROR
@@ -582,7 +636,7 @@ class DownloadEngine:
 
         # ── Cleanup ──
         item._process = None
-        self._cleanup(item, remove_partial=False)
+        self._cleanup_temp(item)
 
         if self._on_complete:
             self._on_complete(item.to_dict())
@@ -590,7 +644,7 @@ class DownloadEngine:
             self._on_update(item.to_dict())
 
     def _run_aria2c(self, item, cmd):
-        """Jalankan aria2c dan return exit code, atau None jika killed."""
+        """Jalankan aria2c dan return exit code, None jika killed."""
         try:
             process = subprocess.Popen(
                 cmd,
@@ -603,6 +657,12 @@ class DownloadEngine:
             item._process = process
 
             self._parse_aria2_output(item, process)
+
+            # Cek apakah sudah di-cancel/pause saat parsing
+            if item.status in (DownloadStatus.CANCELLED,
+                                DownloadStatus.PAUSED):
+                self._kill_process(item)
+                return None
 
             returncode = process.wait()
 
@@ -688,9 +748,12 @@ class DownloadEngine:
         update_interval = 0.2
 
         for line in process.stdout:
+            # ── PENTING: cek status setiap baris ──
             if item.status in (DownloadStatus.CANCELLED,
                                 DownloadStatus.PAUSED):
-                break
+                # Kill process dan stop parsing
+                self._kill_process(item)
+                return
 
             line = line.strip()
             if not line:
@@ -756,14 +819,44 @@ class DownloadEngine:
             except ValueError: pass
         return total
 
-    def _kill_process(self, item):
-        proc = item._process
-        if proc and proc.poll() is None:
+    def _cleanup_temp(self, item):
+        """Cleanup temp input file saja, BUKAN file download."""
+        if item._input_file:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                proc.wait(timeout=5)
-            except (ProcessLookupError, subprocess.TimeoutExpired, OSError):
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    pass
+                os.unlink(item._input_file)
+            except OSError:
+                pass
+            item._input_file = None
+
+    def _kill_process(self, item):
+        """Kill proses aria2c dengan bersih dan cepat."""
+        proc = item._process
+        if not proc:
+            return
+
+        # Cek apakah masih jalan
+        if proc.poll() is not None:
+            item._process = None
+            return
+
+        # Step 1: SIGTERM ke process group
+        try:
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            item._process = None
+            return
+
+        # Step 2: Tunggu max 3 detik
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            # Step 3: Force kill
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGKILL)
+                proc.wait(timeout=2)
+            except (ProcessLookupError, OSError, subprocess.TimeoutExpired):
+                pass
+
+        item._process = None
