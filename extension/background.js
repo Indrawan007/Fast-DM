@@ -109,7 +109,7 @@ function sendToNative(message) {
   });
 }
 
-async function sendDownload(url, filename = null, headers = {}) {
+async function sendDownload(url, filename = null, headers = {}, quality = null) {
   if (!filename) {
     try {
       const urlObj = new URL(url);
@@ -129,6 +129,11 @@ async function sendDownload(url, filename = null, headers = {}) {
     headers: headers,
     extension_id: chrome.runtime.id,
   };
+
+  // Tambah quality jika ada (untuk YouTube)
+  if (quality) {
+    message.quality = quality;
+  }
 
   try {
     const response = await sendToNative(message);
@@ -261,7 +266,12 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "download") {
-    sendDownload(message.url, message.filename, message.headers || {})
+    sendDownload(
+      message.url,
+      message.filename,
+      message.headers || {},
+      message.quality || null
+    )
       .then(r => sendResponse(r))
       .catch(e => sendResponse({ success: false, error: e.message }));
     return true;
