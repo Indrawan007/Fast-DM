@@ -40,6 +40,18 @@
       }
     });
 
+        // Detect YouTube embeds
+    document.querySelectorAll("iframe").forEach((iframe) => {
+      const src = iframe.src || "";
+      if (src.includes("youtube.com/embed/") || src.includes("youtu.be/")) {
+        // Convert embed URL ke watch URL
+        const m = src.match(/(?:embed|youtu\.be)\/([a-zA-Z0-9_-]+)/);
+        if (m) {
+          videos.add("https://www.youtube.com/watch?v=" + m[1]);
+        }
+      }
+    });
+
     return Array.from(videos);
   }
 

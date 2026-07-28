@@ -208,6 +208,16 @@ function shouldInterceptUrl(url, fileSize, mimeType) {
 
   if (fileSize && fileSize > config.interceptMinSize) return true;
 
+    // JANGAN intercept YouTube — biarkan Fast DM GUI handle
+  try {
+    const urlObj = new URL(url);
+    const ytHosts = ["youtube.com", "www.youtube.com", "youtu.be",
+                     "m.youtube.com", "music.youtube.com"];
+    if (ytHosts.includes(urlObj.hostname)) {
+      return false;
+    }
+  } catch (e) { /* ignore */ }
+
   return false;
 }
 

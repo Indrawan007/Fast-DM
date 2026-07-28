@@ -4,6 +4,8 @@ import os
 import subprocess
 import threading
 import time
+import re
+import threading
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -11,7 +13,11 @@ from gi.repository import Gtk, GLib, Gdk, Pango
 
 from engine import DownloadEngine, DownloadStatus, Config
 from engine.utils import format_size, format_speed, format_eta
-
+from engine.youtube import (
+    is_youtube_url, is_playlist_url, check_ytdlp,
+    get_video_info, get_all_browsers, export_cookies,
+    YouTubeDownloader, QUALITY_PRESETS, QUALITY_ORDER,
+)
 
 # ══════════════════════════════════════════════════════════
 # CSS Theme — Modern Glassmorphism + Catppuccin Mocha
@@ -556,6 +562,310 @@ class DownloadRow(Gtk.ListBoxRow):
 
         self._update_buttons(status)
 
+# ==========================================================
+# Youtube
+# ==========================================================
+
+class YouTubeDialog(Gtk.Dialog):
+    """Dialog pilih kualitas YouTube — mirip IDM."""
+
+    def __init__(self, parent, video_info):
+        super().__init__(
+            title="YouTube Download",
+            transient_for=parent,
+            modal=True,
+        )
+        self.set_default_size(500, 520)
+        self.set_resizable(False)
+        self.video_info = video_info
+        self.selected_quality = "best_mp4"
+        self.selected_subtitle = None
+
+        content = self.get_content_area()
+        content.set_spacing(10)
+        content.set_margin_top(16)
+        content.set_margin_bottom(12)
+        content.set_margin_start(20)
+        content.set_margin_end(20)
+
+        # ── Video Title ──
+        title_lbl = Gtk.Label(xalign=0.0)
+        title_text = GLib.markup_escape_text(video_info["title"])
+        title_lbl.set_markup("<b>{}</b>".format(title_text))
+        title_lbl.set_line_wrap(True)
+        title_lbl.set_max_width_chars(55)
+        title_lbl.get_style_context().add_class("filename-label")
+        content.pack_start(title_lbl, False, False, 0)
+
+        # ── Info Row ──
+        info_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+
+        if video_info.get("uploader"):
+            up_lbl = Gtk.Label(
+                label="{}".format(video_info["uploader"])
+            )
+            up_lbl.get_style_context().add_class("detail-label")
+            info_box.pack_start(up_lbl, False, False, 0)
+
+        if video_info.get("duration_str"):
+            dur_lbl = Gtk.Label(
+                label="{}".format(video_info["duration_str"])
+            )
+            dur_lbl.get_style_context().add_class("detail-label")
+            info_box.pack_start(dur_lbl, False, False, 0)
+
+        views = video_info.get("view_count", 0)
+        if views:
+            if views >= 1_000_000:
+                view_str = "{:.1f}M views".format(views / 1_000_000)
+            elif views >= 1_000:
+                view_str = "{:.0f}K views".format(views / 1_000)
+            else:
+                view_str = "{} views".format(views)
+            view_lbl = Gtk.Label(label=view_str)
+            view_lbl.get_style_context().add_class("detail-label")
+            info_box.pack_start(view_lbl, False, False, 0)
+
+        content.pack_start(info_box, False, False, 0)
+
+        # ── Separator ──
+        content.pack_start(Gtk.Separator(), False, False, 4)
+
+        # ── Quality Selection ──
+        q_label = Gtk.Label(xalign=0.0)
+        q_label.set_markup("<b>Quality</b>")
+        q_label.get_style_context().add_class("filename-label")
+        content.pack_start(q_label, False, False, 0)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_vexpand(True)
+        scroll.set_min_content_height(220)
+
+        quality_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        first_btn = None
+
+        for key in QUALITY_ORDER:
+            preset = QUALITY_PRESETS.get(key)
+            if not preset:
+                continue
+
+            radio = Gtk.RadioButton.new_from_widget(first_btn)
+            if first_btn is None:
+                first_btn = radio
+
+            label_box = Gtk.Box(
+                orientation=Gtk.Orientation.HORIZONTAL, spacing=8
+            )
+
+            name_lbl = Gtk.Label(xalign=0.0)
+            name_lbl.set_markup("<b>{}</b>".format(preset["label"]))
+            name_lbl.get_style_context().add_class("filename-label")
+
+            desc_lbl = Gtk.Label(xalign=0.0)
+            desc_lbl.set_text(preset["desc"])
+            desc_lbl.get_style_context().add_class("detail-label")
+
+            label_box.pack_start(name_lbl, False, False, 0)
+            label_box.pack_start(desc_lbl, False, False, 0)
+
+            radio.add(label_box)
+            radio.connect("toggled", self._on_quality_toggled, key)
+            quality_box.pack_start(radio, False, False, 0)
+
+        scroll.add(quality_box)
+        content.pack_start(scroll, True, True, 0)
+
+        # ── Subtitle Checkbox ──
+        subs = video_info.get("available_subs", [])
+        if subs:
+            content.pack_start(Gtk.Separator(), False, False, 4)
+
+            sub_box = Gtk.Box(
+                orientation=Gtk.Orientation.HORIZONTAL, spacing=8
+            )
+
+            self.sub_check = Gtk.CheckButton(label="Download subtitle:")
+            self.sub_check.get_style_context().add_class("detail-label")
+
+            self.sub_combo = Gtk.ComboBoxText()
+            for lang in subs:
+                self.sub_combo.append_text(lang)
+            if "en" in subs:
+                idx = subs.index("en")
+                self.sub_combo.set_active(idx)
+            elif subs:
+                self.sub_combo.set_active(0)
+
+            self.sub_combo.set_sensitive(False)
+            self.sub_check.connect("toggled", self._on_sub_toggled)
+
+            sub_box.pack_start(self.sub_check, False, False, 0)
+            sub_box.pack_start(self.sub_combo, False, False, 0)
+            content.pack_start(sub_box, False, False, 0)
+
+        # ── Buttons ──
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_box.set_halign(Gtk.Align.END)
+        btn_box.set_margin_top(8)
+
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.get_style_context().add_class("btn-action")
+        cancel_btn.get_style_context().add_class("btn-cancel")
+        cancel_btn.connect("clicked", lambda _: self.response(
+            Gtk.ResponseType.CANCEL
+        ))
+
+        dl_btn = Gtk.Button(label="Download")
+        dl_btn.get_style_context().add_class("btn-download")
+        dl_btn.connect("clicked", lambda _: self.response(
+            Gtk.ResponseType.OK
+        ))
+
+        btn_box.pack_start(cancel_btn, False, False, 0)
+        btn_box.pack_start(dl_btn, False, False, 0)
+        content.pack_start(btn_box, False, False, 0)
+
+        self.show_all()
+
+    def _on_quality_toggled(self, button, quality):
+        if button.get_active():
+            self.selected_quality = quality
+
+    def _on_sub_toggled(self, button):
+        self.sub_combo.set_sensitive(button.get_active())
+        if button.get_active():
+            self.selected_subtitle = self.sub_combo.get_active_text()
+        else:
+            self.selected_subtitle = None
+
+
+class YouTubePlaylistDialog(Gtk.Dialog):
+    """Dialog untuk download playlist YouTube."""
+
+    def __init__(self, parent, playlist_info):
+        super().__init__(
+            title="YouTube Playlist",
+            transient_for=parent,
+            modal=True,
+        )
+        self.set_default_size(500, 450)
+        self.playlist_info = playlist_info
+        self.selected_quality = "best_mp4"
+        self.selected_entries = list(range(len(
+            playlist_info.get("entries", [])
+        )))
+
+        content = self.get_content_area()
+        content.set_spacing(10)
+        content.set_margin_top(16)
+        content.set_margin_bottom(12)
+        content.set_margin_start(20)
+        content.set_margin_end(20)
+
+        # Title
+        title_lbl = Gtk.Label(xalign=0.0)
+        title_lbl.set_markup(
+            "<b>{}</b>".format(
+                GLib.markup_escape_text(playlist_info["title"])
+            )
+        )
+        title_lbl.get_style_context().add_class("filename-label")
+        content.pack_start(title_lbl, False, False, 0)
+
+        count_lbl = Gtk.Label(
+            label="{} videos".format(playlist_info["count"]),
+            xalign=0.0
+        )
+        count_lbl.get_style_context().add_class("detail-label")
+        content.pack_start(count_lbl, False, False, 0)
+
+        content.pack_start(Gtk.Separator(), False, False, 4)
+
+        # Quality dropdown
+        q_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        q_lbl = Gtk.Label(label="Quality:")
+        q_lbl.get_style_context().add_class("filename-label")
+
+        self.q_combo = Gtk.ComboBoxText()
+        for key in QUALITY_ORDER:
+            preset = QUALITY_PRESETS.get(key)
+            if preset:
+                self.q_combo.append(key, preset["label"])
+        self.q_combo.set_active_id("best_mp4")
+        self.q_combo.connect("changed", self._on_q_changed)
+
+        q_box.pack_start(q_lbl, False, False, 0)
+        q_box.pack_start(self.q_combo, True, True, 0)
+        content.pack_start(q_box, False, False, 0)
+
+        # Video list
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_vexpand(True)
+
+        listbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+
+        entries = playlist_info.get("entries", [])
+        self.checks = []
+
+        for i, entry in enumerate(entries):
+            check = Gtk.CheckButton()
+            check.set_active(True)
+            label = Gtk.Label(xalign=0.0)
+            label.set_markup(
+                "{}. <b>{}</b>".format(
+                    i + 1, GLib.markup_escape_text(entry["title"])
+                )
+            )
+            label.set_ellipsize(Pango.EllipsizeMode.END)
+
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row.pack_start(check, False, False, 0)
+            row.pack_start(label, True, True, 0)
+
+            listbox.pack_start(row, False, False, 0)
+            self.checks.append(check)
+
+        scroll.add(listbox)
+        content.pack_start(scroll, True, True, 0)
+
+        # Buttons
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_box.set_halign(Gtk.Align.END)
+        btn_box.set_margin_top(8)
+
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.get_style_context().add_class("btn-action")
+        cancel_btn.get_style_context().add_class("btn-cancel")
+        cancel_btn.connect("clicked", lambda _: self.response(
+            Gtk.ResponseType.CANCEL
+        ))
+
+        dl_btn = Gtk.Button(
+            label="Download {} videos".format(len(entries))
+        )
+        dl_btn.get_style_context().add_class("btn-download")
+        dl_btn.connect("clicked", lambda _: self.response(
+            Gtk.ResponseType.OK
+        ))
+
+        btn_box.pack_start(cancel_btn, False, False, 0)
+        btn_box.pack_start(dl_btn, False, False, 0)
+        content.pack_start(btn_box, False, False, 0)
+
+        self.show_all()
+
+    def _on_q_changed(self, combo):
+        self.selected_quality = combo.get_active_id() or "best_mp4"
+
+    def get_selected_entries(self):
+        selected = []
+        entries = self.playlist_info.get("entries", [])
+        for i, check in enumerate(self.checks):
+            if check.get_active() and i < len(entries):
+                selected.append(entries[i])
+        return selected
 
 # ══════════════════════════════════════════════════════════
 # Main Window
@@ -732,9 +1042,225 @@ class ManagerWindow(Gtk.Window):
             return
         if not url.startswith(("http://", "https://", "ftp://")):
             url = "https://" + url
+
+        # YouTube URL → dialog khusus
+        if is_youtube_url(url):
+            self.url_entry.set_text("")
+            self._handle_youtube(url)
+            return
+
+        # Download biasa
         dl_id = self.engine.add_download(url)
         self.url_entry.set_text("")
         self._add_row(dl_id)
+
+    def _handle_youtube(self, url):
+        """Handle YouTube URL."""
+        if not check_ytdlp():
+            dialog = Gtk.MessageDialog(
+                transient_for=self, modal=True,
+                message_type=Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.OK,
+                text="yt-dlp not found",
+            )
+            dialog.format_secondary_text(
+                "Install:\n"
+                "  sudo apt install yt-dlp\n"
+                "  pip3 install -U yt-dlp"
+            )
+            dialog.run()
+            dialog.destroy()
+            return
+
+        self.url_entry.set_placeholder_text("Fetching video info...")
+        self.url_entry.set_sensitive(False)
+
+        def _fetch():
+            info = get_video_info(url)
+            GLib.idle_add(self._show_yt_dialog, url, info)
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _show_yt_dialog(self, url, info):
+        """Tampilkan dialog YouTube setelah info didapat."""
+        self.url_entry.set_placeholder_text("Paste download URL here...")
+        self.url_entry.set_sensitive(True)
+
+        if not info:
+            dialog = Gtk.MessageDialog(
+                transient_for=self, modal=True,
+                message_type=Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.OK,
+                text="Cannot fetch video info",
+            )
+            dialog.format_secondary_text(
+                "The video may be private, age-restricted,\n"
+                "or YouTube is blocking the request.\n\n"
+                "Try:\n"
+                "1. Login YouTube di browser\n"
+                "2. Tutup browser\n"
+                "3. Coba lagi"
+            )
+            dialog.run()
+            dialog.destroy()
+            return
+
+        # Playlist
+        if info.get("type") == "playlist":
+            dialog = YouTubePlaylistDialog(self, info)
+            response = dialog.run()
+            quality = dialog.selected_quality
+            entries = dialog.get_selected_entries()
+            dialog.destroy()
+
+            if response != Gtk.ResponseType.OK or not entries:
+                return
+
+            for entry in entries:
+                entry_url = entry.get("url", "")
+                if entry_url:
+                    self._start_yt_download(entry_url, {
+                        "title": entry.get("title", "YouTube video"),
+                        "type": "video",
+                    }, quality, None)
+            return
+
+        # Single video
+        dialog = YouTubeDialog(self, info)
+        response = dialog.run()
+        quality = dialog.selected_quality
+        subtitle = dialog.selected_subtitle
+        dialog.destroy()
+
+        if response != Gtk.ResponseType.OK:
+            return
+
+        self._start_yt_download(url, info, quality, subtitle)
+
+    def _start_yt_download(self, url, info, quality, subtitle_lang):
+        """Mulai download YouTube video."""
+        title = info.get("title", "YouTube video")
+        preset = QUALITY_PRESETS.get(quality, QUALITY_PRESETS["best_mp4"])
+        ext = preset.get("ext", "mp4")
+
+        dl_id = self.engine.add_download(
+            url,
+            filename="{}.{}".format(title, ext),
+            auto_start=False,
+        )
+        self._add_row(dl_id)
+
+        # Update status awal
+        item = self.engine._downloads.get(dl_id)
+        if item:
+            from engine.downloader import DownloadStatus
+            item.status = DownloadStatus.DOWNLOADING
+            GLib.idle_add(self._gtk_update, item.to_dict())
+
+        downloader = YouTubeDownloader(
+            save_dir=self.engine.cfg.download_dir
+        )
+
+        # Store downloader reference untuk pause/cancel
+        if item:
+            item._yt_downloader = downloader
+
+        def on_progress(prog):
+            nonlocal item
+            if not item:
+                return
+            from engine.downloader import DownloadStatus
+            pct = prog.get("percent", 0)
+            if pct >= 0:
+                item.progress = pct
+            item.filename = prog.get("filename", item.filename)
+
+            speed_str = prog.get("speed", "")
+            if speed_str:
+                m = re.match(r'([\d.]+)\s*(\S+)', speed_str)
+                if m:
+                    val = float(m.group(1))
+                    unit = m.group(2).lower()
+                    if 'gib' in unit:
+                        item.speed = int(val * 1073741824)
+                    elif 'mib' in unit:
+                        item.speed = int(val * 1048576)
+                    elif 'kib' in unit:
+                        item.speed = int(val * 1024)
+                    else:
+                        item.speed = int(val)
+
+            status = prog.get("status", "")
+            if status == "merging":
+                item.error_msg = "Merging video + audio..."
+            elif status == "paused":
+                item.status = DownloadStatus.PAUSED
+            else:
+                item.error_msg = ""
+                item.status = DownloadStatus.DOWNLOADING
+
+            GLib.idle_add(self._gtk_update, item.to_dict())
+
+        def on_complete(result):
+            nonlocal item
+            if not item:
+                return
+            from engine.downloader import DownloadStatus
+            item.status = DownloadStatus.COMPLETED
+            item.progress = 100.0
+            item.speed = 0
+            item.error_msg = ""
+            fn = result.get("filename", "")
+            if fn:
+                item.filename = os.path.basename(fn)
+            GLib.idle_add(self._gtk_update, item.to_dict())
+
+        def on_error(err):
+            nonlocal item
+            if not item:
+                return
+            from engine.downloader import DownloadStatus
+            item.status = DownloadStatus.ERROR
+            item.error_msg = str(err)
+            item.speed = 0
+            GLib.idle_add(self._gtk_update, item.to_dict())
+
+        # Override pause/cancel buttons untuk YouTube downloads
+        row = self._rows.get(dl_id)
+        if row:
+            # Disconnect existing handlers safely
+            for btn in (row.pause_btn, row.cancel_btn, row.retry_btn):
+                try:
+                    btn.disconnect_by_func(lambda _: None)
+                except Exception:
+                    pass
+
+            def yt_pause(_b):
+                downloader.pause()
+
+            def yt_cancel(_b):
+                downloader.cancel()
+                from engine.downloader import DownloadStatus
+                if item:
+                    item.status = DownloadStatus.CANCELLED
+                    item.speed = 0
+                    GLib.idle_add(self._gtk_update, item.to_dict())
+
+            def yt_retry(_b):
+                downloader.resume()
+
+            row.pause_btn.connect("clicked", yt_pause)
+            row.cancel_btn.connect("clicked", yt_cancel)
+            row.retry_btn.connect("clicked", yt_retry)
+            row.resume_btn.connect("clicked", yt_retry)
+
+        downloader.download(
+            url, quality,
+            subtitle_lang=subtitle_lang,
+            on_progress=on_progress,
+            on_complete=on_complete,
+            on_error=on_error,
+        )
 
     def add_download_from_extension(self, url, filename=None, headers=None):
         dl_id = self.engine.add_download(
