@@ -1129,7 +1129,7 @@ class ManagerWindow(Gtk.Window):
         dialog = YouTubeDialog(self, info)
         response = dialog.run()
         quality = dialog.selected_quality
-        subtitle = dialog.selected_subtitle
+        subtitle = getattr(dialog, 'selected_subtitle', None)
         dialog.destroy()
 
         if response != Gtk.ResponseType.OK:
@@ -1148,32 +1148,43 @@ class ManagerWindow(Gtk.Window):
             filename="{}.{}".format(title, ext),
             auto_start=False,
         )
-        self._add_row(dl_id)
+        self._add_row_youtube(dl_id, url, quality, subtitle_lang)
 
-        # Update status awal
+    def _add_row_youtube(self, dl_id, url, quality, subtitle_lang):
+        """
+        Tambah row untuk YouTube download.
+        Tombol Pause/Cancel/Resume langsung di-bind ke yt-dlp.
+        Tidak pakai _add_row biasa agar tidak ada handler aria2c.
+        """
+        dl_data = self.engine.get_download(dl_id)
+        if not dl_data:
+            return
+
+        row = DownloadRow(dl_data)
+
         item = self.engine._downloads.get(dl_id)
-        if item:
-            from engine.downloader import DownloadStatus
-            item.status = DownloadStatus.DOWNLOADING
-            GLib.idle_add(self._gtk_update, item.to_dict())
+        if not item:
+            return
+
+        from engine.downloader import DownloadStatus
+        item.status = DownloadStatus.DOWNLOADING
+        GLib.idle_add(self._gtk_update, item.to_dict())
 
         downloader = YouTubeDownloader(
             save_dir=self.engine.cfg.download_dir
         )
+        item._yt_downloader = downloader
 
-        # Store downloader reference untuk pause/cancel
-        if item:
-            item._yt_downloader = downloader
-
+        # ── Callbacks ──
         def on_progress(prog):
-            nonlocal item
-            if not item:
+            if not self.engine._downloads.get(dl_id):
                 return
-            from engine.downloader import DownloadStatus
             pct = prog.get("percent", 0)
             if pct >= 0:
                 item.progress = pct
-            item.filename = prog.get("filename", item.filename)
+            fn = prog.get("filename", "")
+            if fn:
+                item.filename = os.path.basename(fn)
 
             speed_str = prog.get("speed", "")
             if speed_str:
@@ -1195,6 +1206,7 @@ class ManagerWindow(Gtk.Window):
                 item.error_msg = "Merging video + audio..."
             elif status == "paused":
                 item.status = DownloadStatus.PAUSED
+                item.speed = 0
             else:
                 item.error_msg = ""
                 item.status = DownloadStatus.DOWNLOADING
@@ -1202,10 +1214,8 @@ class ManagerWindow(Gtk.Window):
             GLib.idle_add(self._gtk_update, item.to_dict())
 
         def on_complete(result):
-            nonlocal item
-            if not item:
+            if not self.engine._downloads.get(dl_id):
                 return
-            from engine.downloader import DownloadStatus
             item.status = DownloadStatus.COMPLETED
             item.progress = 100.0
             item.speed = 0
@@ -1216,44 +1226,65 @@ class ManagerWindow(Gtk.Window):
             GLib.idle_add(self._gtk_update, item.to_dict())
 
         def on_error(err):
-            nonlocal item
-            if not item:
+            if not self.engine._downloads.get(dl_id):
                 return
-            from engine.downloader import DownloadStatus
             item.status = DownloadStatus.ERROR
             item.error_msg = str(err)
             item.speed = 0
             GLib.idle_add(self._gtk_update, item.to_dict())
 
-        # Override pause/cancel buttons untuk YouTube downloads
-        row = self._rows.get(dl_id)
-        if row:
-            # Disconnect existing handlers safely
-            for btn in (row.pause_btn, row.cancel_btn, row.retry_btn):
-                try:
-                    btn.disconnect_by_func(lambda _: None)
-                except Exception:
-                    pass
+        # ── Button handlers (YouTube-specific) ──
+        def yt_pause(_b):
+            downloader.pause()
+            item.status = DownloadStatus.PAUSED
+            item.speed = 0
+            GLib.idle_add(self._gtk_update, item.to_dict())
 
-            def yt_pause(_b):
-                downloader.pause()
+        def yt_resume(_b):
+            item.status = DownloadStatus.DOWNLOADING
+            item.error_msg = ""
+            GLib.idle_add(self._gtk_update, item.to_dict())
+            downloader.resume()
 
-            def yt_cancel(_b):
-                downloader.cancel()
-                from engine.downloader import DownloadStatus
-                if item:
-                    item.status = DownloadStatus.CANCELLED
-                    item.speed = 0
-                    GLib.idle_add(self._gtk_update, item.to_dict())
+        def yt_cancel(_b):
+            downloader.cancel()
+            item.status = DownloadStatus.CANCELLED
+            item.speed = 0
+            GLib.idle_add(self._gtk_update, item.to_dict())
 
-            def yt_retry(_b):
-                downloader.resume()
+        def yt_retry(_b):
+            item.status = DownloadStatus.DOWNLOADING
+            item.error_msg = ""
+            GLib.idle_add(self._gtk_update, item.to_dict())
+            downloader.download(
+                url, quality,
+                subtitle_lang=subtitle_lang,
+                on_progress=on_progress,
+                on_complete=on_complete,
+                on_error=on_error,
+            )
 
-            row.pause_btn.connect("clicked", yt_pause)
-            row.cancel_btn.connect("clicked", yt_cancel)
-            row.retry_btn.connect("clicked", yt_retry)
-            row.resume_btn.connect("clicked", yt_retry)
+        def on_remove(_b):
+            downloader.cancel()
+            r = self._rows.pop(dl_id, None)
+            if r:
+                self.listbox.remove(r)
+            self.engine.clear_download(dl_id)
 
+        # Connect buttons langsung ke YouTube handlers
+        row.pause_btn.connect("clicked", yt_pause)
+        row.resume_btn.connect("clicked", yt_resume)
+        row.cancel_btn.connect("clicked", yt_cancel)
+        row.retry_btn.connect("clicked", yt_retry)
+        row.open_btn.connect(
+            "clicked", lambda _b: self._open_folder(dl_data))
+        row.remove_btn.connect("clicked", on_remove)
+
+        self._rows[dl_id] = row
+        self.listbox.prepend(row)
+        self.listbox.show_all()
+
+        # Mulai download
         downloader.download(
             url, quality,
             subtitle_lang=subtitle_lang,
@@ -1315,6 +1346,7 @@ class ManagerWindow(Gtk.Window):
         )
 
     def _on_clear_done(self, _w):
+        """Hapus entri selesai. Cancel YouTube downloader jika ada."""
         to_remove = []
         for dl_id in list(self._rows.keys()):
             d = self.engine.get_download(dl_id)
@@ -1322,6 +1354,14 @@ class ManagerWindow(Gtk.Window):
                 to_remove.append(dl_id)
 
         for dl_id in to_remove:
+            # Cancel YouTube downloader jika ada
+            item = self.engine._downloads.get(dl_id)
+            if item and hasattr(item, '_yt_downloader') and item._yt_downloader:
+                try:
+                    item._yt_downloader.cancel()
+                except Exception:
+                    pass
+
             row = self._rows.pop(dl_id, None)
             if row:
                 self.listbox.remove(row)
@@ -1354,6 +1394,64 @@ class ManagerWindow(Gtk.Window):
             if total_speed else "0 B/s"
         )
         self.lbl_total.set_text(str(len(downloads)))
+
+    def start_youtube_from_extension(self, url, quality=None):
+        """
+        Handle YouTube download dari extension overlay.
+        Dipanggil dari _handle_message via GLib.idle_add.
+
+        Jika quality sudah dipilih dari overlay → langsung download.
+        Jika quality None → tampilkan dialog pilih kualitas.
+        """
+        if not check_ytdlp():
+            print("[FastDM] yt-dlp not found, skipping YouTube",
+                  file=sys.stderr)
+            return
+
+        if quality:
+            # Quality sudah dipilih dari overlay → langsung download
+            self._start_yt_direct(url, quality)
+        else:
+            # Tidak ada quality → tampilkan dialog
+            self._handle_youtube(url)
+
+    def _start_yt_direct(self, url, quality):
+        """
+        Download YouTube langsung tanpa dialog.
+        Dipanggil saat user pilih kualitas dari overlay browser.
+        """
+        self.url_entry.set_placeholder_text("Fetching video info...")
+        self.url_entry.set_sensitive(False)
+
+        def _fetch():
+            info = get_video_info(url)
+            GLib.idle_add(self._do_yt_direct, url, quality, info)
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _do_yt_direct(self, url, quality, info):
+        """Mulai download YouTube setelah info didapat."""
+        self.url_entry.set_placeholder_text("Paste download URL here...")
+        self.url_entry.set_sensitive(True)
+
+        if info and info.get("type") == "video":
+            self._start_yt_download(url, info, quality, None)
+        elif info and info.get("type") == "playlist":
+            # Playlist dari overlay → download semua dengan quality terpilih
+            entries = info.get("entries", [])
+            for entry in entries:
+                entry_url = entry.get("url", "")
+                if entry_url:
+                    self._start_yt_download(entry_url, {
+                        "title": entry.get("title", "YouTube video"),
+                        "type": "video",
+                    }, quality, None)
+        else:
+            # Info gagal → coba download langsung tanpa info
+            self._start_yt_download(url, {
+                "title": "YouTube video",
+                "type": "video",
+            }, quality, None)
 
     def _on_quit(self, *_):
         self.engine.shutdown()

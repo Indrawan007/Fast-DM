@@ -17,6 +17,7 @@ _SOCKET_PATH = "/tmp/fast-dm-{}.sock".format(os.getuid())
 
 
 def _handle_message(msg, engine, window=None):
+    """Dispatch message dari extension ke engine/window."""
     action = msg.get("action", "")
 
     if action == "register":
@@ -29,8 +30,25 @@ def _handle_message(msg, engine, window=None):
         url      = msg.get("url", "")
         filename = msg.get("filename")
         headers  = msg.get("headers", {})
+        quality  = msg.get("quality")
+
         if not url:
             return {"success": False, "error": "No URL"}
+
+        # Cek apakah YouTube URL
+        from engine.youtube import is_youtube_url
+        if is_youtube_url(url) and window:
+            # Kirim ke YouTube handler di GUI thread
+            import gi
+            gi.require_version("Gtk", "3.0")
+            from gi.repository import GLib
+            GLib.idle_add(
+                window.start_youtube_from_extension,
+                url, quality
+            )
+            return {"success": True, "type": "youtube"}
+
+        # Download biasa
         if window:
             dl_id = window.add_download_from_extension(
                 url, filename=filename, headers=headers

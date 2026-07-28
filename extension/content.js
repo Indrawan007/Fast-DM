@@ -367,19 +367,24 @@
       <span class="dd-desc">${quality.desc}</span>
     `;
 
+    let sending = false;  // Debounce
+
     item.addEventListener("click", (e) => {
       e.stopPropagation();
       e.preventDefault();
 
+      if (sending) return;  // Prevent double click
+      sending = true;
+
       const videoId = extractVideoId();
       if (!videoId) {
-        showToast("⚠ Cannot detect video");
+        showToast("Cannot detect video");
+        sending = false;
         return;
       }
 
       const url = getVideoUrl(videoId);
 
-      // Kirim ke Fast DM dengan kualitas yang dipilih
       chrome.runtime.sendMessage({
         action: "download",
         url: url,
@@ -393,7 +398,9 @@
       const arrow = overlayContainer.querySelector(".fastdm-arrow");
       if (arrow) arrow.classList.remove("open");
 
-      showToast("⚡ Sent to Fast DM — " + quality.label);
+      showToast("Sent to Fast DM — " + quality.label);
+
+      setTimeout(() => { sending = false; }, 2000);
     });
 
     return item;
@@ -573,12 +580,13 @@
     let lastUrl = location.href;
 
     const observer = new MutationObserver(() => {
-      // Detect URL change (YouTube SPA)
       if (location.href !== lastUrl) {
         lastUrl = location.href;
         const newId = extractVideoId();
         if (newId !== currentVideoId) {
           currentVideoId = newId;
+          // Cleanup overlay dan dropdown
+          dropdownVisible = false;
           if (overlayContainer) {
             overlayContainer.remove();
             overlayContainer = null;
