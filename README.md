@@ -1,8 +1,8 @@
 # ⚡ Fast-DM
 
-<img width="776" height="610" alt="image" src="https://github.com/user-attachments/assets/1ba24e6f-59d2-4e31-b0ad-680364ab26f0" />
-
 **Fast-DM** adalah aplikasi Download Manager ringan dan cepat untuk Linux (terintegrasi dengan *engine* `aria2`) yang dilengkapi *browser extension* untuk menangkap dan mengunduh tautan secara instan.
+
+<img width="776" height="610" alt="image" src="https://github.com/user-attachments/assets/1ba24e6f-59d2-4e31-b0ad-680364ab26f0" />
 
 ---
 
@@ -16,12 +16,12 @@
 
 ## 🖼️ Tampilan Aplikasi
 
-![Fast-DM Main Interface](<img width="776" height="610" alt="image" src="https://github.com/user-attachments/assets/1ba24e6f-59d2-4e31-b0ad-680364ab26f0" />
-)
+![Fast-DM Main Interface]
+<img width="776" height="610" alt="image" src="https://github.com/user-attachments/assets/1ba24e6f-59d2-4e31-b0ad-680364ab26f0" />
 
 ### Integrasi Browser
-![Browser Extension Overlay](<img width="343" height="342" alt="image" src="https://github.com/user-attachments/assets/54091595-f493-45c9-9e4d-f6d256c35ad9" />
-)
+![Browser Extension Overlay]
+<img width="343" height="342" alt="image" src="https://github.com/user-attachments/assets/54091595-f493-45c9-9e4d-f6d256c35ad9" />
 
 ---
 
@@ -36,7 +36,7 @@
 
 ## 📦 Download
 
-Dapatkan file rilis terbaru di halaman **[GitHub Releases]([https://github.com/Indrawan007/MintShot/releases](https://github.com/Indrawan007/Fast-DM/releases/tag/v1.2.0))** 
+Dapatkan file rilis terbaru di halaman **[GitHub Releases](https://github.com/Indrawan007/Fast-DM/releases/tag/v1.2.0)** 
 
 ### File Rilis:
 * `fast-dm_1.2.0_amd64.deb` — Paket aplikasi untuk Linux (Debian/Ubuntu/Mint)
