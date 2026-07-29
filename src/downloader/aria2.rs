@@ -229,66 +229,179 @@ fn parse_eta(s: &str) -> u64 {
 async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>) {
     let url = { info.lock().await.url.clone() };
 
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .user_agent(CHROME_UA)
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .unwrap_or_default();
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
 
-    // Try HEAD request with range
-    if let Ok(resp) = client
-        .head(&url)
+    // Try GET with Range 0-0 (more reliable than HEAD for Content-Disposition)
+    let resp = client
+        .get(&url)
         .header("Range", "bytes=0-0")
         .send()
-        .await
-    {
-        let mut i = info.lock().await;
+        .await;
 
-        // Content-Disposition
-        if let Some(cd) = resp.headers().get("content-disposition") {
-            if let Ok(cd_str) = cd.to_str() {
-                if let Some(name) = parse_content_disposition(cd_str) {
-                    i.filename = super::sanitize_filename(&name);
+    let resp = match resp {
+        Ok(r) => r,
+        Err(_) => {
+            // Fallback: try HEAD
+            match client.head(&url).send().await {
+                Ok(r) => r,
+                Err(_) => return,
+            }
+        }
+    };
+
+    let mut i = info.lock().await;
+
+    // 1. Content-Disposition — paling akurat
+    if let Some(cd) = resp.headers().get("content-disposition") {
+        if let Ok(cd_str) = cd.to_str() {
+            if let Some(name) = parse_content_disposition(cd_str) {
+                let cleaned = super::sanitize_filename(&name);
+                if !cleaned.is_empty() && cleaned.contains('.') {
+                    tracing::info!("Filename from Content-Disposition: {}", cleaned);
+                    i.filename = cleaned;
                 }
             }
         }
+    }
 
-        // Content-Length / Content-Range
-        if let Some(cr) = resp.headers().get("content-range") {
-            if let Ok(cr_str) = cr.to_str() {
-                let re = Regex::new(r"/(\d+)").unwrap();
-                if let Some(m) = re.captures(cr_str) {
-                    i.total_size = m[1].parse().unwrap_or(0);
-                }
-            }
-        } else if let Some(cl) = resp.headers().get("content-length") {
-            if let Ok(cl_str) = cl.to_str() {
-                i.total_size = cl_str.parse().unwrap_or(0);
+    // 2. Jika filename masih generic, coba dari URL final (setelah redirect)
+    if is_generic_filename(&i.filename) {
+        let final_url = resp.url().to_string();
+        if final_url != url {
+            let name = super::extract_filename_from_url(&final_url);
+            if !is_generic_filename(&name) {
+                tracing::info!("Filename from final URL: {}", name);
+                i.filename = name;
             }
         }
+    }
+
+    // 3. Content-Range untuk total size
+    if let Some(cr) = resp.headers().get("content-range") {
+        if let Ok(cr_str) = cr.to_str() {
+            let re = Regex::new(r"/(\d+)").unwrap();
+            if let Some(m) = re.captures(cr_str) {
+                if let Ok(total) = m[1].parse::<u64>() {
+                    if total > i.total_size {
+                        i.total_size = total;
+                    }
+                }
+            }
+        }
+    } else if let Some(cl) = resp.headers().get("content-length") {
+        if let Ok(cl_str) = cl.to_str() {
+            if let Ok(size) = cl_str.parse::<u64>() {
+                if size > i.total_size {
+                    i.total_size = size;
+                }
+            }
+        }
+    }
+
+    // 4. Jika masih tanpa extension, tebak dari content-type
+    if !i.filename.contains('.') {
+        if let Some(ct) = resp.headers().get("content-type") {
+            if let Ok(ct_str) = ct.to_str() {
+                if let Some(ext) = content_type_to_ext(ct_str) {
+                    i.filename = format!("{}{}", i.filename, ext);
+                }
+            }
+        }
+    }
+
+    tracing::info!("Final filename: {} (size: {})", i.filename, i.total_size);
+}
+
+fn is_generic_filename(name: &str) -> bool {
+    if name.is_empty() {
+        return true;
+    }
+    let lower = name.to_lowercase();
+    let stem = lower.split('.').next().unwrap_or("");
+    let generic = [
+        "download", "index", "file", "get", "fetch",
+        "stream", "media", "content", "data", "output",
+        "video", "audio", "default", "main",
+    ];
+    if generic.contains(&stem) {
+        return true;
+    }
+    if stem.starts_with("download_") {
+        return true;
+    }
+    if stem.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    false
+}
+
+fn content_type_to_ext(ct: &str) -> Option<&'static str> {
+    let ct = ct.split(';').next().unwrap_or("").trim().to_lowercase();
+    match ct.as_str() {
+        "video/mp4"        => Some(".mp4"),
+        "video/webm"       => Some(".webm"),
+        "video/x-matroska" => Some(".mkv"),
+        "video/quicktime"  => Some(".mov"),
+        "video/x-msvideo"  => Some(".avi"),
+        "video/x-flv"      => Some(".flv"),
+        "video/3gpp"       => Some(".3gp"),
+        "video/mp2t"       => Some(".ts"),
+        "audio/mpeg"       => Some(".mp3"),
+        "audio/mp4"        => Some(".m4a"),
+        "audio/ogg"        => Some(".ogg"),
+        "audio/wav"        => Some(".wav"),
+        "audio/flac"       => Some(".flac"),
+        "application/pdf"  => Some(".pdf"),
+        "application/zip"  => Some(".zip"),
+        "application/gzip" => Some(".gz"),
+        "application/x-rar-compressed" => Some(".rar"),
+        "application/x-7z-compressed"  => Some(".7z"),
+        "application/x-tar"            => Some(".tar"),
+        "application/x-iso9660-image"  => Some(".iso"),
+        "image/jpeg"       => Some(".jpg"),
+        "image/png"        => Some(".png"),
+        "image/gif"        => Some(".gif"),
+        "image/webp"       => Some(".webp"),
+        _ => None,
     }
 }
 
 fn parse_content_disposition(cd: &str) -> Option<String> {
-    // filename*=UTF-8''name
-    let re1 = Regex::new(r"filename\*\s*=\s*(?:UTF-8|utf-8)?'[^']*'(.+?)(?:\s*;|$)").unwrap();
+    // filename*=UTF-8''encoded_name (RFC 5987)
+    let re1 = Regex::new(r"filename\*\s*=\s*(?:[Uu][Tt][Ff]-8)?'[^']*'(.+?)(?:\s*;|$)").unwrap();
     if let Some(m) = re1.captures(cd) {
         let decoded = urlencoding::decode(&m[1]).unwrap_or_default();
-        return Some(decoded.to_string());
+        let name = decoded.trim().to_string();
+        if !name.is_empty() {
+            return Some(name);
+        }
     }
 
-    // filename="name"
+    // filename="quoted name"
     let re2 = Regex::new(r#"filename\s*=\s*"([^"]+)""#).unwrap();
     if let Some(m) = re2.captures(cd) {
-        return Some(m[1].to_string());
+        let name = m[1].trim().to_string();
+        if !name.is_empty() {
+            return Some(name);
+        }
     }
 
-    // filename=name
+    // filename=unquoted
     let re3 = Regex::new(r"filename\s*=\s*([^\s;]+)").unwrap();
     if let Some(m) = re3.captures(cd) {
-        return Some(m[1].trim_matches('"').to_string());
+        let name = m[1].trim().trim_matches('"').to_string();
+        if !name.is_empty() {
+            return Some(name);
+        }
     }
 
     None

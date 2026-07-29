@@ -40,6 +40,20 @@ pub fn build_window(
         .default_height(580)
         .build();
 
+    // Set icon
+    let icon_paths = [
+        "/opt/fast-dm/fast-dm-icon.png",
+        "/opt/fast-dm/extension/icons/icon128.png",
+    ];
+    for path in &icon_paths {
+        if std::path::Path::new(path).exists() {
+            if let Ok(tex) = gtk4::gdk::Texture::from_filename(path) {
+                window.set_icon_name(Some("fast-dm"));
+            }
+            break;
+        }
+    }
+
     let root = GtkBox::new(Orientation::Vertical, 0);
 
     // ── Header ──
@@ -129,13 +143,14 @@ pub fn build_window(
     let rows: Rc<RefCell<HashMap<String, DownloadRow>>> =
         Rc::new(RefCell::new(HashMap::new()));
 
+    // Track download status for clear done
+    let download_statuses: Rc<RefCell<HashMap<String, DownloadStatus>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+
     // ── Add URL handler ──
     let engine_add = engine.clone();
     let rt_add = rt.clone();
-    let listbox_add = listbox.clone();
-    let rows_add = rows.clone();
     let entry_add = url_entry.clone();
-    let _window_ref = window.clone();
 
     let on_add = move || {
         let url = entry_add.text().to_string().trim().to_string();
@@ -154,32 +169,14 @@ pub fn build_window(
 
         entry_add.set_text("");
 
-        if youtube::is_youtube_url(&url) {
-            // YouTube → quality dialog
-            // For now, direct download with best quality
-            let eng = engine_add.clone();
-            let rt = rt_add.clone();
-            let _lb = listbox_add.clone();
-            let _rw = rows_add.clone();
+        let eng = engine_add.clone();
+        let rt = rt_add.clone();
 
-            glib::spawn_future_local(async move {
-                let _id = rt.spawn(async move {
-                    eng.add_download(&url, None, None, true).await
-                }).await.unwrap();
-
-                // Add row will happen via event channel
-            });
-        } else {
-            let eng = engine_add.clone();
-            let rt = rt_add.clone();
-            let url = url.clone();
-
-            glib::spawn_future_local(async move {
-                let _id = rt.spawn(async move {
-                    eng.add_download(&url, None, None, true).await
-                }).await.unwrap();
-            });
-        }
+        glib::spawn_future_local(async move {
+            let _ = rt.spawn(async move {
+                eng.add_download(&url, None, None, true).await
+            }).await;
+        });
     };
 
     let on_add_clone = on_add.clone();
@@ -188,22 +185,53 @@ pub fn build_window(
     let on_add_clone = on_add.clone();
     url_entry.connect_activate(move |_| on_add_clone());
 
-    // ── Clear Done ──
-    let _engine_clear = engine.clone();
-    let _rt_clear = rt.clone();
+    // ── Clear Done handler ──
     let rows_clear = rows.clone();
-    let _listbox_clear = listbox.clone();
+    let listbox_clear = listbox.clone();
+    let engine_clear = engine.clone();
+    let rt_clear = rt.clone();
+    let statuses_clear = download_statuses.clone();
 
     clear_btn.connect_clicked(move |_| {
-        let mut to_remove = vec![];
-        for (id, _row) in rows_clear.borrow().iter() {
-            // Check via listbox if completed/cancelled
-            to_remove.push(id.clone());
+        let statuses = statuses_clear.borrow();
+        let to_remove: Vec<String> = statuses.iter()
+            .filter(|(_, status)| {
+                matches!(status,
+                    DownloadStatus::Completed |
+                    DownloadStatus::Cancelled
+                )
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        drop(statuses);
+
+        for id in &to_remove {
+            // Remove row from listbox
+            let mut rows_map = rows_clear.borrow_mut();
+            if let Some(row) = rows_map.remove(id) {
+                listbox_clear.remove(&row.root);
+            }
+            drop(rows_map);
+
+            // Clear from engine
+            let eng = engine_clear.clone();
+            let id_for_engine = id.clone();
+            let rt = rt_clear.clone();
+            glib::spawn_future_local(async move {
+                let _ = rt.spawn(async move {
+                    eng.clear_download(&id_for_engine).await;
+                }).await;
+            });
         }
-        // Simplified: remove all visible done items
+
+        // Remove from status tracking (setelah loop selesai)
+        let mut st = statuses_clear.borrow_mut();
+        for id in &to_remove {
+            st.remove(id);
+        }
     });
 
-    // ── Event listener (progress updates from engine) ──
+    // ── Event listener ──
     let rows_ev = rows.clone();
     let listbox_ev = listbox.clone();
     let engine_ev = engine.clone();
@@ -211,6 +239,7 @@ pub fn build_window(
     let stats_a = stats_active.clone();
     let stats_s = stats_speed.clone();
     let stats_t = stats_total.clone();
+    let statuses_ev = download_statuses.clone();
 
     glib::spawn_future_local(async move {
         while let Some(event) = event_rx.recv().await {
@@ -219,6 +248,11 @@ pub fn build_window(
                 DownloadEvent::Completed(i) => i,
                 DownloadEvent::Error(i) => i,
             };
+
+            // Track status
+            statuses_ev.borrow_mut().insert(
+                info.id.clone(), info.status
+            );
 
             let mut rows_map = rows_ev.borrow_mut();
 
@@ -233,6 +267,7 @@ pub fn build_window(
                 let eng = engine_ev.clone();
                 let rt = rt_ev.clone();
 
+                // Pause
                 let id_p = id.clone();
                 let eng_p = eng.clone();
                 let rt_p = rt.clone();
@@ -241,11 +276,13 @@ pub fn build_window(
                     let id = id_p.clone();
                     let rt = rt_p.clone();
                     glib::spawn_future_local(async move {
-                        rt.spawn(async move { eng.pause_download(&id).await })
-                            .await.ok();
+                        let _ = rt.spawn(async move {
+                            eng.pause_download(&id).await
+                        }).await;
                     });
                 });
 
+                // Resume
                 let id_r = id.clone();
                 let eng_r = eng.clone();
                 let rt_r = rt.clone();
@@ -254,11 +291,13 @@ pub fn build_window(
                     let id = id_r.clone();
                     let rt = rt_r.clone();
                     glib::spawn_future_local(async move {
-                        rt.spawn(async move { eng.resume_download(&id).await })
-                            .await.ok();
+                        let _ = rt.spawn(async move {
+                            eng.resume_download(&id).await
+                        }).await;
                     });
                 });
 
+                // Cancel
                 let id_c = id.clone();
                 let eng_c = eng.clone();
                 let rt_c = rt.clone();
@@ -267,11 +306,13 @@ pub fn build_window(
                     let id = id_c.clone();
                     let rt = rt_c.clone();
                     glib::spawn_future_local(async move {
-                        rt.spawn(async move { eng.cancel_download(&id).await })
-                            .await.ok();
+                        let _ = rt.spawn(async move {
+                            eng.cancel_download(&id).await
+                        }).await;
                     });
                 });
 
+                // Retry
                 let id_t = id.clone();
                 let eng_t = eng.clone();
                 let rt_t = rt.clone();
@@ -280,16 +321,47 @@ pub fn build_window(
                     let id = id_t.clone();
                     let rt = rt_t.clone();
                     glib::spawn_future_local(async move {
-                        rt.spawn(async move { eng.resume_download(&id).await })
-                            .await.ok();
+                        let _ = rt.spawn(async move {
+                            eng.resume_download(&id).await
+                        }).await;
                     });
                 });
 
+                // Open folder
+                let save_dir = info.save_dir.clone();
                 row.open_btn.connect_clicked(move |_| {
-                    // xdg-open
                     let _ = std::process::Command::new("xdg-open")
-                        .arg(dirs::download_dir().unwrap_or_default())
+                        .arg(&save_dir)
                         .spawn();
+                });
+
+                // Remove — hapus dari daftar, file TETAP ada
+                let id_rm = id.clone();
+                let eng_rm = eng.clone();
+                let rt_rm = rt.clone();
+                let rows_rm = rows_ev.clone();
+                let listbox_rm = listbox_ev.clone();
+                let statuses_rm = statuses_ev.clone();
+                row.remove_btn.connect_clicked(move |_| {
+                    // Remove row
+                    let mut rmap = rows_rm.borrow_mut();
+                    if let Some(r) = rmap.remove(&id_rm) {
+                        listbox_rm.remove(&r.root);
+                    }
+                    drop(rmap);
+
+                    // Clear from engine
+                    let eng = eng_rm.clone();
+                    let id = id_rm.clone();
+                    let rt = rt_rm.clone();
+                    glib::spawn_future_local(async move {
+                        let _ = rt.spawn(async move {
+                            eng.clear_download(&id).await;
+                        }).await;
+                    });
+
+                    // Remove status
+                    statuses_rm.borrow_mut().remove(&id_rm);
                 });
 
                 listbox_ev.prepend(&row.root);
@@ -314,7 +386,11 @@ pub fn build_window(
                     let total_speed: u64 = active.iter().map(|d| d.speed).sum();
 
                     sa.set_text(&format!("Active {}", active.len()));
-                    ss.set_text(&format!("{}", format_size(total_speed)));
+                    ss.set_text(&if total_speed > 0 {
+                        format!("{}/s", format_size(total_speed))
+                    } else {
+                        "0 B/s".to_string()
+                    });
                     st.set_text(&format!("Total {}", all.len()));
                 }
             });
