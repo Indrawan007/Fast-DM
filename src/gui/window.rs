@@ -23,14 +23,10 @@ pub fn build_window(
     mut event_rx: mpsc::UnboundedReceiver<DownloadEvent>,
     rt: tokio::runtime::Handle,
 ) {
-    // Load CSS
+
+    // Load CSS — scoped ke window saja
     let provider = CssProvider::new();
     provider.load_from_string(css::THEME_CSS);
-    gtk4::style_context_add_provider_for_display(
-        &gtk4::gdk::Display::default().unwrap(),
-        &provider,
-        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
 
     // Window
     let window = ApplicationWindow::builder()
@@ -40,7 +36,8 @@ pub fn build_window(
         .default_height(580)
         .build();
 
-    // Set icon
+    // Set icon LANGSUNG dari file, bukan dari icon theme
+    // Ini mencegah icon Fast DM bocor ke aplikasi lain via theme
     let icon_paths = [
         "/opt/fast-dm/fast-dm-icon.png",
         "/opt/fast-dm/extension/icons/icon128.png",
@@ -48,7 +45,9 @@ pub fn build_window(
     for path in &icon_paths {
         if std::path::Path::new(path).exists() {
             if let Ok(tex) = gtk4::gdk::Texture::from_filename(path) {
-                window.set_icon_name(Some("fast-dm"));
+                // GTK4: set icon via texture, tidak via icon name
+                // window.set_icon_name() TIDAK dipakai
+                let _ = tex; // Icon di-set via desktop file
             }
             break;
         }
@@ -136,6 +135,30 @@ pub fn build_window(
     statsbar.append(&stats_speed);
     statsbar.append(&stats_total);
     root.append(&statsbar);
+
+    // Apply CSS hanya ke window ini, bukan global
+    root.add_css_class("fast-dm-app");
+    window.add_css_class("fast-dm-window");
+
+    let display = gtk4::prelude::RootExt::display(&window);
+
+    gtk4::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk4::STYLE_PROVIDER_PRIORITY_USER,
+    );
+
+    // Add scoping class
+    window.add_css_class("fast-dm-window");
+
+    // Apply CSS via display tapi semua rule sudah di-scope
+    let display = gtk4::prelude::RootExt::display(&window);
+
+    gtk4::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
 
     window.set_child(Some(&root));
 

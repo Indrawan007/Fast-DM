@@ -29,15 +29,19 @@ pub fn run() {
     let mut stdin = stdin.lock();
     let mut stdout = stdout.lock();
 
+    // Baca satu message, respond, exit
+    // Chrome akan spawn ulang native host untuk message baru
     loop {
         // Read 4-byte length
         let mut len_buf = [0u8; 4];
-        if stdin.read_exact(&mut len_buf).is_err() {
-            break;
+        match stdin.read_exact(&mut len_buf) {
+            Ok(_) => {},
+            Err(_) => break,  // EOF atau error → exit
         }
+
         let msg_len = u32::from_ne_bytes(len_buf) as usize;
-        if msg_len > 1024 * 1024 {
-            continue;
+        if msg_len == 0 || msg_len > 1024 * 1024 {
+            break;
         }
 
         // Read message
@@ -46,7 +50,7 @@ pub fn run() {
             break;
         }
 
-        // Parse
+        // Parse & handle
         let response = match serde_json::from_slice::<NativeMessage>(&msg_buf) {
             Ok(msg) => handle_native_message(msg),
             Err(e) => NativeResponse {
@@ -57,11 +61,15 @@ pub fn run() {
         };
 
         // Send response
-        let resp_bytes = serde_json::to_vec(&response).unwrap_or_default();
+        let resp_bytes = match serde_json::to_vec(&response) {
+            Ok(b) => b,
+            Err(_) => break,
+        };
+
         let len = (resp_bytes.len() as u32).to_ne_bytes();
-        let _ = stdout.write_all(&len);
-        let _ = stdout.write_all(&resp_bytes);
-        let _ = stdout.flush();
+        if stdout.write_all(&len).is_err() { break; }
+        if stdout.write_all(&resp_bytes).is_err() { break; }
+        if stdout.flush().is_err() { break; }
     }
 }
 
@@ -96,9 +104,13 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
             match forward_to_gui(&socket_path, &msg) {
                 Ok(resp) => resp,
                 Err(e) => {
-                    // Try launching GUI
+                    // Launch GUI dengan setsid agar TIDAK jadi child dari browser
+                    use std::os::unix::process::CommandExt;
                     let _ = std::process::Command::new("/opt/fast-dm/fast-dm")
+                        .env("GDK_BACKEND", "x11")
+                        .process_group(0)  // New process group
                         .spawn();
+
                     std::thread::sleep(std::time::Duration::from_secs(2));
 
                     forward_to_gui(&socket_path, &msg).unwrap_or(NativeResponse {

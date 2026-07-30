@@ -6,6 +6,10 @@ authors = ["FastDM Contributors"]
 description = "High-speed download manager with browser integration"
 license = "MIT"
 
+[[bin]]
+name = "fast-dm"
+path = "src/main.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }

@@ -41,19 +41,23 @@ function registerExtensionId() {
   const extId = chrome.runtime.id;
   if (!extId) return;
 
-  chrome.storage.local.get("registered", (result) => {
-    // Selalu kirim register saat startup untuk memastikan
-    // manifest selalu up-to-date
+  chrome.storage.local.get("registered_id", (result) => {
+    // Skip jika sudah pernah register dengan ID yang sama
+    if (result.registered_id === extId) {
+      return;
+    }
+
     sendToNative({
       action: "register",
       extension_id: extId
     }).then((response) => {
       if (response && response.success) {
-        chrome.storage.local.set({ registered: true });
+        chrome.storage.local.set({ registered_id: extId });
         console.log("[FastDM] Extension registered:", extId);
       }
-    }).catch((err) => {
-      console.log("[FastDM] Register will retry on next connection:", err.message);
+    }).catch(() => {
+      // Silent fail — akan retry saat message berikutnya
+      // Tidak perlu spam console
     });
   });
 }
@@ -69,7 +73,10 @@ chrome.runtime.onStartup.addListener(() => {
 // Register saat pertama kali install
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === "install" || details.reason === "update") {
-    registerExtensionId();
+    // Reset flag agar register ulang
+    chrome.storage.local.remove("registered_id", () => {
+      registerExtensionId();
+    });
   }
 
   // Context menus
@@ -90,6 +97,13 @@ chrome.runtime.onInstalled.addListener((details) => {
   });
 });
 
+chrome.runtime.onStartup.addListener(() => {
+  chrome.storage.local.get("registered_id", (result) => {
+    if (!result.registered_id) {
+      registerExtensionId();
+    }
+  });
+});
 
 // ═══════════════════════════════════════════════
 // Native Messaging
