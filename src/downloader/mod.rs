@@ -1,4 +1,3 @@
-#![allow(dead_code, unused)]
 pub mod aria2;
 pub mod types;
 pub mod youtube;
@@ -128,6 +127,14 @@ impl DownloadEngine {
     }
 
     pub async fn clear_download(&self, id: &str) {
+        // Cancel dulu supaya background task (aria2/yt-dlp) berhenti
+        let downloads = self.downloads.read().await;
+        if let Some(info) = downloads.get(id) {
+            let mut i = info.lock().await;
+            i.status = DownloadStatus::Cancelled;
+            i.speed = 0;
+        }
+        drop(downloads);
         self.downloads.write().await.remove(id);
     }
 

@@ -3,35 +3,40 @@ use crate::config::Config;
 use regex::Regex;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio::sync::{mpsc, Mutex};
 
-const YT_PATTERNS: &[&str] = &[
-    r"(?:https?://)?(?:www\.)?youtube\.com/watch\?v=[\w-]+",
-    r"(?:https?://)?(?:www\.)?youtube\.com/shorts/[\w-]+",
-    r"(?:https?://)?youtu\.be/[\w-]+",
-    r"(?:https?://)?music\.youtube\.com/watch\?v=[\w-]+",
-];
+static RE_YT_WATCH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:https?://)?(?:www\.)?youtube\.com/watch\?v=[\w-]+").unwrap());
+static RE_YT_SHORTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:https?://)?(?:www\.)?youtube\.com/shorts/[\w-]+").unwrap());
+static RE_YT_BE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:https?://)?youtu\.be/[\w-]+").unwrap());
+static RE_YT_MUSIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:https?://)?music\.youtube\.com/watch\?v=[\w-]+").unwrap());
+static RE_YTDLP_PROGRESS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[download\]\s+(\d+\.?\d*)%\s+of\s+~?\s*(\S+)\s+at\s+(\S+)\s+ETA\s+(\S+)").unwrap());
+static RE_YTDLP_PROGRESS2: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[download\]\s+(\d+\.?\d*)%").unwrap());
+static RE_YTDLP_DEST: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[download\]\s+Destination:\s+(.+)").unwrap());
+static RE_YTDLP_MERGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[Merger\]|\[ffmpeg\]|Merging").unwrap());
+static RE_SPEED_PARSE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([\d.]+)\s*(\S+)").unwrap());
 
 pub fn is_youtube_url(url: &str) -> bool {
-    YT_PATTERNS.iter().any(|p| {
-        Regex::new(p).map(|re| re.is_match(url)).unwrap_or(false)
-    })
+    RE_YT_WATCH.is_match(url)
+        || RE_YT_SHORTS.is_match(url)
+        || RE_YT_BE.is_match(url)
+        || RE_YT_MUSIC.is_match(url)
 }
 
-/// Detect browser for cookies
+/// Detect browser for cookies — gunakan nama support yt-dlp
 fn detect_browser() -> Option<&'static str> {
     let home = dirs::home_dir()?;
     let candidates = [
-        ("chromium", ".config/thorium"),
-        ("chromium", ".config/chromium"),
         ("chrome",   ".config/google-chrome"),
-        ("brave",    ".config/BraveSoftware/Brave-Browser"),
+        ("chromium", ".config/chromium"),
         ("edge",     ".config/microsoft-edge"),
-        ("vivaldi",  ".config/vivaldi"),
-        ("opera",    ".config/opera"),
         ("firefox",  ".mozilla/firefox"),
+        ("brave",    ".config/BraveSoftware/Brave-Browser"),
+        ("opera",    ".config/opera"),
+        ("vivaldi",  ".config/vivaldi"),
+        // Thorium menggunakan format Chromium
+        ("chromium", ".config/thorium"),
     ];
 
     for (name, path) in &candidates {
@@ -118,20 +123,7 @@ fn run_ytdlp(
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
 ) {
-    let re_progress = Regex::new(
-        r"\[download\]\s+(\d+\.?\d*)%\s+of\s+~?\s*(\S+)\s+at\s+(\S+)\s+ETA\s+(\S+)"
-    ).unwrap();
-    let re_progress2 = Regex::new(r"\[download\]\s+(\d+\.?\d*)%").unwrap();
-    let re_dest = Regex::new(r"\[download\]\s+Destination:\s+(.+)").unwrap();
-    let re_merge = Regex::new(r"\[Merger\]|\[ffmpeg\]|Merging").unwrap();
-
-    let child = Command::new(&cmd[0])
-        .args(&cmd[1..])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-
-    let mut child = match child {
+    let mut child = match Command::new(&cmd[0]).args(&cmd[1..]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) => {
             let rt = tokio::runtime::Handle::current();
@@ -146,6 +138,23 @@ fn run_ytdlp(
     };
 
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+
+    // Baca stderr di thread terpisah agar tidak deadlock
+    let stderr_buf = Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr_buf_clone = stderr_buf.clone();
+    let stderr_thread = std::thread::Builder::new()
+        .name("ytdlp-stderr".into())
+        .spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                let mut buf = stderr_buf_clone.lock().unwrap();
+                buf.push_str(&line);
+                buf.push('\n');
+            }
+        })
+        .ok();
+
     let reader = BufReader::new(stdout);
     let mut last_update = Instant::now();
 
@@ -158,8 +167,7 @@ fn run_ytdlp(
             return;
         }
 
-        // Destination filename
-        if let Some(m) = re_dest.captures(&line) {
+        if let Some(m) = RE_YTDLP_DEST.captures(&line) {
             let filename = std::path::Path::new(m.get(1).unwrap().as_str())
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -171,8 +179,7 @@ fn run_ytdlp(
             });
         }
 
-        // Merging
-        if re_merge.is_match(&line) {
+        if RE_YTDLP_MERGE.is_match(&line) {
             rt.block_on(async {
                 let mut i = info.lock().await;
                 i.progress = 99.0;
@@ -182,14 +189,12 @@ fn run_ytdlp(
             continue;
         }
 
-        // Progress
-        let progress_match = re_progress.captures(&line)
-            .or_else(|| re_progress2.captures(&line));
+        let progress_match = RE_YTDLP_PROGRESS.captures(&line)
+            .or_else(|| RE_YTDLP_PROGRESS2.captures(&line));
 
         if let Some(m) = progress_match {
             if last_update.elapsed().as_millis() >= 250 {
                 let pct: f64 = m[1].parse().unwrap_or(0.0);
-
                 let speed_str = m.get(3).map(|s| s.as_str()).unwrap_or("");
                 let speed = parse_speed(speed_str);
 
@@ -205,7 +210,12 @@ fn run_ytdlp(
         }
     }
 
+    if let Some(thread) = stderr_thread {
+        let _ = thread.join();
+    }
+
     let exit_code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+    let err_detail = stderr_buf.lock().unwrap().clone();
 
     let rt = tokio::runtime::Handle::current();
     rt.block_on(async {
@@ -222,7 +232,8 @@ fn run_ytdlp(
             let _ = tx.send(DownloadEvent::Completed(i.clone()));
         } else {
             i.status = DownloadStatus::Error;
-            i.error_msg = format!("yt-dlp exit code: {}", exit_code);
+            let detail = if err_detail.is_empty() { String::new() } else { format!("\n{}", err_detail.trim()) };
+            i.error_msg = format!("yt-dlp exit code: {}{}", exit_code, detail);
             i.speed = 0;
             let _ = tx.send(DownloadEvent::Error(i.clone()));
         }
@@ -230,8 +241,7 @@ fn run_ytdlp(
 }
 
 fn parse_speed(s: &str) -> u64 {
-    let re = Regex::new(r"([\d.]+)\s*(\S+)").unwrap();
-    if let Some(m) = re.captures(s) {
+    if let Some(m) = RE_SPEED_PARSE.captures(s) {
         let val: f64 = m[1].parse().unwrap_or(0.0);
         let unit = m[2].to_lowercase();
         if unit.contains("gib") { return (val * 1073741824.0) as u64; }

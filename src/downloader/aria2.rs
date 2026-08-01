@@ -3,9 +3,21 @@ use crate::config::Config;
 use regex::Regex;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio::sync::{mpsc, Mutex};
+
+static RE_PROGRESS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)B/(\d+)B\((\d+)%\)").unwrap());
+static RE_SPEED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"DL:(\d+)").unwrap());
+static RE_CN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"CN:(\d+)").unwrap());
+static RE_ETA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"ETA:(\S+)").unwrap());
+static RE_H: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)h").unwrap());
+static RE_M: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)m").unwrap());
+static RE_S: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)s").unwrap());
+static RE_CONTENT_RANGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"/(\d+)").unwrap());
+static RE_CD_RFC5987: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"filename\*\s*=\s*(?:[Uu][Tt][Ff]-8)?'[^']*'(.+?)(?:\s*;|$)").unwrap());
+static RE_CD_QUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"filename\s*=\s*"([^"]+)""#).unwrap());
+static RE_CD_UNQUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"filename\s*=\s*([^\s;]+)").unwrap());
 
 const CHROME_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -107,10 +119,6 @@ fn run_aria2c(
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
 ) {
-    let re_progress = Regex::new(r"(\d+)B/(\d+)B\((\d+)%\)").unwrap();
-    let re_speed = Regex::new(r"DL:(\d+)").unwrap();
-    let re_cn = Regex::new(r"CN:(\d+)").unwrap();
-    let re_eta = Regex::new(r"ETA:(\S+)").unwrap();
 
     let child = Command::new(&cmd[0])
         .args(&cmd[1..])
@@ -147,22 +155,22 @@ fn run_aria2c(
         }
 
         // Parse progress
-        if let Some(m) = re_progress.captures(&line) {
+        if let Some(m) = RE_PROGRESS.captures(&line) {
             let downloaded: u64 = m[1].parse().unwrap_or(0);
             let total: u64 = m[2].parse().unwrap_or(0);
             let progress: f64 = m[3].parse().unwrap_or(0.0);
 
-            let speed = re_speed
+            let speed = RE_SPEED
                 .captures(&line)
                 .and_then(|m| m[1].parse().ok())
                 .unwrap_or(0u64);
 
-            let connections = re_cn
+            let connections = RE_CN
                 .captures(&line)
                 .and_then(|m| m[1].parse().ok())
                 .unwrap_or(0u8);
 
-            let eta = re_eta
+            let eta = RE_ETA
                 .captures(&line)
                 .map(|m| parse_eta(&m[1]))
                 .unwrap_or(0);
@@ -210,17 +218,14 @@ fn run_aria2c(
 
 fn parse_eta(s: &str) -> u64 {
     let mut total = 0u64;
-    let re_h = Regex::new(r"(\d+)h").unwrap();
-    let re_m = Regex::new(r"(\d+)m").unwrap();
-    let re_s = Regex::new(r"(\d+)s").unwrap();
 
-    if let Some(m) = re_h.captures(s) {
+    if let Some(m) = RE_H.captures(s) {
         total += m[1].parse::<u64>().unwrap_or(0) * 3600;
     }
-    if let Some(m) = re_m.captures(s) {
+    if let Some(m) = RE_M.captures(s) {
         total += m[1].parse::<u64>().unwrap_or(0) * 60;
     }
-    if let Some(m) = re_s.captures(s) {
+    if let Some(m) = RE_S.captures(s) {
         total += m[1].parse::<u64>().unwrap_or(0);
     }
     total
@@ -288,8 +293,7 @@ async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>) {
     // 3. Content-Range untuk total size
     if let Some(cr) = resp.headers().get("content-range") {
         if let Ok(cr_str) = cr.to_str() {
-            let re = Regex::new(r"/(\d+)").unwrap();
-            if let Some(m) = re.captures(cr_str) {
+            if let Some(m) = RE_CONTENT_RANGE.captures(cr_str) {
                 if let Ok(total) = m[1].parse::<u64>() {
                     if total > i.total_size {
                         i.total_size = total;
@@ -377,8 +381,7 @@ fn content_type_to_ext(ct: &str) -> Option<&'static str> {
 
 fn parse_content_disposition(cd: &str) -> Option<String> {
     // filename*=UTF-8''encoded_name (RFC 5987)
-    let re1 = Regex::new(r"filename\*\s*=\s*(?:[Uu][Tt][Ff]-8)?'[^']*'(.+?)(?:\s*;|$)").unwrap();
-    if let Some(m) = re1.captures(cd) {
+    if let Some(m) = RE_CD_RFC5987.captures(cd) {
         let decoded = urlencoding::decode(&m[1]).unwrap_or_default();
         let name = decoded.trim().to_string();
         if !name.is_empty() {
@@ -387,8 +390,7 @@ fn parse_content_disposition(cd: &str) -> Option<String> {
     }
 
     // filename="quoted name"
-    let re2 = Regex::new(r#"filename\s*=\s*"([^"]+)""#).unwrap();
-    if let Some(m) = re2.captures(cd) {
+    if let Some(m) = RE_CD_QUOTED.captures(cd) {
         let name = m[1].trim().to_string();
         if !name.is_empty() {
             return Some(name);
@@ -396,8 +398,7 @@ fn parse_content_disposition(cd: &str) -> Option<String> {
     }
 
     // filename=unquoted
-    let re3 = Regex::new(r"filename\s*=\s*([^\s;]+)").unwrap();
-    if let Some(m) = re3.captures(cd) {
+    if let Some(m) = RE_CD_UNQUOTED.captures(cd) {
         let name = m[1].trim().trim_matches('"').to_string();
         if !name.is_empty() {
             return Some(name);

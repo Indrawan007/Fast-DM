@@ -1,14 +1,11 @@
-#[allow(dead_code)]
 use crate::downloader::types::{DownloadInfo, DownloadStatus};
 use gtk4::prelude::*;
 use gtk4::{
     Box as GtkBox, Button, Label, Orientation, ProgressBar,
 };
 
-#[allow(dead_code)]
 pub struct DownloadRow {
     pub root: gtk4::ListBoxRow,
-    pub id: String,
 
     filename_lbl: Label,
     status_lbl: Label,
@@ -136,7 +133,6 @@ impl DownloadRow {
 
         let mut row = Self {
             root,
-            id: info.id.clone(),
             filename_lbl,
             status_lbl,
             progress_bar,
@@ -183,10 +179,7 @@ impl DownloadRow {
         self.update_progress_class(&info.status);
 
         // Error
-        if !info.error_msg.is_empty() && matches!(info.status, DownloadStatus::Error) {
-            self.error_lbl.set_text(&info.error_msg);
-            self.error_box.set_visible(true);
-        } else if !info.error_msg.is_empty() && matches!(info.status, DownloadStatus::Downloading) {
+        if !info.error_msg.is_empty() {
             self.error_lbl.set_text(&info.error_msg);
             self.error_box.set_visible(true);
         } else {

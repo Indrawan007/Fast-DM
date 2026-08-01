@@ -1,4 +1,3 @@
-#[allow(dead_code, unused)]
 use crate::downloader::DownloadEngine;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -70,6 +69,7 @@ pub async fn start_server(engine: Arc<DownloadEngine>) -> Result<(), Box<dyn std
 
             let json = serde_json::to_string(&response).unwrap_or_default();
             let _ = writer.write_all(json.as_bytes()).await;
+            let _ = writer.write_all(b"\n").await;
         });
     }
 }
@@ -121,6 +121,30 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
                 engine.cancel_download(&id).await;
             }
             IpcResponse { success: true, id: None, error: None, message: None }
+        }
+
+        "list" => {
+            let downloads = engine.get_all_downloads().await;
+            let list: Vec<serde_json::Value> = downloads.iter().map(|d| {
+                serde_json::json!({
+                    "id": d.id,
+                    "url": d.url,
+                    "filename": d.filename,
+                    "status": d.status.to_string(),
+                    "progress": d.progress,
+                    "speed": d.speed,
+                    "total_size": d.total_size,
+                    "downloaded": d.downloaded,
+                    "error_msg": d.error_msg,
+                })
+            }).collect();
+
+            IpcResponse {
+                success: true,
+                id: None,
+                error: None,
+                message: Some(serde_json::to_string(&list).unwrap_or_default()),
+            }
         }
 
         "register" => {

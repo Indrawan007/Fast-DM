@@ -1,16 +1,17 @@
-#[allow(dead_code)]
 use gtk4::prelude::*;
 use gtk4::{
     Box as GtkBox, Button, CheckButton, Dialog, Label,
     Orientation, ResponseType, ScrolledWindow, Window,
 };
 
+#[allow(dead_code)]
 pub struct QualityOption {
     pub id: &'static str,
     pub label: &'static str,
     pub desc: &'static str,
 }
 
+#[allow(dead_code)]
 pub const QUALITIES: &[QualityOption] = &[
     QualityOption { id: "best_mp4", label: "Best Quality (MP4)",  desc: "Highest resolution" },
     QualityOption { id: "2160p",    label: "4K Ultra HD",         desc: "3840x2160" },
@@ -23,6 +24,7 @@ pub const QUALITIES: &[QualityOption] = &[
     QualityOption { id: "audio_mp3",  label: "Audio MP3",         desc: "320kbps" },
 ];
 
+#[allow(dead_code)]
 pub fn show_quality_dialog(
     parent: &Window,
     title: &str,

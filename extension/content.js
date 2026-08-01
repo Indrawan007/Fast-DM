@@ -72,6 +72,12 @@
       url: url,
       headers: {},
       quality: quality || "best_mp4"
+    }, (response) => {
+      if (chrome.runtime.lastError || !response || !response.success) {
+        showToast("Failed to send to Fast DM");
+      } else {
+        showToast("Sent to Fast DM — " + (quality || "best_mp4"));
+      }
     });
   }
 
@@ -389,16 +395,13 @@
         action: "download",
         url: url,
         quality: quality.id
+      }, (response) => {
+        if (chrome.runtime.lastError || !response || !response.success) {
+          showToast("Failed to send to Fast DM");
+        } else {
+          showToast("Sent to Fast DM — " + quality.label);
+        }
       });
-
-      // Tutup dropdown
-      dropdownVisible = false;
-      const dd = overlayContainer.querySelector(".fastdm-dropdown");
-      if (dd) dd.classList.remove("open");
-      const arrow = overlayContainer.querySelector(".fastdm-arrow");
-      if (arrow) arrow.classList.remove("open");
-
-      showToast("Sent to Fast DM — " + quality.label);
 
       setTimeout(() => { sending = false; }, 2000);
     });
@@ -519,8 +522,12 @@
           action: "download",
           url: src,
           headers: { Referer: window.location.href }
+        }, (response) => {
+          if (chrome.runtime.lastError || !response || !response.success) {
+            showToast("Failed to send to Fast DM");
+          }
         });
-        showToast("⚡ Sent to Fast DM");
+        showToast("Sent to Fast DM");
       });
 
       const wPos = getComputedStyle(wrapper).position;
@@ -562,8 +569,12 @@
       btn.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        chrome.runtime.sendMessage({ action: "download", url: videoUrl });
-        showToast("⚡ Sent to Fast DM");
+        chrome.runtime.sendMessage({ action: "download", url: videoUrl }, (response) => {
+          if (chrome.runtime.lastError || !response || !response.success) {
+            showToast("Failed to send to Fast DM");
+          }
+        });
+        showToast("Sent to Fast DM");
       });
 
       const wPos = getComputedStyle(wrapper).position;

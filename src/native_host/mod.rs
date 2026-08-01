@@ -39,7 +39,7 @@ pub fn run() {
             Err(_) => break,  // EOF atau error → exit
         }
 
-        let msg_len = u32::from_ne_bytes(len_buf) as usize;
+        let msg_len = u32::from_le_bytes(len_buf) as usize;
         if msg_len == 0 || msg_len > 1024 * 1024 {
             break;
         }
@@ -66,7 +66,7 @@ pub fn run() {
             Err(_) => break,
         };
 
-        let len = (resp_bytes.len() as u32).to_ne_bytes();
+        let len = (resp_bytes.len() as u32).to_le_bytes();
         if stdout.write_all(&len).is_err() { break; }
         if stdout.write_all(&resp_bytes).is_err() { break; }
         if stdout.flush().is_err() { break; }
@@ -106,7 +106,8 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
                 Err(e) => {
                     // Launch GUI dengan setsid agar TIDAK jadi child dari browser
                     use std::os::unix::process::CommandExt;
-                    let _ = std::process::Command::new("/opt/fast-dm/fast-dm")
+                    let gui_path = resolve_gui_path();
+                    let _ = std::process::Command::new(&gui_path)
                         .env("GDK_BACKEND", "x11")
                         .process_group(0)  // New process group
                         .spawn();
@@ -123,7 +124,27 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
     }
 }
 
+/// Resolve path to GUI binary (not the native host wrapper)
+fn resolve_gui_path() -> String {
+    // Installed path
+    let installed = std::path::Path::new("/opt/fast-dm/fast-dm");
+    if installed.exists() {
+        return installed.to_string_lossy().to_string();
+    }
+    // Development: same directory as current exe, parent is `fast-dm` (not `fast-dm-native`)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let candidate = parent.join("fast-dm");
+            if candidate.exists() {
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+    }
+    "/opt/fast-dm/fast-dm".to_string()
+}
+
 fn forward_to_gui(socket_path: &str, msg: &NativeMessage) -> Result<NativeResponse, String> {
+    use std::io::BufRead;
     use std::os::unix::net::UnixStream;
 
     let mut stream = UnixStream::connect(socket_path)
@@ -141,7 +162,21 @@ fn forward_to_gui(socket_path: &str, msg: &NativeMessage) -> Result<NativeRespon
     stream.write_all(b"\n").map_err(|e| e.to_string())?;
     stream.flush().map_err(|e| e.to_string())?;
 
+    // Read response from IPC server
+    let mut reader = std::io::BufReader::new(&stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).map_err(|e| e.to_string())?;
+
+    if line.is_empty() {
+        return Ok(NativeResponse { success: true, message: None, error: None });
+    }
+
+    let resp: serde_json::Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+    let success = resp.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
+
     Ok(NativeResponse {
-        success: true, message: None, error: None,
+        success,
+        message: resp.get("message").and_then(|v| v.as_str().map(|s| s.to_string())),
+        error: resp.get("error").and_then(|v| v.as_str().map(|s| s.to_string())),
     })
 }

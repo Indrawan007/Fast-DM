@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 const HOST_NAME: &str = "com.fastdm.native";
 const NATIVE_PATH: &str = "/opt/fast-dm/fast-dm-native";
+const EXT_ID: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/EXT_ID"));
 
 pub fn check_and_setup() -> Result<usize, Box<dyn std::error::Error>> {
     let native_path = resolve_native_path();
@@ -14,7 +15,7 @@ pub fn check_and_setup() -> Result<usize, Box<dyn std::error::Error>> {
         "description": "Fast Download Manager Native Host",
         "path": native_path,
         "type": "stdio",
-        "allowed_origins": ["chrome-extension://*/*"]
+        "allowed_origins": [format!("chrome-extension://{}/", EXT_ID.trim())]
     });
 
     let json_str = serde_json::to_string_pretty(&host_json)?;
@@ -26,15 +27,10 @@ pub fn check_and_setup() -> Result<usize, Box<dyn std::error::Error>> {
     for dir in &dirs {
         let manifest = dir.join(format!("{}.json", HOST_NAME));
 
-        // Cek apakah perlu update
+        // Cek apakah perlu update (bandingkan konten penuh, bukan hanya path)
         let need_update = if manifest.exists() {
             match fs::read_to_string(&manifest) {
-                Ok(content) => {
-                    match serde_json::from_str::<serde_json::Value>(&content) {
-                        Ok(existing) => existing["path"] != native_path,
-                        Err(_) => true,
-                    }
-                }
+                Ok(content) => content.trim() != json_str.trim(),
                 Err(_) => true,
             }
         } else {
@@ -92,7 +88,7 @@ pub fn register_extension_id(ext_id: &str) -> Result<usize, Box<dyn std::error::
     Ok(updated)
 }
 
-fn resolve_native_path() -> String {
+pub fn resolve_native_path() -> String {
     // Prioritas: /opt/fast-dm/fast-dm-native (dari .deb install)
     if Path::new(NATIVE_PATH).exists() {
         return NATIVE_PATH.to_string();

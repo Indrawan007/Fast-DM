@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "fast-dm"
-version = "2.1.0"
+version = "2.1.3"
 dependencies = [
  "chrono",
  "clap",

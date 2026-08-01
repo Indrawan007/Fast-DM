@@ -172,27 +172,32 @@ function showBadge(text, color) {
 // Download Interception
 // ═══════════════════════════════════════════════
 
-chrome.downloads.onCreated.addListener((downloadItem) => {
+chrome.downloads.onCreated.addListener(async (downloadItem) => {
   if (!config.enabled || !config.interceptDownloads) return;
 
   const url = downloadItem.finalUrl || downloadItem.url;
   if (!url || url.startsWith("blob:") || url.startsWith("data:")) return;
 
-  if (shouldInterceptUrl(url, downloadItem.fileSize, downloadItem.mime)) {
-    chrome.downloads.cancel(downloadItem.id, () => {
-      chrome.downloads.erase({ id: downloadItem.id });
+  if (!shouldInterceptUrl(url, downloadItem.fileSize, downloadItem.mime)) return;
 
-      let filename = null;
-      if (downloadItem.filename) {
-        const parts = downloadItem.filename.replace(/\\/g, "/").split("/");
-        filename = parts[parts.length - 1];
-      }
+  // Cancel Chrome download immediately to prevent partial file
+  chrome.downloads.cancel(downloadItem.id, () => {
+    chrome.downloads.erase({ id: downloadItem.id });
+  });
 
-      const headers = {};
-      if (downloadItem.referrer) headers["Referer"] = downloadItem.referrer;
+  let filename = null;
+  if (downloadItem.filename) {
+    const parts = downloadItem.filename.replace(/\\/g, "/").split("/");
+    filename = parts[parts.length - 1];
+  }
 
-      sendDownload(url, filename, headers);
-    });
+  const headers = {};
+  if (downloadItem.referrer) headers["Referer"] = downloadItem.referrer;
+
+  const result = await sendDownload(url, filename, headers).catch(() => null);
+  if (!result || !result.success) {
+    // Fallback: restart download in Chrome normally
+    chrome.downloads.download({ url, filename, saveAs: true });
   }
 });
 
@@ -202,6 +207,16 @@ function shouldInterceptUrl(url, fileSize, mimeType) {
   for (const pattern of config.excludePatterns) {
     if (urlLower.includes(pattern)) return false;
   }
+
+  // JANGAN intercept YouTube — biarkan Fast DM GUI handle
+  try {
+    const urlObj = new URL(url);
+    const ytHosts = ["youtube.com", "www.youtube.com", "youtu.be",
+                     "m.youtube.com", "music.youtube.com"];
+    if (ytHosts.includes(urlObj.hostname)) {
+      return false;
+    }
+  } catch (e) { /* ignore */ }
 
   try {
     const path = new URL(url).pathname.toLowerCase();
@@ -216,7 +231,7 @@ function shouldInterceptUrl(url, fileSize, mimeType) {
       "video/", "audio/",
       "application/zip", "application/x-rar",
       "application/x-7z", "application/gzip",
-      "application/pdf", "application/octet-stream",
+      "application/pdf",
       "application/x-iso9660-image",
       "application/x-bzip2", "application/x-tar",
     ];
@@ -226,16 +241,6 @@ function shouldInterceptUrl(url, fileSize, mimeType) {
   }
 
   if (fileSize && fileSize > config.interceptMinSize) return true;
-
-    // JANGAN intercept YouTube — biarkan Fast DM GUI handle
-  try {
-    const urlObj = new URL(url);
-    const ytHosts = ["youtube.com", "www.youtube.com", "youtu.be",
-                     "m.youtube.com", "music.youtube.com"];
-    if (ytHosts.includes(urlObj.hostname)) {
-      return false;
-    }
-  } catch (e) { /* ignore */ }
 
   return false;
 }

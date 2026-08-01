@@ -1,5 +1,4 @@
 use crate::downloader::types::*;
-use crate::downloader::youtube;
 use crate::downloader::DownloadEngine;
 use crate::gui::css;
 use crate::gui::download_row::DownloadRow;
@@ -36,22 +35,9 @@ pub fn build_window(
         .default_height(580)
         .build();
 
-    // Set icon LANGSUNG dari file, bukan dari icon theme
-    // Ini mencegah icon Fast DM bocor ke aplikasi lain via theme
-    let icon_paths = [
-        "/opt/fast-dm/fast-dm-icon.png",
-        "/opt/fast-dm/extension/icons/icon128.png",
-    ];
-    for path in &icon_paths {
-        if std::path::Path::new(path).exists() {
-            if let Ok(tex) = gtk4::gdk::Texture::from_filename(path) {
-                // GTK4: set icon via texture, tidak via icon name
-                // window.set_icon_name() TIDAK dipakai
-                let _ = tex; // Icon di-set via desktop file
-            }
-            break;
-        }
-    }
+    // GTK4 tidak punya set_icon() di Window
+    // Icon di-set via .desktop file field "Icon=io.github.fastdm.FastDownloadManager"
+    // dan file icon di /usr/share/icons/hicolor/*/apps/
 
     let root = GtkBox::new(Orientation::Vertical, 0);
 
@@ -136,24 +122,10 @@ pub fn build_window(
     statsbar.append(&stats_total);
     root.append(&statsbar);
 
-    // Apply CSS hanya ke window ini, bukan global
     root.add_css_class("fast-dm-app");
     window.add_css_class("fast-dm-window");
 
     let display = gtk4::prelude::RootExt::display(&window);
-
-    gtk4::style_context_add_provider_for_display(
-        &display,
-        &provider,
-        gtk4::STYLE_PROVIDER_PRIORITY_USER,
-    );
-
-    // Add scoping class
-    window.add_css_class("fast-dm-window");
-
-    // Apply CSS via display tapi semua rule sudah di-scope
-    let display = gtk4::prelude::RootExt::display(&window);
-
     gtk4::style_context_add_provider_for_display(
         &display,
         &provider,

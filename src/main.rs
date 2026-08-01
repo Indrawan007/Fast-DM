@@ -1,4 +1,3 @@
-#![allow(deprecated, dead_code, unused)]
 mod app;
 mod config;
 mod downloader;
@@ -18,13 +17,14 @@ struct Cli {
 }
 
 fn main() {
-    // Init logging
+    // Init logging (stderr agar tidak mengganggu native messaging stdout)
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("fast_dm=info")),
         )
         .with_target(false)
+        .with_writer(std::io::stderr)
         .compact()
         .init();
 
