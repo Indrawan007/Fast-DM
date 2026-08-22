@@ -43,6 +43,20 @@ pub async fn download(
         }
     }
 
+    // Pre-check ruang disk (total_size sudah diketahui dari resolve) —
+    // gagal cepat dengan pesan jelas, bukan file korup di tengah jalan
+    let (size, dir) = {
+        let i = info.lock().await;
+        (i.total_size, i.save_dir.clone())
+    };
+    if size > 0 && !has_space(&dir, size) {
+        let mut i = info.lock().await;
+        i.status = DownloadStatus::Error;
+        i.error_msg = format!("Ruang disk tidak cukup — butuh {}", format_size(size));
+        let _ = tx.send(DownloadEvent::Error(i.clone()));
+        return;
+    }
+
     // Build aria2c command
     let (cmd, input_file) = {
         let i = info.lock().await;
@@ -79,6 +93,14 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
     let mut input_content = format!("{}\n", info.url);
     input_content += &format!("  dir={}\n", info.save_dir);
     input_content += &format!("  out={}\n", info.filename);
+    // Header kustom dari browser extension (mis. Referer) — strip \r\n anti injection
+    for (k, v) in &info.headers {
+        let k = k.replace(['\r', '\n'], "");
+        let v = v.replace(['\r', '\n'], "");
+        if !k.is_empty() && !v.is_empty() {
+            input_content += &format!("  header={}: {}\n", k, v);
+        }
+    }
     input_content += "  continue=true\n";
     input_content += "  allow-overwrite=true\n";
     input_content += "  auto-file-renaming=false\n";
@@ -111,6 +133,14 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         "--check-certificate=false".into(),
     ];
 
+    // Cookies dari browser extension (Netscape format) — aria2 otomatis
+    // hanya memakai cookie yang cocok dengan domain target
+    let cookies = Config::config_dir().join("cookies.txt");
+    let mut cmd = cmd;
+    if cookies.exists() {
+        cmd.push(format!("--load-cookies={}", cookies.display()));
+    }
+
     (cmd, Some(input_path.to_string_lossy().to_string()))
 }
 
@@ -129,16 +159,28 @@ fn run_aria2c(
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
+            let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                "aria2c tidak terinstall — jalankan: sudo apt install aria2".to_string()
+            } else {
+                format!("aria2c: {}", e)
+            };
             let rt = tokio::runtime::Handle::current();
             rt.block_on(async {
                 let mut i = info.lock().await;
                 i.status = DownloadStatus::Error;
-                i.error_msg = format!("aria2c: {}", e);
+                i.error_msg = msg;
                 let _ = tx.send(DownloadEvent::Error(i.clone()));
             });
             return;
         }
     };
+
+    // Simpan PID supaya bisa di-kill saat app ditutup (anti orphan)
+    {
+        let rt = tokio::runtime::Handle::current();
+        let pid = child.id();
+        rt.block_on(async { info.lock().await.pid = Some(pid); });
+    }
 
     let stdout = child.stdout.take().unwrap();
     let reader = BufReader::new(stdout);
@@ -151,6 +193,9 @@ fn run_aria2c(
 
         if matches!(status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
             let _ = child.kill();
+            // Reap the child so it does not linger as a zombie process
+            let _ = child.wait();
+            rt.block_on(async { info.lock().await.pid = None; });
             return;
         }
 
@@ -197,6 +242,7 @@ fn run_aria2c(
     let rt = tokio::runtime::Handle::current();
     rt.block_on(async {
         let mut i = info.lock().await;
+        i.pid = None;
 
         if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
             return;
@@ -214,6 +260,17 @@ fn run_aria2c(
             let _ = tx.send(DownloadEvent::Error(i.clone()));
         }
     });
+}
+
+/// Cek ruang disk tersedia untuk direktori tujuan. Gagal cek → izinkan (jangan blokir).
+fn has_space(dir: &str, needed: u64) -> bool {
+    match nix::sys::statvfs::statvfs(std::path::Path::new(dir)) {
+        Ok(stat) => {
+            let avail = stat.blocks_available() * stat.block_size();
+            needed <= avail
+        }
+        Err(_) => true,
+    }
 }
 
 fn parse_eta(s: &str) -> u64 {

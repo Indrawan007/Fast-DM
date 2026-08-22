@@ -25,6 +25,7 @@ impl FastDmApp {
 
         app.connect_activate(move |app| {
             let (event_tx, event_rx) = mpsc::unbounded_channel::<DownloadEvent>();
+            let gui_event_tx = event_tx.clone();
 
             let rt = Box::leak(Box::new(
                 tokio::runtime::Builder::new_multi_thread()
@@ -54,7 +55,7 @@ impl FastDmApp {
                 })
                 .ok();
 
-            gui::window::build_window(app, engine.clone(), event_rx, rt_handle);
+            gui::window::build_window(app, engine.clone(), event_rx, gui_event_tx, rt_handle);
         });
 
         app.run();

@@ -4,4 +4,5 @@ ekstension/
 target/
 build.sh
 README.md
-
+extension_key.pem
+extension/*.crx

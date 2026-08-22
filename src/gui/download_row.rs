@@ -228,11 +228,12 @@ impl DownloadRow {
         let error  = matches!(status, DownloadStatus::Error);
         let done   = matches!(status, DownloadStatus::Completed);
         let cancel = matches!(status, DownloadStatus::Cancelled);
+        let queued = matches!(status, DownloadStatus::Queued);
 
         self.pause_btn.set_visible(active);
         self.resume_btn.set_visible(paused);
         self.retry_btn.set_visible(error);
-        self.cancel_btn.set_visible(active || paused || error);
+        self.cancel_btn.set_visible(active || paused || error || queued);
         self.open_btn.set_visible(done);
         self.remove_btn.set_visible(done || cancel || error);
     }

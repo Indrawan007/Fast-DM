@@ -12,6 +12,8 @@ struct NativeMessage {
     extension_id: Option<String>,
     #[serde(default)]
     headers: std::collections::HashMap<String, String>,
+    cookies: Option<String>,
+    domain: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -150,12 +152,19 @@ fn forward_to_gui(socket_path: &str, msg: &NativeMessage) -> Result<NativeRespon
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|e| e.to_string())?;
 
+    // Timeout supaya native host tidak hang selamanya jika GUI macet
+    let timeout = Some(std::time::Duration::from_secs(5));
+    stream.set_read_timeout(timeout).map_err(|e| e.to_string())?;
+    stream.set_write_timeout(timeout).map_err(|e| e.to_string())?;
+
     let json = serde_json::to_string(&serde_json::json!({
         "action": msg.action,
         "url": msg.url,
         "filename": msg.filename,
         "quality": msg.quality,
         "headers": msg.headers,
+        "cookies": msg.cookies,
+        "domain": msg.domain,
     })).unwrap();
 
     stream.write_all(json.as_bytes()).map_err(|e| e.to_string())?;

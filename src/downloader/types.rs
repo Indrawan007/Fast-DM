@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -42,10 +43,25 @@ pub struct DownloadInfo {
     pub connections: u8,
     pub retry_count: u8,
     pub is_youtube: bool,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default)]
+    pub quality: Option<String>,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub created: i64,
 }
 
 impl DownloadInfo {
-    pub fn new(id: String, url: String, filename: String, save_dir: String) -> Self {
+    pub fn new(
+        id: String,
+        url: String,
+        filename: String,
+        save_dir: String,
+        headers: HashMap<String, String>,
+        quality: Option<String>,
+    ) -> Self {
         Self {
             id, url, filename, save_dir,
             status: DownloadStatus::Queued,
@@ -54,6 +70,9 @@ impl DownloadInfo {
             error_msg: String::new(),
             connections: 0, retry_count: 0,
             is_youtube: false,
+            headers, quality,
+            pid: None,
+            created: chrono::Utc::now().timestamp(),
         }
     }
 

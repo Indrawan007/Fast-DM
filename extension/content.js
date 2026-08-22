@@ -71,7 +71,9 @@
       action: "download",
       url: url,
       headers: {},
-      quality: quality || "best_mp4"
+      quality: quality || "best_mp4",
+      cookies: document.cookie,
+      domain: location.hostname
     }, (response) => {
       if (chrome.runtime.lastError || !response || !response.success) {
         showToast("Failed to send to Fast DM");
@@ -394,7 +396,9 @@
       chrome.runtime.sendMessage({
         action: "download",
         url: url,
-        quality: quality.id
+        quality: quality.id,
+        cookies: document.cookie,
+        domain: location.hostname
       }, (response) => {
         if (chrome.runtime.lastError || !response || !response.success) {
           showToast("Failed to send to Fast DM");
@@ -525,9 +529,10 @@
         }, (response) => {
           if (chrome.runtime.lastError || !response || !response.success) {
             showToast("Failed to send to Fast DM");
+          } else {
+            showToast("Sent to Fast DM");
           }
         });
-        showToast("Sent to Fast DM");
       });
 
       const wPos = getComputedStyle(wrapper).position;
@@ -572,9 +577,10 @@
         chrome.runtime.sendMessage({ action: "download", url: videoUrl }, (response) => {
           if (chrome.runtime.lastError || !response || !response.success) {
             showToast("Failed to send to Fast DM");
+          } else {
+            showToast("Sent to Fast DM");
           }
         });
-        showToast("Sent to Fast DM");
       });
 
       const wPos = getComputedStyle(wrapper).position;
@@ -589,27 +595,34 @@
 
   function startObserver() {
     let lastUrl = location.href;
+    let scanTimer = null;
 
     const observer = new MutationObserver(() => {
-      if (location.href !== lastUrl) {
-        lastUrl = location.href;
-        const newId = extractVideoId();
-        if (newId !== currentVideoId) {
-          currentVideoId = newId;
-          // Cleanup overlay dan dropdown
-          dropdownVisible = false;
-          if (overlayContainer) {
-            overlayContainer.remove();
-            overlayContainer = null;
+      // Collapse mutation bursts → max 1 scan per 400ms (CPU savings on heavy SPA pages)
+      if (scanTimer) return;
+      scanTimer = setTimeout(() => {
+        scanTimer = null;
+
+        if (location.href !== lastUrl) {
+          lastUrl = location.href;
+          const newId = extractVideoId();
+          if (newId !== currentVideoId) {
+            currentVideoId = newId;
+            // Cleanup overlay dan dropdown
+            dropdownVisible = false;
+            if (overlayContainer) {
+              overlayContainer.remove();
+              overlayContainer = null;
+            }
           }
         }
-      }
 
-      if (isYouTube()) {
-        attachOverlay();
-      } else {
-        detectNonYTVideos();
-      }
+        if (isYouTube()) {
+          attachOverlay();
+        } else {
+          detectNonYTVideos();
+        }
+      }, 400);
     });
 
     observer.observe(document.body, {

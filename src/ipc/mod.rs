@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::downloader::DownloadEngine;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -15,6 +16,8 @@ struct IpcMessage {
     extension_id: Option<String>,
     #[serde(default)]
     headers: std::collections::HashMap<String, String>,
+    cookies: Option<String>,
+    domain: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -85,8 +88,15 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
                 },
             };
 
+            // Tulis cookies.txt SEBELUM download start (yt-dlp membacanya saat spawn)
+            if let (Some(c), Some(d)) = (msg.cookies.as_deref(), msg.domain.as_deref()) {
+                if let Err(e) = write_cookies_txt(c, d) {
+                    tracing::warn!("set cookies: {}", e);
+                }
+            }
+
             let id = engine
-                .add_download(&url, msg.filename.as_deref(), None, true)
+                .add_download(&url, msg.filename.as_deref(), None, true, msg.headers, msg.quality)
                 .await;
 
             IpcResponse {
@@ -173,4 +183,53 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
             message: None,
         },
     }
+}
+
+/// Konversi cookie string browser ("k=v; k=v") → file Netscape untuk yt-dlp
+fn write_cookies_txt(cookie_header: &str, domain: &str) -> Result<(), String> {
+    if cookie_header.len() > 256 * 1024 {
+        return Err("cookies too large".into());
+    }
+    let host = domain.trim().trim_start_matches("www.");
+    if host.is_empty() || host.chars().any(|c| c.is_whitespace()) {
+        return Err("invalid domain".into());
+    }
+
+    let expires = chrono::Utc::now().timestamp() + 31_536_000;
+    let mut out = String::from("# Netscape HTTP Cookie File\n");
+    let mut count = 0;
+
+    for pair in cookie_header.split(';') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let name = name.trim().replace(['\t', '\r', '\n'], "");
+        let value = value.trim().replace(['\t', '\r', '\n'], "");
+        if name.is_empty() {
+            continue;
+        }
+        out.push_str(&format!(
+            ".{}\tTRUE\t/\tFALSE\t{}\t{}\t{}\n",
+            host, expires, name, value
+        ));
+        count += 1;
+    }
+
+    if count == 0 {
+        return Err("no cookies".into());
+    }
+
+    let path = Config::config_dir().join("cookies.txt");
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(&path, out).map_err(|e| e.to_string())?;
+
+    // Cookies = rahasia → 0600
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+
+    Ok(())
 }
