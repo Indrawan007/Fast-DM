@@ -164,6 +164,8 @@ fn run_ytdlp(
 
         if matches!(status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
             let _ = child.kill();
+            // Reap the child so it does not linger as a zombie process
+            let _ = child.wait();
             return;
         }
 

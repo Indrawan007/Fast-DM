@@ -525,9 +525,10 @@
         }, (response) => {
           if (chrome.runtime.lastError || !response || !response.success) {
             showToast("Failed to send to Fast DM");
+          } else {
+            showToast("Sent to Fast DM");
           }
         });
-        showToast("Sent to Fast DM");
       });
 
       const wPos = getComputedStyle(wrapper).position;
@@ -572,9 +573,10 @@
         chrome.runtime.sendMessage({ action: "download", url: videoUrl }, (response) => {
           if (chrome.runtime.lastError || !response || !response.success) {
             showToast("Failed to send to Fast DM");
+          } else {
+            showToast("Sent to Fast DM");
           }
         });
-        showToast("Sent to Fast DM");
       });
 
       const wPos = getComputedStyle(wrapper).position;

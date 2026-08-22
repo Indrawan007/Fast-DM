@@ -197,7 +197,10 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
   const result = await sendDownload(url, filename, headers).catch(() => null);
   if (!result || !result.success) {
     // Fallback: restart download in Chrome normally
-    chrome.downloads.download({ url, filename, saveAs: true });
+    // (omit filename when unknown — Chrome rejects null for optional string args)
+    const opts = { url, saveAs: true };
+    if (filename) opts.filename = filename;
+    chrome.downloads.download(opts);
   }
 });
 

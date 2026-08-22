@@ -169,7 +169,12 @@ pub fn sanitize_filename(name: &str) -> String {
     if cleaned.is_empty() {
         format!("download_{}", chrono::Utc::now().timestamp())
     } else if cleaned.len() > 200 {
-        cleaned[..200].to_string()
+        // Truncate on a char boundary — raw byte slicing panics on multi-byte UTF-8
+        let mut end = 200;
+        while !cleaned.is_char_boundary(end) {
+            end -= 1;
+        }
+        cleaned[..end].to_string()
     } else {
         cleaned.to_string()
     }
