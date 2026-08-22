@@ -43,6 +43,20 @@ pub async fn download(
         }
     }
 
+    // Pre-check ruang disk (total_size sudah diketahui dari resolve) —
+    // gagal cepat dengan pesan jelas, bukan file korup di tengah jalan
+    let (size, dir) = {
+        let i = info.lock().await;
+        (i.total_size, i.save_dir.clone())
+    };
+    if size > 0 && !has_space(&dir, size) {
+        let mut i = info.lock().await;
+        i.status = DownloadStatus::Error;
+        i.error_msg = format!("Ruang disk tidak cukup — butuh {}", format_size(size));
+        let _ = tx.send(DownloadEvent::Error(i.clone()));
+        return;
+    }
+
     // Build aria2c command
     let (cmd, input_file) = {
         let i = info.lock().await;
@@ -137,11 +151,16 @@ fn run_aria2c(
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
+            let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                "aria2c tidak terinstall — jalankan: sudo apt install aria2".to_string()
+            } else {
+                format!("aria2c: {}", e)
+            };
             let rt = tokio::runtime::Handle::current();
             rt.block_on(async {
                 let mut i = info.lock().await;
                 i.status = DownloadStatus::Error;
-                i.error_msg = format!("aria2c: {}", e);
+                i.error_msg = msg;
                 let _ = tx.send(DownloadEvent::Error(i.clone()));
             });
             return;
@@ -233,6 +252,17 @@ fn run_aria2c(
             let _ = tx.send(DownloadEvent::Error(i.clone()));
         }
     });
+}
+
+/// Cek ruang disk tersedia untuk direktori tujuan. Gagal cek → izinkan (jangan blokir).
+fn has_space(dir: &str, needed: u64) -> bool {
+    match nix::sys::statvfs::statvfs(std::path::Path::new(dir)) {
+        Ok(stat) => {
+            let avail = stat.blocks_available() * stat.block_size();
+            needed <= avail
+        }
+        Err(_) => true,
+    }
 }
 
 fn parse_eta(s: &str) -> u64 {

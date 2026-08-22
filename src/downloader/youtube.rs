@@ -169,11 +169,16 @@ fn run_ytdlp(
     let mut child = match Command::new(&cmd[0]).args(&cmd[1..]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) => {
+            let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                "yt-dlp tidak terinstall — jalankan: sudo apt install yt-dlp".to_string()
+            } else {
+                format!("yt-dlp: {}", e)
+            };
             let rt = tokio::runtime::Handle::current();
             rt.block_on(async {
                 let mut i = info.lock().await;
                 i.status = DownloadStatus::Error;
-                i.error_msg = format!("yt-dlp: {}", e);
+                i.error_msg = msg;
                 let _ = tx.send(DownloadEvent::Error(i.clone()));
             });
             return;
@@ -250,11 +255,19 @@ fn run_ytdlp(
                 let pct: f64 = m[1].parse().unwrap_or(0.0);
                 let speed_str = m.get(3).map(|s| s.as_str()).unwrap_or("");
                 let speed = parse_speed(speed_str);
+                // Size (grup 2) & ETA (grup 4) hanya ada di format progress lengkap
+                let total = m.get(2).map(|s| parse_speed(s.as_str())).unwrap_or(0);
+                let eta = m.get(4).map(|s| parse_eta_hms(s.as_str())).unwrap_or(0);
 
                 rt.block_on(async {
                     let mut i = info.lock().await;
                     i.progress = pct;
                     i.speed = speed;
+                    if total > 0 {
+                        i.total_size = total;
+                        i.downloaded = (pct / 100.0 * total as f64) as u64;
+                    }
+                    i.eta = eta;
                     i.error_msg.clear();
                     let _ = tx.send(DownloadEvent::Progress(i.clone()));
                 });
@@ -282,6 +295,9 @@ fn run_ytdlp(
             i.status = DownloadStatus::Completed;
             i.progress = 100.0;
             i.speed = 0;
+            if i.total_size > 0 {
+                i.downloaded = i.total_size;
+            }
             i.error_msg.clear();
             let _ = tx.send(DownloadEvent::Completed(i.clone()));
         } else {
@@ -292,6 +308,20 @@ fn run_ytdlp(
             let _ = tx.send(DownloadEvent::Error(i.clone()));
         }
     });
+}
+
+/// Parse ETA yt-dlp ("MM:SS" atau "HH:MM:SS") → detik
+fn parse_eta_hms(s: &str) -> u64 {
+    let nums: Vec<u64> = s
+        .split(':')
+        .filter_map(|p| p.trim().parse().ok())
+        .collect();
+    match nums.len() {
+        3 => nums[0] * 3600 + nums[1] * 60 + nums[2],
+        2 => nums[0] * 60 + nums[1],
+        1 => nums[0],
+        _ => 0,
+    }
 }
 
 fn parse_speed(s: &str) -> u64 {

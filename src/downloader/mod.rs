@@ -83,6 +83,33 @@ impl DownloadEngine {
             .map(|f| sanitize_filename(f))
             .unwrap_or_else(|| extract_filename_from_url(url));
 
+        // Deduplikasi: download live (url+dir+file sama) → kembalikan yang sudah ada.
+        // Tanpa ini, dua proses aria2 bisa menulis file yang sama dan saling korup.
+        let live = {
+            let downloads = self.downloads.read().await;
+            let mut found = None;
+            for (existing_id, info) in downloads.iter() {
+                let i = info.lock().await;
+                let same = i.url == url && i.save_dir == save && i.filename == fname;
+                let is_live = matches!(
+                    i.status,
+                    DownloadStatus::Queued
+                        | DownloadStatus::Resolving
+                        | DownloadStatus::Downloading
+                        | DownloadStatus::Paused
+                );
+                if same && is_live {
+                    found = Some(existing_id.clone());
+                    break;
+                }
+            }
+            found
+        };
+        if let Some(existing) = live {
+            tracing::info!("Duplicate download ignored: {} ({})", fname, existing);
+            return existing;
+        }
+
         let is_yt = youtube::is_youtube_url(url);
 
         let mut info = DownloadInfo::new(
