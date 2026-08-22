@@ -477,14 +477,13 @@ pub fn build_window(
     let rt_close = rt.clone();
     window.connect_close_request(move |_| {
         let eng = engine_close.clone();
-        if let Ok(all) = rt_close.block_on(async move { eng.get_all_downloads().await }) {
-            for d in all {
-                if let Some(pid) = d.pid {
-                    let _ = nix::sys::signal::kill(
-                        nix::unistd::Pid::from_raw(pid as i32),
-                        nix::sys::signal::Signal::SIGKILL,
-                    );
-                }
+        let all = rt_close.block_on(async move { eng.get_all_downloads().await });
+        for d in all {
+            if let Some(pid) = d.pid {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
             }
         }
         glib::Propagation::Proceed
@@ -504,6 +503,7 @@ fn settings_row(label: &str, widget: &impl IsA<gtk4::Widget>) -> GtkBox {
 }
 
 /// Dialog settings — perubahan berlaku untuk download baru tanpa restart
+#[allow(deprecated)] // gtk4::Dialog deprecated sejak 4.10 — pola sama seperti youtube_dialog.rs
 fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
     let dialog = gtk4::Dialog::with_buttons(
         Some("Settings"),
