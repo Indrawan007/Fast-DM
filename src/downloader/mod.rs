@@ -6,6 +6,7 @@ use crate::config::Config;
 use regex::Regex;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use types::*;
@@ -16,16 +17,49 @@ pub struct DownloadEngine {
     downloads: Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
     event_tx: mpsc::UnboundedSender<DownloadEvent>,
     config: &'static Config,
+    dirty: Arc<AtomicBool>,
 }
 
 #[allow(dead_code)]
 impl DownloadEngine {
     pub fn new(event_tx: mpsc::UnboundedSender<DownloadEvent>) -> Self {
+        // Restore session sebelumnya — yang tadinya aktif jadi Paused agar bisa di-resume
+        let mut map = HashMap::new();
+        for mut d in load_session() {
+            if matches!(
+                d.status,
+                DownloadStatus::Downloading | DownloadStatus::Resolving | DownloadStatus::Queued
+            ) {
+                d.status = DownloadStatus::Paused;
+                d.speed = 0;
+            }
+            d.pid = None;
+            map.insert(d.id.clone(), Arc::new(Mutex::new(d)));
+        }
+        let downloads = Arc::new(RwLock::new(map));
+
+        let dirty = Arc::new(AtomicBool::new(false));
+
+        // Flusher: tulis session.json maks 1x/2 detik, hanya jika ada perubahan
+        let downloads_flush = downloads.clone();
+        let dirty_flush = dirty.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                flush_session(&downloads_flush, &dirty_flush).await;
+            }
+        });
+
         Self {
-            downloads: Arc::new(RwLock::new(HashMap::new())),
+            downloads,
             event_tx,
             config: Config::load(),
+            dirty,
         }
+    }
+
+    fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::SeqCst);
     }
 
     pub async fn add_download(
@@ -63,6 +97,7 @@ impl DownloadEngine {
 
         let info = Arc::new(Mutex::new(info));
         self.downloads.write().await.insert(id.clone(), info.clone());
+        self.mark_dirty();
 
         if auto_start {
             self.start_download(&id).await;
@@ -105,7 +140,7 @@ impl DownloadEngine {
             return;
         }
 
-        spawn_supervised(self.downloads.clone(), info, tx, config);
+        spawn_supervised(self.downloads.clone(), info, tx, config, self.dirty.clone());
     }
 
     pub async fn pause_download(&self, id: &str) {
@@ -116,6 +151,7 @@ impl DownloadEngine {
                 i.status = DownloadStatus::Paused;
                 i.speed = 0;
                 let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
+                self.mark_dirty();
             }
         }
     }
@@ -140,6 +176,7 @@ impl DownloadEngine {
             i.status = DownloadStatus::Cancelled;
             i.speed = 0;
             let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
+            self.mark_dirty();
         }
     }
 
@@ -153,6 +190,7 @@ impl DownloadEngine {
         }
         drop(downloads);
         self.downloads.write().await.remove(id);
+        self.mark_dirty();
     }
 
     pub async fn get_download(&self, id: &str) -> Option<DownloadInfo> {
@@ -180,6 +218,7 @@ fn spawn_supervised(
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
     config: &'static Config,
+    dirty: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
         let is_yt = { info.lock().await.is_youtube };
@@ -190,8 +229,11 @@ fn spawn_supervised(
             aria2::download(info, tx.clone(), config).await;
         }
 
+        // Status terminal (completed/error) → persist ke session.json
+        dirty.store(true, Ordering::SeqCst);
+
         // Slot bebas → jalankan antrian tertua
-        promote_next(downloads, tx, config).await;
+        promote_next(downloads, tx, config, dirty).await;
     });
 }
 
@@ -200,6 +242,7 @@ async fn promote_next(
     downloads: Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
     config: &'static Config,
+    dirty: Arc<AtomicBool>,
 ) {
     let max = usize::from(config.max_concurrent.max(1));
 
@@ -238,12 +281,55 @@ async fn promote_next(
             i.status = DownloadStatus::Resolving;
             let _ = tx.send(DownloadEvent::Progress(i.clone()));
         }
-        spawn_supervised(downloads, info, tx, config);
+        spawn_supervised(downloads, info, tx, config, dirty);
     }
 }
 
 static RE_INVALID_CHARS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"[<>:"/\\|?*\x00-\x1f]"#).unwrap());
+
+fn session_file() -> std::path::PathBuf {
+    Config::config_dir().join("session.json")
+}
+
+fn load_session() -> Vec<DownloadInfo> {
+    match std::fs::read_to_string(session_file()) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Tulis snapshot session secara atomic (tmp + rename), dibatasi 200 entri terbaru
+async fn flush_session(
+    downloads: &Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
+    dirty: &AtomicBool,
+) {
+    if !dirty.swap(false, Ordering::SeqCst) {
+        return;
+    }
+
+    let mut all: Vec<DownloadInfo> = {
+        let map = downloads.read().await;
+        let mut v = Vec::with_capacity(map.len());
+        for info in map.values() {
+            v.push(info.lock().await.clone());
+        }
+        v
+    };
+
+    all.sort_by_key(|d| d.created);
+    if all.len() > 200 {
+        all = all.split_off(all.len() - 200);
+    }
+
+    if let Ok(json) = serde_json::to_string(&all) {
+        let path = session_file();
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
 
 /// Sanitize filename
 pub fn sanitize_filename(name: &str) -> String {

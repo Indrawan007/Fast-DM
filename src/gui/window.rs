@@ -20,6 +20,7 @@ pub fn build_window(
     app: &Application,
     engine: Arc<DownloadEngine>,
     mut event_rx: mpsc::UnboundedReceiver<DownloadEvent>,
+    gui_tx: mpsc::UnboundedSender<DownloadEvent>,
     rt: tokio::runtime::Handle,
 ) {
 
@@ -227,6 +228,7 @@ pub fn build_window(
     });
 
     // ── Event listener ──
+    let app_ev = app.clone();
     let rows_ev = rows.clone();
     let listbox_ev = listbox.clone();
     let engine_ev = engine.clone();
@@ -249,6 +251,21 @@ pub fn build_window(
             statuses_ev.borrow_mut().insert(
                 info.id.clone(), info.status
             );
+
+            // Notifikasi desktop saat selesai / gagal
+            match &event {
+                DownloadEvent::Completed(i) => {
+                    let n = gtk4::gio::Notification::new("Download selesai");
+                    n.set_body(Some(&i.filename));
+                    app_ev.send_notification(Some(&i.id), &n);
+                }
+                DownloadEvent::Error(i) => {
+                    let n = gtk4::gio::Notification::new("Download gagal");
+                    n.set_body(Some(&i.filename));
+                    app_ev.send_notification(Some(&i.id), &n);
+                }
+                _ => {}
+            }
 
             let mut rows_map = rows_ev.borrow_mut();
 
@@ -402,6 +419,22 @@ pub fn build_window(
             }
         }
     });
+
+    // Seed rows dari session hasil restore (persistensi antar restart)
+    {
+        let engine_seed = engine.clone();
+        let rt_seed = rt.clone();
+        glib::spawn_future_local(async move {
+            if let Ok(all) = rt_seed
+                .spawn(async move { engine_seed.get_all_downloads().await })
+                .await
+            {
+                for d in all {
+                    let _ = gui_tx.send(DownloadEvent::Progress(d));
+                }
+            }
+        });
+    }
 
     // Kill semua child process (aria2c/yt-dlp) saat window ditutup — anti orphan
     let engine_close = engine.clone();

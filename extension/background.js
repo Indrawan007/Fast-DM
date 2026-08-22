@@ -123,7 +123,7 @@ function sendToNative(message) {
   });
 }
 
-async function sendDownload(url, filename = null, headers = {}, quality = null) {
+async function sendDownload(url, filename = null, headers = {}, quality = null, cookies = null, domain = null) {
   if (!filename) {
     try {
       const urlObj = new URL(url);
@@ -147,6 +147,12 @@ async function sendDownload(url, filename = null, headers = {}, quality = null) 
   // Tambah quality jika ada (untuk YouTube)
   if (quality) {
     message.quality = quality;
+  }
+
+  // Cookies halaman (untuk yt-dlp — video membersih+/login)
+  if (cookies && domain) {
+    message.cookies = cookies;
+    message.domain = domain;
   }
 
   try {
@@ -292,7 +298,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.url,
       message.filename,
       message.headers || {},
-      message.quality || null
+      message.quality || null,
+      message.cookies || null,
+      message.domain || null
     )
       .then(r => sendResponse(r))
       .catch(e => sendResponse({ success: false, error: e.message }));

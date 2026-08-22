@@ -71,7 +71,9 @@
       action: "download",
       url: url,
       headers: {},
-      quality: quality || "best_mp4"
+      quality: quality || "best_mp4",
+      cookies: document.cookie,
+      domain: location.hostname
     }, (response) => {
       if (chrome.runtime.lastError || !response || !response.success) {
         showToast("Failed to send to Fast DM");
@@ -394,7 +396,9 @@
       chrome.runtime.sendMessage({
         action: "download",
         url: url,
-        quality: quality.id
+        quality: quality.id,
+        cookies: document.cookie,
+        domain: location.hostname
       }, (response) => {
         if (chrome.runtime.lastError || !response || !response.success) {
           showToast("Failed to send to Fast DM");
