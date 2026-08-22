@@ -236,6 +236,7 @@ pub fn build_window(
     let win_settings = window.clone();
     let engine_settings = engine.clone();
     let rt_settings = rt.clone();
+    let settings_btn_h = settings_btn.clone();
     settings_btn.connect_clicked(move |_| {
         // Baca config saat ini (main thread → block_on aman)
         let eng = engine_settings.clone();
@@ -255,8 +256,8 @@ pub fn build_window(
         });
 
         // Feedback singkat
-        settings_btn.set_label("✓ Saved");
-        let btn = settings_btn.clone();
+        settings_btn_h.set_label("✓ Saved");
+        let btn = settings_btn_h.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(1500), move || {
             btn.set_label("Settings");
             glib::ControlFlow::Break
