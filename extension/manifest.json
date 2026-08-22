@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Fast Download Manager",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Intercept downloads and send to Fast DM for maximum speed",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzcnUNRMxVZs2b05va7W7R5vKtJBHx5yGEPKJPGVRNGWfZ5QlbWYMvOJrDwDyhbrq27HZ7Z1u8Q1q+PjlFYTzITmC8kw5Z4ZxF55ccyKKRTrXk4UC+WGbPuNX0Ewd32CYu0wNUmZGOH0POhTWZHT4JB0lwDa2TWaQ5U8E8CT8iO7PKnE7cOir2f55O3vQHpPGtVQ/BiI1b3TWWdueD3KKWeWZEtN0FTkSddSXDyPYrKpz7alSMVPb/umpXnJZK81msU4DhGI6gbZ9VpO5onP7Z4Mq1lciIGu+ITYAq+UPKJmc6+96YGCwujPYRxk5j+iN0IUHGloSXXGYIt0KJDH1xwIDAQAB",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApdj71DkdEpTkSpIvr11z1ojBnNRg3xmWEAk0VMwqeNjXWeldDBVqJYMP4a6Qaq5ORuFgmEx8eC7v9yuFoFiChudWU4WcbtlF8+9tjHrPrkMvQDX28N1bBx6y4/vopzxtU2elKIeQ8MI+NwIMkeVLlxC9Xzhnjxqwk9upu5hoRbB6N5OxdgsNexCoBtFQzMdtcBhfXwwMAd2T7vrOABMAuVltMZrsZshpilXF6zYfLHJJ1N8g/CpijUzYL8xTwzukAhjSbC1tOAJRW6RTQAtYgCsikl8vUS+0MsMwFyCW55/uGDcrnmaw/bYG/utazairEBqRrr+1ezvhNzagD+cf7QIDAQAB",
   "permissions": [
     "downloads",
     "nativeMessaging",
@@ -19,8 +19,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
