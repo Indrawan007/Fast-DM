@@ -133,6 +133,14 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         "--check-certificate=false".into(),
     ];
 
+    // Cookies dari browser extension (Netscape format) — aria2 otomatis
+    // hanya memakai cookie yang cocok dengan domain target
+    let cookies = Config::config_dir().join("cookies.txt");
+    let mut cmd = cmd;
+    if cookies.exists() {
+        cmd.push(format!("--load-cookies={}", cookies.display()));
+    }
+
     (cmd, Some(input_path.to_string_lossy().to_string()))
 }
 

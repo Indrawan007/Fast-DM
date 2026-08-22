@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Fast Download Manager
+Comment=High-speed download manager
+Exec=/opt/fast-dm/fast-dm
+Icon=io.github.fastdm.FastDownloadManager
+Type=Application
+Terminal=false
+Categories=Network;FileTransfer;
+StartupWMClass=io.github.fastdm.FastDownloadManager

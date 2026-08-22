@@ -16,7 +16,7 @@ use uuid::Uuid;
 pub struct DownloadEngine {
     downloads: Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
     event_tx: mpsc::UnboundedSender<DownloadEvent>,
-    config: &'static Config,
+    config: Arc<RwLock<Config>>,
     dirty: Arc<AtomicBool>,
 }
 
@@ -53,13 +53,24 @@ impl DownloadEngine {
         Self {
             downloads,
             event_tx,
-            config: Config::load(),
+            config: Arc::new(RwLock::new(Config::load().clone())),
             dirty,
         }
     }
 
     fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::SeqCst);
+    }
+
+    pub async fn get_config(&self) -> Config {
+        self.config.read().await.clone()
+    }
+
+    /// Simpan config ke disk + apply live (berlaku untuk download baru)
+    pub async fn update_config(&self, cfg: Config) -> Result<(), String> {
+        cfg.save().map_err(|e| e.to_string())?;
+        *self.config.write().await = cfg;
+        Ok(())
     }
 
     pub async fn add_download(
@@ -72,9 +83,10 @@ impl DownloadEngine {
         quality: Option<String>,
     ) -> String {
         let id = format!("dl_{}", Uuid::new_v4().to_string()[..8].to_string());
-        let save = save_dir
-            .unwrap_or(&self.config.download_dir)
-            .to_string();
+        let save = match save_dir {
+            Some(d) => d.to_string(),
+            None => self.config.read().await.download_dir.clone(),
+        };
 
         // Ensure save dir exists
         let _ = std::fs::create_dir_all(&save);
@@ -143,7 +155,7 @@ impl DownloadEngine {
         };
 
         // Tegakkan max_concurrent: jika slot penuh, antri (Queued)
-        let max = usize::from(self.config.max_concurrent.max(1));
+        let max = usize::from(self.config.read().await.max_concurrent.max(1));
         let active = {
             let downloads = self.downloads.read().await;
             let mut n = 0usize;
@@ -157,7 +169,7 @@ impl DownloadEngine {
         };
 
         let tx = self.event_tx.clone();
-        let config = self.config;
+        let config = self.config.read().await.clone();
 
         if active >= max {
             let mut i = info.lock().await;
@@ -244,16 +256,16 @@ fn spawn_supervised(
     downloads: Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
-    config: &'static Config,
+    config: Config,
     dirty: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
         let is_yt = { info.lock().await.is_youtube };
 
         if is_yt {
-            youtube::download(info, tx.clone(), config).await;
+            youtube::download(info, tx.clone(), &config).await;
         } else {
-            aria2::download(info, tx.clone(), config).await;
+            aria2::download(info, tx.clone(), &config).await;
         }
 
         // Status terminal (completed/error) → persist ke session.json
@@ -268,7 +280,7 @@ fn spawn_supervised(
 async fn promote_next(
     downloads: Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
-    config: &'static Config,
+    config: Config,
     dirty: Arc<AtomicBool>,
 ) {
     let max = usize::from(config.max_concurrent.max(1));

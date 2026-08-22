@@ -149,6 +149,18 @@ async function sendDownload(url, filename = null, headers = {}, quality = null, 
     message.quality = quality;
   }
 
+  // Ambil cookies situs via API bila tidak dikirim eksplisit
+  // (download login-protected — dipakai yt-dlp & aria2 --load-cookies)
+  if (!cookies) {
+    try {
+      const jar = await chrome.cookies.getAll({ url });
+      if (jar && jar.length > 0) {
+        cookies = jar.map(c => c.name + "=" + c.value).join("; ");
+        domain = new URL(url).hostname;
+      }
+    } catch (e) { /* ignore */ }
+  }
+
   // Cookies halaman (untuk yt-dlp — video membersih+/login)
   if (cookies && domain) {
     message.cookies = cookies;

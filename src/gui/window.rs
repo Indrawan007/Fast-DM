@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::downloader::types::*;
 use crate::downloader::DownloadEngine;
 use crate::gui::css;
@@ -72,9 +73,13 @@ pub fn build_window(
     let clear_btn = Button::with_label("Clear Done");
     clear_btn.add_css_class("btn-clear");
 
+    let settings_btn = Button::with_label("Settings");
+    settings_btn.add_css_class("btn-clear");
+
     toolbar.append(&url_entry);
     toolbar.append(&add_btn);
     toolbar.append(&clear_btn);
+    toolbar.append(&settings_btn);
     root.append(&toolbar);
 
     // ── List ──
@@ -225,6 +230,37 @@ pub fn build_window(
         for id in &to_remove {
             st.remove(id);
         }
+    });
+
+    // ── Settings handler ──
+    let win_settings = window.clone();
+    let engine_settings = engine.clone();
+    let rt_settings = rt.clone();
+    settings_btn.connect_clicked(move |_| {
+        // Baca config saat ini (main thread → block_on aman)
+        let eng = engine_settings.clone();
+        let cur = rt_settings.block_on(async move { eng.get_config().await });
+
+        let Some(cfg) = show_settings_dialog(win_settings.upcast_ref(), &cur) else {
+            return;
+        };
+
+        // Simpan ke disk + apply live
+        let eng2 = engine_settings.clone();
+        let handle = rt_settings.spawn(async move {
+            let _ = eng2.update_config(cfg).await;
+        });
+        glib::spawn_future_local(async move {
+            let _ = handle.await;
+        });
+
+        // Feedback singkat
+        settings_btn.set_label("✓ Saved");
+        let btn = settings_btn.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(1500), move || {
+            btn.set_label("Settings");
+            glib::ControlFlow::Break
+        });
     });
 
     // ── Event listener ──
@@ -455,4 +491,112 @@ pub fn build_window(
     });
 
     window.present();
+}
+
+fn settings_row(label: &str, widget: &impl IsA<gtk4::Widget>) -> GtkBox {
+    let row = GtkBox::new(Orientation::Horizontal, 10);
+    let lbl = Label::new(Some(label));
+    lbl.set_hexpand(true);
+    lbl.set_halign(gtk4::Align::Start);
+    row.append(&lbl);
+    row.append(widget);
+    row
+}
+
+/// Dialog settings — perubahan berlaku untuk download baru tanpa restart
+fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
+    let dialog = gtk4::Dialog::with_buttons(
+        Some("Settings"),
+        Some(parent),
+        gtk4::DialogFlags::MODAL | gtk4::DialogFlags::DESTROY_WITH_PARENT,
+        &[],
+    );
+    dialog.set_default_size(420, -1);
+
+    let content = dialog.content_area();
+    content.set_spacing(10);
+    content.set_margin_top(16);
+    content.set_margin_bottom(12);
+    content.set_margin_start(20);
+    content.set_margin_end(20);
+
+    let folder_entry = Entry::new();
+    folder_entry.set_text(&cur.download_dir);
+    content.append(&settings_row("Download folder", &folder_entry));
+
+    let conn_spin = gtk4::SpinButton::with_range(1.0, 32.0, 1.0);
+    conn_spin.set_value(cur.max_connections as f64);
+    content.append(&settings_row("Koneksi per server", &conn_spin));
+
+    let conc_spin = gtk4::SpinButton::with_range(1.0, 10.0, 1.0);
+    conc_spin.set_value(cur.max_concurrent as f64);
+    content.append(&settings_row("Download bersamaan (antrian)", &conc_spin));
+
+    let speed_entry = Entry::new();
+    speed_entry.set_text(&cur.max_overall_speed);
+    speed_entry.set_placeholder_text(Some("0 = unlimited, mis. 512K / 2M"));
+    content.append(&settings_row("Speed limit total", &speed_entry));
+
+    // Buttons
+    let btn_box = GtkBox::new(Orientation::Horizontal, 8);
+    btn_box.set_halign(gtk4::Align::End);
+    btn_box.set_margin_top(8);
+
+    let cancel_btn = Button::with_label("Batal");
+    cancel_btn.add_css_class("btn-action");
+    cancel_btn.add_css_class("btn-cancel");
+
+    let save_btn = Button::with_label("Simpan");
+    save_btn.add_css_class("btn-download");
+
+    let dialog_weak = dialog.downgrade();
+    cancel_btn.connect_clicked(move |_| {
+        if let Some(d) = dialog_weak.upgrade() {
+            d.response(gtk4::ResponseType::Cancel);
+        }
+    });
+
+    let dialog_weak = dialog.downgrade();
+    save_btn.connect_clicked(move |_| {
+        if let Some(d) = dialog_weak.upgrade() {
+            d.response(gtk4::ResponseType::Ok);
+        }
+    });
+
+    btn_box.append(&cancel_btn);
+    btn_box.append(&save_btn);
+    content.append(&btn_box);
+
+    dialog.show();
+
+    // Pola nested main loop yang sama dengan youtube_dialog.rs
+    let main_context = glib::MainContext::default();
+    let response = std::rc::Rc::new(std::cell::RefCell::new(gtk4::ResponseType::Cancel));
+
+    let rv = response.clone();
+    dialog.connect_response(move |d, resp| {
+        *rv.borrow_mut() = resp;
+        d.close();
+    });
+
+    while dialog.is_visible() {
+        main_context.iteration(true);
+    }
+
+    if *response.borrow() != gtk4::ResponseType::Ok {
+        return None;
+    }
+
+    let mut cfg = cur.clone();
+    let dir = folder_entry.text().trim().to_string();
+    if !dir.is_empty() {
+        cfg.download_dir = dir;
+    }
+    cfg.max_connections = conn_spin.value() as u8;
+    cfg.max_concurrent = conc_spin.value() as u8;
+    let speed = speed_entry.text().trim().to_string();
+    if !speed.is_empty() {
+        cfg.max_overall_speed = speed;
+    }
+    Some(cfg)
 }

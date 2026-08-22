@@ -9,7 +9,8 @@
     "nativeMessaging",
     "storage",
     "activeTab",
-    "contextMenus"
+    "contextMenus",
+    "cookies"
   ],
   "host_permissions": [
     "<all_urls>"
