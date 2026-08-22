@@ -34,6 +34,8 @@ impl DownloadEngine {
         filename: Option<&str>,
         save_dir: Option<&str>,
         auto_start: bool,
+        headers: HashMap<String, String>,
+        quality: Option<String>,
     ) -> String {
         let id = format!("dl_{}", Uuid::new_v4().to_string()[..8].to_string());
         let save = save_dir
@@ -54,6 +56,8 @@ impl DownloadEngine {
             url.to_string(),
             fname,
             save,
+            headers,
+            quality,
         );
         info.is_youtube = is_yt;
 
@@ -68,27 +72,40 @@ impl DownloadEngine {
     }
 
     pub async fn start_download(&self, id: &str) {
-        let downloads = self.downloads.read().await;
-        let info = match downloads.get(id) {
-            Some(i) => i.clone(),
-            None => return,
+        let info = {
+            let downloads = self.downloads.read().await;
+            match downloads.get(id) {
+                Some(i) => i.clone(),
+                None => return,
+            }
+        };
+
+        // Tegakkan max_concurrent: jika slot penuh, antri (Queued)
+        let max = usize::from(self.config.max_concurrent.max(1));
+        let active = {
+            let downloads = self.downloads.read().await;
+            let mut n = 0usize;
+            for other in downloads.values() {
+                let status = other.lock().await.status;
+                if matches!(status, DownloadStatus::Downloading | DownloadStatus::Resolving) {
+                    n += 1;
+                }
+            }
+            n
         };
 
         let tx = self.event_tx.clone();
-        let config = self.config.clone();
+        let config = self.config;
 
-        tokio::spawn(async move {
-            let is_yt = {
-                let i = info.lock().await;
-                i.is_youtube
-            };
+        if active >= max {
+            let mut i = info.lock().await;
+            i.status = DownloadStatus::Queued;
+            i.speed = 0;
+            let _ = tx.send(DownloadEvent::Progress(i.clone()));
+            return;
+        }
 
-            if is_yt {
-                youtube::download(info, tx, &config).await;
-            } else {
-                aria2::download(info, tx, &config).await;
-            }
-        });
+        spawn_supervised(self.downloads.clone(), info, tx, config);
     }
 
     pub async fn pause_download(&self, id: &str) {
@@ -154,6 +171,74 @@ impl DownloadEngine {
             result.push(info.lock().await.clone());
         }
         result
+    }
+}
+
+/// Jalankan download lalu promote antrian berikutnya saat selesai
+fn spawn_supervised(
+    downloads: Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
+    info: Arc<Mutex<DownloadInfo>>,
+    tx: mpsc::UnboundedSender<DownloadEvent>,
+    config: &'static Config,
+) {
+    tokio::spawn(async move {
+        let is_yt = { info.lock().await.is_youtube };
+
+        if is_yt {
+            youtube::download(info, tx.clone(), config).await;
+        } else {
+            aria2::download(info, tx.clone(), config).await;
+        }
+
+        // Slot bebas → jalankan antrian tertua
+        promote_next(downloads, tx, config).await;
+    });
+}
+
+/// Cari download Queued tertua dan jalankan jika ada slot kosong
+async fn promote_next(
+    downloads: Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
+    tx: mpsc::UnboundedSender<DownloadEvent>,
+    config: &'static Config,
+) {
+    let max = usize::from(config.max_concurrent.max(1));
+
+    let next = {
+        let map = downloads.read().await;
+        let mut active = 0usize;
+        let mut oldest: Option<(i64, Arc<Mutex<DownloadInfo>>)> = None;
+
+        for info in map.values() {
+            let i = info.lock().await;
+            match i.status {
+                DownloadStatus::Downloading | DownloadStatus::Resolving => active += 1,
+                DownloadStatus::Queued => {
+                    if oldest.as_ref().map_or(true, |(t, _)| i.created < *t) {
+                        oldest = Some((i.created, info.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if active >= max {
+            None
+        } else {
+            oldest.map(|(_, i)| i)
+        }
+    };
+
+    if let Some(info) = next {
+        {
+            let mut i = info.lock().await;
+            // Bisa saja sudah di-cancel/di-resume ke slot lain — skip
+            if i.status != DownloadStatus::Queued {
+                return;
+            }
+            i.status = DownloadStatus::Resolving;
+            let _ = tx.send(DownloadEvent::Progress(i.clone()));
+        }
+        spawn_supervised(downloads, info, tx, config);
     }
 }
 

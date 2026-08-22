@@ -86,7 +86,7 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
             };
 
             let id = engine
-                .add_download(&url, msg.filename.as_deref(), None, true)
+                .add_download(&url, msg.filename.as_deref(), None, true, msg.headers, msg.quality)
                 .await;
 
             IpcResponse {

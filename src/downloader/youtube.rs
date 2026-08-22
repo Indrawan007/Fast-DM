@@ -74,22 +74,54 @@ fn cookie_args() -> Vec<String> {
     vec![]
 }
 
+/// Mapping pilihan kualitas dari extension → argumen yt-dlp
+fn quality_args(quality: Option<&str>) -> Vec<String> {
+    match quality {
+        Some(q) if q.ends_with('p') && q[..q.len() - 1].chars().all(|c| c.is_ascii_digit()) => {
+            let h = &q[..q.len() - 1];
+            vec![
+                "--format".into(),
+                format!("bestvideo[height<={}]+bestaudio/best[height<={}]/best", h, h),
+            ]
+        }
+        Some("audio_best") => vec![
+            "--format".into(), "bestaudio/best".into(),
+            "--extract-audio".into(),
+            "--audio-format".into(), "m4a".into(),
+        ],
+        Some("audio_mp3") => vec![
+            "--format".into(), "bestaudio/best".into(),
+            "--extract-audio".into(),
+            "--audio-format".into(), "mp3".into(),
+            "--audio-quality".into(), "0".into(),
+        ],
+        _ => vec![
+            "--format".into(),
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best".into(),
+        ],
+    }
+}
+
 pub async fn download(
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
     _config: &Config,
 ) {
-    let (url, save_dir) = {
+    let (url, save_dir, headers, quality) = {
         let mut i = info.lock().await;
         i.status = DownloadStatus::Downloading;
         let _ = tx.send(DownloadEvent::Progress(i.clone()));
-        (i.url.clone(), i.save_dir.clone())
+        (
+            i.url.clone(),
+            i.save_dir.clone(),
+            i.headers.clone(),
+            i.quality.clone(),
+        )
     };
 
-    let mut cmd = vec![
-        "yt-dlp".to_string(),
-        "--format".into(),
-        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best".into(),
+    let mut cmd = vec!["yt-dlp".to_string()];
+    cmd.extend(quality_args(quality.as_deref()));
+    cmd.extend([
         "--output".into(),
         format!("{}/%(title)s.%(ext)s", save_dir),
         "--no-playlist".into(),
@@ -103,9 +135,20 @@ pub async fn download(
         "--merge-output-format".into(), "mp4".into(),
         "--embed-thumbnail".into(),
         "--embed-metadata".into(),
-    ];
+    ]);
 
     cmd.extend(cookie_args());
+
+    // Header kustom dari browser extension (mis. Referer)
+    for (k, v) in &headers {
+        let k = k.replace(['\r', '\n'], "");
+        let v = v.replace(['\r', '\n'], "");
+        if !k.is_empty() && !v.is_empty() {
+            cmd.push("--add-header".into());
+            cmd.push(format!("{}:{}", k, v));
+        }
+    }
+
     cmd.push(url);
 
     let info_clone = info.clone();
@@ -137,6 +180,13 @@ fn run_ytdlp(
         }
     };
 
+    // Simpan PID supaya bisa di-kill saat app ditutup (anti orphan)
+    {
+        let rt = tokio::runtime::Handle::current();
+        let pid = child.id();
+        rt.block_on(async { info.lock().await.pid = Some(pid); });
+    }
+
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
 
@@ -166,6 +216,7 @@ fn run_ytdlp(
             let _ = child.kill();
             // Reap the child so it does not linger as a zombie process
             let _ = child.wait();
+            rt.block_on(async { info.lock().await.pid = None; });
             return;
         }
 
@@ -222,6 +273,7 @@ fn run_ytdlp(
     let rt = tokio::runtime::Handle::current();
     rt.block_on(async {
         let mut i = info.lock().await;
+        i.pid = None;
         if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
             return;
         }

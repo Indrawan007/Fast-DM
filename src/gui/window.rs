@@ -169,7 +169,7 @@ pub fn build_window(
 
         glib::spawn_future_local(async move {
             let _ = rt.spawn(async move {
-                eng.add_download(&url, None, None, true).await
+                eng.add_download(&url, None, None, true, Default::default(), None).await
             }).await;
         });
     };
@@ -401,6 +401,24 @@ pub fn build_window(
                 });
             }
         }
+    });
+
+    // Kill semua child process (aria2c/yt-dlp) saat window ditutup — anti orphan
+    let engine_close = engine.clone();
+    let rt_close = rt.clone();
+    window.connect_close_request(move |_| {
+        let eng = engine_close.clone();
+        if let Ok(all) = rt_close.block_on(async move { eng.get_all_downloads().await }) {
+            for d in all {
+                if let Some(pid) = d.pid {
+                    let _ = nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(pid as i32),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                }
+            }
+        }
+        glib::Propagation::Proceed
     });
 
     window.present();

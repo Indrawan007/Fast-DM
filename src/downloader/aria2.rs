@@ -79,6 +79,14 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
     let mut input_content = format!("{}\n", info.url);
     input_content += &format!("  dir={}\n", info.save_dir);
     input_content += &format!("  out={}\n", info.filename);
+    // Header kustom dari browser extension (mis. Referer) — strip \r\n anti injection
+    for (k, v) in &info.headers {
+        let k = k.replace(['\r', '\n'], "");
+        let v = v.replace(['\r', '\n'], "");
+        if !k.is_empty() && !v.is_empty() {
+            input_content += &format!("  header={}: {}\n", k, v);
+        }
+    }
     input_content += "  continue=true\n";
     input_content += "  allow-overwrite=true\n";
     input_content += "  auto-file-renaming=false\n";
@@ -140,6 +148,13 @@ fn run_aria2c(
         }
     };
 
+    // Simpan PID supaya bisa di-kill saat app ditutup (anti orphan)
+    {
+        let rt = tokio::runtime::Handle::current();
+        let pid = child.id();
+        rt.block_on(async { info.lock().await.pid = Some(pid); });
+    }
+
     let stdout = child.stdout.take().unwrap();
     let reader = BufReader::new(stdout);
     let mut last_update = Instant::now();
@@ -153,6 +168,7 @@ fn run_aria2c(
             let _ = child.kill();
             // Reap the child so it does not linger as a zombie process
             let _ = child.wait();
+            rt.block_on(async { info.lock().await.pid = None; });
             return;
         }
 
@@ -199,6 +215,7 @@ fn run_aria2c(
     let rt = tokio::runtime::Handle::current();
     rt.block_on(async {
         let mut i = info.lock().await;
+        i.pid = None;
 
         if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
             return;
