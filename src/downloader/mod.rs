@@ -6,7 +6,7 @@ use crate::config::Config;
 use regex::Regex;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use types::*;
 use url::Url;
@@ -157,13 +157,15 @@ impl DownloadEngine {
     }
 }
 
+static RE_INVALID_CHARS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"[<>:"/\\|?*\x00-\x1f]"#).unwrap());
+
 /// Sanitize filename
 pub fn sanitize_filename(name: &str) -> String {
     let name = name.split('?').next().unwrap_or(name);
     let name = name.split('#').next().unwrap_or(name);
 
-    let re = Regex::new(r#"[<>:"/\\|?*\x00-\x1f]"#).unwrap();
-    let cleaned = re.replace_all(name, "_").to_string();
+    let cleaned = RE_INVALID_CHARS.replace_all(name, "_").to_string();
     let cleaned = cleaned.trim_matches(|c: char| c == '.' || c == ' ');
 
     if cleaned.is_empty() {

@@ -591,27 +591,34 @@
 
   function startObserver() {
     let lastUrl = location.href;
+    let scanTimer = null;
 
     const observer = new MutationObserver(() => {
-      if (location.href !== lastUrl) {
-        lastUrl = location.href;
-        const newId = extractVideoId();
-        if (newId !== currentVideoId) {
-          currentVideoId = newId;
-          // Cleanup overlay dan dropdown
-          dropdownVisible = false;
-          if (overlayContainer) {
-            overlayContainer.remove();
-            overlayContainer = null;
+      // Collapse mutation bursts → max 1 scan per 400ms (CPU savings on heavy SPA pages)
+      if (scanTimer) return;
+      scanTimer = setTimeout(() => {
+        scanTimer = null;
+
+        if (location.href !== lastUrl) {
+          lastUrl = location.href;
+          const newId = extractVideoId();
+          if (newId !== currentVideoId) {
+            currentVideoId = newId;
+            // Cleanup overlay dan dropdown
+            dropdownVisible = false;
+            if (overlayContainer) {
+              overlayContainer.remove();
+              overlayContainer = null;
+            }
           }
         }
-      }
 
-      if (isYouTube()) {
-        attachOverlay();
-      } else {
-        detectNonYTVideos();
-      }
+        if (isYouTube()) {
+          attachOverlay();
+        } else {
+          detectNonYTVideos();
+        }
+      }, 400);
     });
 
     observer.observe(document.body, {

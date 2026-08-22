@@ -237,6 +237,7 @@ pub fn build_window(
     let statuses_ev = download_statuses.clone();
 
     glib::spawn_future_local(async move {
+        let mut last_stats = std::time::Instant::now();
         while let Some(event) = event_rx.recv().await {
             let info = match &event {
                 DownloadEvent::Progress(i) => i,
@@ -363,32 +364,42 @@ pub fn build_window(
                 rows_map.insert(id, row);
             }
 
-            // Update stats
+            // Update stats — selalu refresh saat status berubah;
+            // throttle 500ms saat download aktif (hindari spawn task 5x/detik per download)
             drop(rows_map);
-            let eng = engine_ev.clone();
-            let rt = rt_ev.clone();
-            let sa = stats_a.clone();
-            let ss = stats_s.clone();
-            let st = stats_t.clone();
+            let is_active = matches!(
+                info.status,
+                DownloadStatus::Downloading | DownloadStatus::Resolving
+            );
 
-            glib::spawn_future_local(async move {
-                if let Ok(all) = rt.spawn(async move {
-                    eng.get_all_downloads().await
-                }).await {
-                    let active: Vec<_> = all.iter()
-                        .filter(|d| matches!(d.status, DownloadStatus::Downloading))
-                        .collect();
-                    let total_speed: u64 = active.iter().map(|d| d.speed).sum();
+            if !is_active || last_stats.elapsed().as_millis() >= 500 {
+                last_stats = std::time::Instant::now();
 
-                    sa.set_text(&format!("Active {}", active.len()));
-                    ss.set_text(&if total_speed > 0 {
-                        format!("{}/s", format_size(total_speed))
-                    } else {
-                        "0 B/s".to_string()
-                    });
-                    st.set_text(&format!("Total {}", all.len()));
-                }
-            });
+                let eng = engine_ev.clone();
+                let rt = rt_ev.clone();
+                let sa = stats_a.clone();
+                let ss = stats_s.clone();
+                let st = stats_t.clone();
+
+                glib::spawn_future_local(async move {
+                    if let Ok(all) = rt.spawn(async move {
+                        eng.get_all_downloads().await
+                    }).await {
+                        let active: Vec<_> = all.iter()
+                            .filter(|d| matches!(d.status, DownloadStatus::Downloading))
+                            .collect();
+                        let total_speed: u64 = active.iter().map(|d| d.speed).sum();
+
+                        sa.set_text(&format!("Active {}", active.len()));
+                        ss.set_text(&if total_speed > 0 {
+                            format!("{}/s", format_size(total_speed))
+                        } else {
+                            "0 B/s".to_string()
+                        });
+                        st.set_text(&format!("Total {}", all.len()));
+                    }
+                });
+            }
         }
     });
 
