@@ -54,7 +54,7 @@ pub fn build_window(
     title.add_css_class("header-title");
 
     // B5: subtitle berisi info berguna → versi aplikasi
-    let subtitle = Label::new(Some("v2.1.3"));
+    let subtitle = Label::new(Some("v2.2.0"));
     subtitle.add_css_class("header-subtitle");
     subtitle.set_valign(gtk4::Align::End);
 

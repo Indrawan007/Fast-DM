@@ -1,15 +1,3 @@
-diff --git a/Cargo.toml b/Cargo.toml
-index ad0c8b3..27fa7e9 100644
---- a/Cargo.toml
-+++ b/Cargo.toml
-@@ -1,6 +1,6 @@
- [package]
- name = "fast-dm"
--version = "2.1.3"
-+version = "2.2.0"
- edition = "2021"
- authors = ["FastDM Contributors"]
- description = "High-speed download manager with browser integration"
 diff --git a/Cargo.lock b/Cargo.lock
 index 91bbab3..704dfa8 100644
 --- a/Cargo.lock
@@ -23,6 +11,18 @@ index 91bbab3..704dfa8 100644
  dependencies = [
   "chrono",
   "clap",
+diff --git a/Cargo.toml b/Cargo.toml
+index ad0c8b3..27fa7e9 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "fast-dm"
+-version = "2.1.3"
++version = "2.2.0"
+ edition = "2021"
+ authors = ["FastDM Contributors"]
+ description = "High-speed download manager with browser integration"
 diff --git a/extension/manifest.json b/extension/manifest.json
 index 92fea93..2a7faa6 100644
 --- a/extension/manifest.json
@@ -34,6 +34,8 @@ index 92fea93..2a7faa6 100644
 -  "version": "2.1.3",
 +  "version": "2.2.0",
    "description": "Intercept downloads and send to Fast DM for maximum speed",
+   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApdj71DkdEpTkSpIvr11z1ojBnNRg3xmWEAk0VMwqeNjXWeldDBVqJYMP4a6Qaq5ORuFgmEx8eC7v9yuFoFiChudWU4WcbtlF8+9tjHrPrkMvQDX28N1bBx6y4/vopzxtU2elKIeQ8MI+NwIMkeVLlxC9Xzhnjxqwk9upu5hoRbB6N5OxdgsNexCoBtFQzMdtcBhfXwwMAd2T7vrOABMAuVltMZrsZshpilXF6zYfLHJJ1N8g/CpijUzYL8xTwzukAhjSbC1tOAJRW6RTQAtYgCsikl8vUS+0MsMwFyCW55/uGDcrnmaw/bYG/utazairEBqRrr+1ezvhNzagD+cf7QIDAQAB",
+   "permissions": [
 diff --git a/src/gui/window.rs b/src/gui/window.rs
 index 709e64e..cc04eb4 100644
 --- a/src/gui/window.rs
@@ -45,3 +47,4 @@ index 709e64e..cc04eb4 100644
 -    let subtitle = Label::new(Some("v2.1.3"));
 +    let subtitle = Label::new(Some("v2.2.0"));
      subtitle.add_css_class("header-subtitle");
+     subtitle.set_valign(gtk4::Align::End);
