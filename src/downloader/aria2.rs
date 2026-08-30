@@ -40,7 +40,15 @@ pub async fn download(
         let _ = tx.send(DownloadEvent::Progress(i.clone()));
     }
 
-    resolve_filename(&info, config.verify_tls).await;
+    // Resolve filename + tolak halaman HTML (penyebab "file .php" terdownload)
+    if let Err(msg) = resolve_filename(&info, config.verify_tls).await {
+        let mut i = info.lock().await;
+        i.status = DownloadStatus::Error;
+        i.error_msg = msg;
+        i.speed = 0;
+        let _ = tx.send(DownloadEvent::Error(i.clone()));
+        return;
+    }
 
     // Check if cancelled during resolve
     {
@@ -357,7 +365,7 @@ fn parse_aria2_size(s: &str) -> u64 {
     (val * mult) as u64
 }
 
-async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) {
+async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) -> Result<(), String> {
     let (url, headers) = {
         let i = info.lock().await;
         (i.url.clone(), i.headers.clone())
@@ -371,15 +379,19 @@ async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) {
         .build()
     {
         Ok(c) => c,
-        Err(_) => return,
+        Err(_) => return Ok(()),
     };
 
     // Header kustom (mis. Referer) juga dipakai saat resolve agar server yang
     // butuh auth tidak menolak → nama & ukuran tetap terdeteksi.
+    let cookie = cookie_header_for(&url);
     let build_get = || {
         let mut req = client.get(&url).header("Range", "bytes=0-0");
         for (k, v) in &headers {
             req = req.header(k.as_str(), v.as_str());
+        }
+        if let Some(c) = &cookie {
+            req = req.header("Cookie", c.as_str());
         }
         req
     };
@@ -387,6 +399,9 @@ async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) {
         let mut req = client.head(&url);
         for (k, v) in &headers {
             req = req.header(k.as_str(), v.as_str());
+        }
+        if let Some(c) = &cookie {
+            req = req.header("Cookie", c.as_str());
         }
         req
     };
@@ -400,10 +415,36 @@ async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) {
             // Fallback: try HEAD
             match build_head().send().await {
                 Ok(r) => r,
-                Err(_) => return,
+                Err(_) => return Ok(()),
             }
         }
     };
+
+    // 0. Tolak halaman HTML / HTTP error — inilah penyebab "file .php" yang
+    //    sebenarnya isi halaman web. Jangan pernah menyimpannya sebagai download.
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Server menjawab HTTP {} — bukan file video (halaman error/protected).",
+            resp.status().as_u16()
+        ));
+    }
+    let ct_raw = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let ct = ct_raw.split(';').next().unwrap_or("").trim().to_lowercase();
+    let is_html = ct == "text/html"
+        || ct == "application/xhtml+xml"
+        || ct.contains("text/html");
+    if is_html {
+        return Err(
+            "URL ini mengembalikan halaman web (HTML), bukan file video — posting/halaman situs \
+             (mis. *.php/*.html). Buka halaman video lalu klik tombol ⚡ Unduh di player."
+                .to_string(),
+        );
+    }
 
     let mut i = info.lock().await;
 
@@ -453,18 +494,64 @@ async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) {
         }
     }
 
-    // 4. Jika masih tanpa extension, tebak dari content-type
-    if !i.filename.contains('.') {
-        if let Some(ct) = resp.headers().get("content-type") {
-            if let Ok(ct_str) = ct.to_str() {
-                if let Some(ext) = content_type_to_ext(ct_str) {
-                    i.filename = format!("{}{}", i.filename, ext);
-                }
-            }
+    // 4. Ekstensi dari content-type:
+    //    a. nama tanpa ekstensi → tambahkan ekstensi media
+    //    b. nama *.php / *.asp / *.jsp / *.do / *.html yang ternyata
+    //       mengembalikan video → GANTI ekstensi ke ekstensi media asli
+    if let Some(ext) = content_type_to_ext(&ct) {
+        let lower = i.filename.to_lowercase();
+        let fake_ext = [".php", ".asp", ".aspx", ".jsp", ".do", ".action", ".html", ".htm"]
+            .iter()
+            .any(|e| lower.ends_with(e));
+        if fake_ext && !i.filename.is_empty() {
+            let stem = i.filename
+                .rsplit_once('.')
+                .map(|(s, _)| s.to_string())
+                .unwrap_or_else(|| i.filename.clone());
+            tracing::info!("Ganti ekstensi {} → {} (content-type: {})", i.filename, ext, ct);
+            i.filename = format!("{}{}", stem, ext);
+        } else if !i.filename.contains('.') {
+            i.filename = format!("{}{}", i.filename, ext);
         }
     }
 
     tracing::info!("Final filename: {} (size: {})", i.filename, i.total_size);
+    Ok(())
+}
+
+/// Baca cookies.txt (Netscape) untuk domain URL → header "Cookie: ...".
+/// Supaya resolve & aria2 memakai sesi login yang sama dengan browser.
+fn cookie_header_for(url: &str) -> Option<String> {
+    let host = url::Url::parse(url).ok()?.host_str()?.trim_start_matches("www.").to_ascii_lowercase();
+    let path = Config::config_dir().join("cookies.txt");
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut pairs: Vec<String> = Vec::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 7 {
+            continue;
+        }
+        let domain = f[0].trim_start_matches('.').to_ascii_lowercase();
+        // Cookie berlaku bila domain sama / subdomain dari domain cookie
+        if host == domain || host.ends_with(&format!(".{}", domain)) {
+            let name = f[5].trim();
+            let value = f[6].trim();
+            if !name.is_empty() {
+                pairs.push(format!("{}={}", name, value));
+            }
+        }
+    }
+
+    if pairs.is_empty() {
+        None
+    } else {
+        Some(pairs.join("; "))
+    }
 }
 
 fn is_generic_filename(name: &str) -> bool {

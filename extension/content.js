@@ -547,9 +547,17 @@
       btn.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        // 1) src langsung → 2) kandidat sniffer (.m3u8/.mpd) → 3) URL halaman
-        //    (Fallback 3 dibuat supaya yt-dlp bisa resolve via extractor situs)
-        const target = direct ? src : candidateFor() || window.location.href;
+        // PRIORITAS:
+        // 1) URL media asli dari sniffer (.m3u8/.mpd/.mp4 — paling andal, bisa
+        //    menyelamatkan link *.php yang sebenarnya wrapper halaman)
+        // 2) src langsung BILA jelas file media (bukan *.php/*.html)
+        // 3) URL halaman — yt-dlp akan mencoba extractor situs
+        const srcLow = (src || "").toLowerCase();
+        const srcIsPage = /\.(php|html?|aspx?|jsp|asp|cgi)(\?|$)/.test(srcLow);
+        const target =
+          candidateFor() ||
+          (direct && !srcIsPage ? src : null) ||
+          window.location.href;
         chrome.runtime.sendMessage(
           {
             action: "download",
