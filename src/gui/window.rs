@@ -6,7 +6,7 @@ use crate::gui::download_row::DownloadRow;
 use crate::gui::youtube_dialog;
 
 use gtk4::prelude::*;
-use gtk4::gdk::{ContentFormats, DragAction, DNDResult};
+use gtk4::gdk::{ContentFormats, DragAction};
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, CssProvider,
     DropTarget, Entry, EventControllerKey, Label, ListBox, Orientation,
@@ -19,6 +19,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+#[allow(deprecated)] // gtk4::Dialog (dialog konfirmasi tutup) — dipakai demi pola lama yang sudah ada
 pub fn build_window(
     app: &Application,
     engine: Arc<DownloadEngine>,
@@ -216,15 +217,15 @@ pub fn build_window(
     url_entry.connect_activate(move |_| on_add_clone());
 
     // ── C2: drag & drop URL (dari browser/file manager) ke window ──
-    let drop = DropTarget::new(
-        Some(&ContentFormats::new(&["text/uri-list"])),
-        DragAction::COPY,
-    );
-    window.add_controller(&drop);
+    let drop_target = DropTarget::builder()
+        .actions(DragAction::COPY)
+        .formats(&ContentFormats::new(&["text/uri-list"]))
+        .build();
+    window.add_controller(drop_target.clone());
 
     let entry_drop = url_entry.clone();
     let on_add_drop = on_add.clone();
-    drop.connect_drop(move |_, value, _x, _y| {
+    drop_target.connect_drop(move |_, value, _x, _y| {
         let mut urls: Vec<String> = Vec::new();
         if let Ok(text) = value.get::<String>() {
             for line in text.lines() {
@@ -247,15 +248,14 @@ pub fn build_window(
                 }
             });
         }
-        DNDResult::Success
+        true
     });
 
     // ── C3: shortcut keyboard Ctrl+L → fokus input URL ──
     let key_ctrl = EventControllerKey::new();
-    window.add_controller(&key_ctrl);
     let entry_ctrl = url_entry.clone();
     key_ctrl.connect_key_pressed(move |_, key, _code, mods| {
-        if mods.contains(gtk4::gdk::ModifierType::CONTROL) && key == gtk4::gdk::Key::l {
+        if mods.contains(gtk4::gdk::ModifierType::CONTROL_MASK) && key == gtk4::gdk::Key::l {
             entry_ctrl.grab_focus();
             entry_ctrl.select_region(0, -1);
             glib::Propagation::Stop
@@ -263,6 +263,7 @@ pub fn build_window(
             glib::Propagation::Proceed
         }
     });
+    window.add_controller(key_ctrl);
 
     // ── Clear Done handler ──
     let rows_clear = rows.clone();
@@ -545,7 +546,10 @@ pub fn build_window(
                 let rt = rt_ev.clone();
                 let sa = stats_a.clone();
                 let ss = stats_s.clone();
+                let sq = stats_q.clone();
                 let st = stats_t.clone();
+                let pa_btn_l = pa_btn.clone();
+                let pa_state_l = pa_state.clone();
 
                 glib::spawn_future_local(async move {
                     if let Ok(all) = rt.spawn(async move {
@@ -574,16 +578,16 @@ pub fn build_window(
                         let has_pausable = all.iter().any(|d| matches!(d.status,
                             DownloadStatus::Paused | DownloadStatus::Error));
                         if has_active {
-                            pa_state.set(false);
-                            pa_btn.set_label("Jeda Semua");
+                            pa_state_l.set(false);
+                            pa_btn_l.set_label("Jeda Semua");
                         } else if has_pausable {
-                            pa_state.set(true);
-                            pa_btn.set_label("Lanjut Semua");
+                            pa_state_l.set(true);
+                            pa_btn_l.set_label("Lanjut Semua");
                         } else {
-                            pa_state.set(false);
-                            pa_btn.set_label("Jeda Semua");
+                            pa_state_l.set(false);
+                            pa_btn_l.set_label("Jeda Semua");
                         }
-                        pa_btn.set_sensitive(has_active || has_pausable);
+                        pa_btn_l.set_sensitive(has_active || has_pausable);
                     }
                 });
             }
@@ -731,7 +735,7 @@ fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
     browse_btn.connect_clicked(move |_| {
         let chooser = gtk4::FileDialog::builder()
             .title("Pilih folder unduhan")
-            .accept_label(Some("Pilih"))
+            .accept_label("Pilih")
             .build();
         let entry = folder_entry_b.clone();
         chooser.select_folder(Some(&parent_chooser), gtk4::gio::Cancellable::NONE, move |res| {
