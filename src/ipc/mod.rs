@@ -35,7 +35,15 @@ pub async fn start_server(engine: Arc<DownloadEngine>) -> Result<(), Box<dyn std
     let uid = nix::unistd::getuid();
     let socket_path = format!("/tmp/fast-dm-{}.sock", uid);
 
-    // Cleanup old socket
+    // Single-instance: kalau ada instance lain yang masih melayani socket ini,
+    // jangan ambil alih. Kalau tidak, instance kedua menghapus socket instance
+    // pertama dan semua koneksi browser masuk ke instance yang salah.
+    if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+        tracing::info!("IPC already active on {} — skip server", socket_path);
+        return Ok(());
+    }
+
+    // Socket basi (instance lama sudah mati) → bersihkan lalu bind
     let _ = std::fs::remove_file(&socket_path);
 
     let listener = UnixListener::bind(&socket_path)?;

@@ -68,6 +68,19 @@ impl DownloadEngine {
 
     /// Simpan config ke disk + apply live (berlaku untuk download baru)
     pub async fn update_config(&self, cfg: Config) -> Result<(), String> {
+        // Validasi input sebelum disimpan — nilai invalid bikin aria2 gagal start
+        if cfg.max_connections == 0 || cfg.max_connections > 32 {
+            return Err("Koneksi harus 1–32".into());
+        }
+        if cfg.max_concurrent == 0 || cfg.max_concurrent > 10 {
+            return Err("Download bersamaan harus 1–10".into());
+        }
+        if cfg.timeout == 0 {
+            return Err("Timeout harus > 0".into());
+        }
+        if cfg.max_overall_speed != "0" && !is_valid_speed_limit(&cfg.max_overall_speed) {
+            return Err("Speed limit tidak valid (contoh: 0, 512K, 2M)".into());
+        }
         cfg.save().map_err(|e| e.to_string())?;
         *self.config.write().await = cfg;
         Ok(())
@@ -177,6 +190,12 @@ impl DownloadEngine {
             i.speed = 0;
             let _ = tx.send(DownloadEvent::Progress(i.clone()));
             return;
+        }
+
+        // Tandai percobaan ke-N (dipakai retry tracking)
+        {
+            let mut i = info.lock().await;
+            i.retry_count = i.retry_count.saturating_add(1);
         }
 
         spawn_supervised(self.downloads.clone(), info, tx, config, self.dirty.clone());
@@ -396,6 +415,23 @@ async fn flush_session(
             let _ = std::fs::rename(&tmp, &path);
         }
     }
+}
+
+/// Validasi format --max-overall-download-limit aria2: angka, atau angka + K/M/G (opsional)
+/// contoh: "0", "512K", "2M", "10G"
+fn is_valid_speed_limit(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    let (num, unit) = s.split_at(
+        s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()),
+    );
+    let num_ok = !num.is_empty() && num.parse::<u64>().is_ok();
+    if !unit.is_empty() && !matches!(unit.to_ascii_uppercase().as_str(), "K" | "M" | "G") {
+        return false;
+    }
+    num_ok
 }
 
 /// Sanitize filename

@@ -74,6 +74,21 @@ fn cookie_args() -> Vec<String> {
     vec![]
 }
 
+/// Template --output yt-dlp:
+/// - nama user yang spesifik (punya ekstensi) → pakai nama itu (file tunggal)
+/// - nama hasil tebakan "download_<timestamp>" → pakai judul video (lebih berguna)
+/// - nama tanpa ekstensi → nama user + ekstensi hasil yt-dlp
+fn output_template(save_dir: &str, filename: &str) -> String {
+    let f = filename.trim();
+    if f.is_empty() || f.starts_with("download_") {
+        return format!("{}/%(title)s.%(ext)s", save_dir);
+    }
+    if f.contains('.') {
+        return format!("{}/{}", save_dir, f);
+    }
+    format!("{}/{}.%(ext)s", save_dir, f)
+}
+
 /// Mapping pilihan kualitas dari extension → argumen yt-dlp
 fn quality_args(quality: Option<&str>) -> Vec<String> {
     match quality {
@@ -107,7 +122,7 @@ pub async fn download(
     tx: mpsc::UnboundedSender<DownloadEvent>,
     _config: &Config,
 ) {
-    let (url, save_dir, headers, quality) = {
+    let (url, save_dir, headers, quality, filename) = {
         let mut i = info.lock().await;
         i.status = DownloadStatus::Downloading;
         let _ = tx.send(DownloadEvent::Progress(i.clone()));
@@ -116,6 +131,7 @@ pub async fn download(
             i.save_dir.clone(),
             i.headers.clone(),
             i.quality.clone(),
+            i.filename.clone(),
         )
     };
 
@@ -123,7 +139,7 @@ pub async fn download(
     cmd.extend(quality_args(quality.as_deref()));
     cmd.extend([
         "--output".into(),
-        format!("{}/%(title)s.%(ext)s", save_dir),
+        output_template(&save_dir, &filename),
         "--no-playlist".into(),
         "--no-warnings".into(),
         "--newline".into(),

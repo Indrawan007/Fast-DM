@@ -156,19 +156,30 @@ pub fn show_quality_dialog(
 
     dialog.show();
 
-    // Run dialog
-    let _response = std::cell::Cell::new(ResponseType::Cancel);
+    // GTK4 uses async dialogs differently — blocking approach via nested main loop
     let sel_result = selected.clone();
-
-    // GTK4 uses async dialogs differently
-    // For simplicity, use blocking approach
     let main_context = glib::MainContext::default();
     let response_val = std::rc::Rc::new(std::cell::RefCell::new(ResponseType::Cancel));
+    let responded_flg = std::rc::Rc::new(std::cell::RefCell::new(false));
 
     let rv = response_val.clone();
+    let rf = responded_flg.clone();
     dialog.connect_response(move |d, resp| {
         *rv.borrow_mut() = resp;
+        *rf.borrow_mut() = true;
         d.close();
+    });
+
+    // Kalau user menutup lewat tombol close window (bukan tombol dialog),
+    // GTK4 tidak selalu emit response → loop bisa menggantung. Beri nilai
+    // Cancel kalau belum ada response, supaya dialog pasti selesai.
+    let rv2 = response_val.clone();
+    let rf2 = responded_flg.clone();
+    dialog.connect_close_request(move |_| {
+        if !*rf2.borrow() {
+            *rv2.borrow_mut() = ResponseType::Cancel;
+        }
+        glib::Propagation::Proceed
     });
 
     // Block until dialog closes

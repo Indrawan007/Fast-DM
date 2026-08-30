@@ -3,6 +3,7 @@ use crate::downloader::types::*;
 use crate::downloader::DownloadEngine;
 use crate::gui::css;
 use crate::gui::download_row::DownloadRow;
+use crate::gui::youtube_dialog;
 
 use gtk4::prelude::*;
 use gtk4::{
@@ -153,6 +154,8 @@ pub fn build_window(
     let rt_add = rt.clone();
     let entry_add = url_entry.clone();
 
+    let win_add = window.clone();
+
     let on_add = move || {
         let url = entry_add.text().to_string().trim().to_string();
         if url.is_empty() {
@@ -170,12 +173,24 @@ pub fn build_window(
 
         entry_add.set_text("");
 
+        // YouTube: minta pilihan kualitas langsung dari GUI (dialog yang tadinya dead-code)
+        let quality = if crate::downloader::youtube::is_youtube_url(&url) {
+            youtube_dialog::show_quality_dialog(
+                win_add.upcast_ref(),
+                "Pilih kualitas video",
+                "",
+                "",
+            )
+        } else {
+            None
+        };
+
         let eng = engine_add.clone();
         let rt = rt_add.clone();
 
         glib::spawn_future_local(async move {
             let _ = rt.spawn(async move {
-                eng.add_download(&url, None, None, true, Default::default(), None).await
+                eng.add_download(&url, None, None, true, Default::default(), quality).await
             }).await;
         });
     };
@@ -246,21 +261,26 @@ pub fn build_window(
             return;
         };
 
-        // Simpan ke disk + apply live
+        // Simpan ke disk + apply live; tampilkan feedback (termasuk kalau validasi gagal)
         let eng2 = engine_settings.clone();
         let handle = rt_settings.spawn(async move {
-            let _ = eng2.update_config(cfg).await;
+            eng2.update_config(cfg).await
         });
+        let btn_feedback = settings_btn_h.clone();
         glib::spawn_future_local(async move {
-            let _ = handle.await;
-        });
-
-        // Feedback singkat
-        settings_btn_h.set_label("✓ Saved");
-        let btn = settings_btn_h.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(1500), move || {
-            btn.set_label("Settings");
-            glib::ControlFlow::Break
+            match handle.await {
+                Ok(Ok(())) => btn_feedback.set_label("✓ Saved"),
+                Ok(Err(e)) => {
+                    tracing::warn!("Settings rejected: {}", e);
+                    btn_feedback.set_label("✕ Invalid");
+                }
+                Err(_) => btn_feedback.set_label("✕ Failed"),
+            }
+            let btn = btn_feedback.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(1500), move || {
+                btn.set_label("Settings");
+                glib::ControlFlow::Break
+            });
         });
     });
 
@@ -538,6 +558,10 @@ fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
     speed_entry.set_placeholder_text(Some("0 = unlimited, mis. 512K / 2M"));
     content.append(&settings_row("Speed limit total", &speed_entry));
 
+    let verify_tls_chk = gtk4::CheckButton::with_label("Verifikasi sertifikat TLS (aman)");
+    verify_tls_chk.set_active(cur.verify_tls);
+    content.append(&verify_tls_chk);
+
     // Buttons
     let btn_box = GtkBox::new(Orientation::Horizontal, 8);
     btn_box.set_halign(gtk4::Align::End);
@@ -573,11 +597,24 @@ fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
     // Pola nested main loop yang sama dengan youtube_dialog.rs
     let main_context = glib::MainContext::default();
     let response = std::rc::Rc::new(std::cell::RefCell::new(gtk4::ResponseType::Cancel));
+    let responded_flg = std::rc::Rc::new(std::cell::RefCell::new(false));
 
     let rv = response.clone();
+    let rf = responded_flg.clone();
     dialog.connect_response(move |d, resp| {
         *rv.borrow_mut() = resp;
+        *rf.borrow_mut() = true;
         d.close();
+    });
+
+    // Jangan menggantung kalau dialog ditutup lewat tombol close window
+    let rv2 = response.clone();
+    let rf2 = responded_flg.clone();
+    dialog.connect_close_request(move |_| {
+        if !*rf2.borrow() {
+            *rv2.borrow_mut() = gtk4::ResponseType::Cancel;
+        }
+        glib::Propagation::Proceed
     });
 
     while dialog.is_visible() {
@@ -599,5 +636,6 @@ fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
     if !speed.is_empty() {
         cfg.max_overall_speed = speed;
     }
+    cfg.verify_tls = verify_tls_chk.is_active();
     Some(cfg)
 }

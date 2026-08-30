@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub download_dir: String,
     pub max_connections: u8,
@@ -17,6 +18,7 @@ pub struct Config {
     pub disk_cache_size: String,
     pub file_allocation: String,
     pub auto_file_renaming: bool,
+    pub verify_tls: bool,
 }
 
 impl Default for Config {
@@ -37,6 +39,7 @@ impl Default for Config {
             disk_cache_size: "64M".into(),
             file_allocation: "falloc".into(),
             auto_file_renaming: true,
+            verify_tls: true,
         }
     }
 }
@@ -57,10 +60,18 @@ impl Config {
             let path = Self::config_file();
             if path.exists() {
                 match fs::read_to_string(&path) {
-                    Ok(content) => {
-                        serde_json::from_str(&content).unwrap_or_default()
+                    Ok(content) => match serde_json::from_str(&content) {
+                        Ok(cfg) => cfg,
+                        Err(e) => {
+                            // Jangan diam-diam reset config user — log dan lanjut default
+                            tracing::warn!("Config rusak/tidak cocok ({e}), pakai default");
+                            Config::default()
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("Config tidak bisa dibaca ({e}), pakai default");
+                        Config::default()
                     }
-                    Err(_) => Config::default(),
                 }
             } else {
                 let cfg = Config::default();

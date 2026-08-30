@@ -40,7 +40,7 @@ pub async fn download(
         let _ = tx.send(DownloadEvent::Progress(i.clone()));
     }
 
-    resolve_filename(&info).await;
+    resolve_filename(&info, config.verify_tls).await;
 
     // Check if cancelled during resolve
     {
@@ -127,7 +127,6 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         "--download-result=full".into(),
         format!("--max-overall-download-limit={}", config.max_overall_speed),
         "--check-integrity=false".into(),
-        "--check-certificate=false".into(),
         "--continue=true".into(),
         "--allow-overwrite=true".into(),
         "--auto-file-renaming=false".into(),
@@ -141,6 +140,11 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         if !k.is_empty() && !v.is_empty() {
             cmd.push(format!("--header={}: {}", k, v));
         }
+    }
+
+    // Verifikasi sertifikat TLS hanya dimatikan kalau user eksplisit memilih begitu
+    if !config.verify_tls {
+        cmd.push("--check-certificate=false".into());
     }
 
     // Cookies dari browser extension (Netscape format) — aria2 otomatis
@@ -353,12 +357,15 @@ fn parse_aria2_size(s: &str) -> u64 {
     (val * mult) as u64
 }
 
-async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>) {
-    let url = { info.lock().await.url.clone() };
+async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) {
+    let (url, headers) = {
+        let i = info.lock().await;
+        (i.url.clone(), i.headers.clone())
+    };
 
     let client = match reqwest::Client::builder()
         .user_agent(CHROME_UA)
-        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_certs(!verify_tls)
         .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -367,18 +374,31 @@ async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>) {
         Err(_) => return,
     };
 
+    // Header kustom (mis. Referer) juga dipakai saat resolve agar server yang
+    // butuh auth tidak menolak → nama & ukuran tetap terdeteksi.
+    let build_get = || {
+        let mut req = client.get(&url).header("Range", "bytes=0-0");
+        for (k, v) in &headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        req
+    };
+    let build_head = || {
+        let mut req = client.head(&url);
+        for (k, v) in &headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        req
+    };
+
     // Try GET with Range 0-0 (more reliable than HEAD for Content-Disposition)
-    let resp = client
-        .get(&url)
-        .header("Range", "bytes=0-0")
-        .send()
-        .await;
+    let resp = build_get().send().await;
 
     let resp = match resp {
         Ok(r) => r,
         Err(_) => {
             // Fallback: try HEAD
-            match client.head(&url).send().await {
+            match build_head().send().await {
                 Ok(r) => r,
                 Err(_) => return,
             }

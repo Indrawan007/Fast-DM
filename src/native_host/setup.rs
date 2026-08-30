@@ -1,3 +1,4 @@
+use crate::config::Config;
 use glob::glob;
 use serde_json::json;
 use std::fs;
@@ -6,16 +7,66 @@ use std::path::{Path, PathBuf};
 const HOST_NAME: &str = "com.fastdm.native";
 const NATIVE_PATH: &str = "/opt/fast-dm/fast-dm-native";
 const EXT_ID: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/EXT_ID"));
+const REGISTRY_FILE: &str = "extension_ids.json";
+
+/// Baca daftar extension ID yang pernah di-register (persisten di config dir).
+/// Dipakai supaya manifest TIDAK ditimpa ke EXT_ID lagi saat aplikasi restart
+/// (bug: extension unpacked putus native messaging setelah restart).
+fn load_registered_ids() -> Vec<String> {
+    let path = Config::config_dir().join(REGISTRY_FILE);
+    match fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str::<Vec<String>>(&content).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn save_registered_ids(ids: &[String]) {
+    let path = Config::config_dir().join(REGISTRY_FILE);
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string(ids) {
+        let _ = fs::write(&path, json);
+    }
+}
+
+/// Semua origin yang boleh memanggil native host: ID packed + ID yang pernah
+/// di-register (unpacked/dev extension).
+fn make_origins(registered: &[String]) -> Vec<String> {
+    let mut origins = vec![format!("chrome-extension://{}/", EXT_ID.trim())];
+    for id in registered {
+        let origin = format!("chrome-extension://{}/", id);
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    origins
+}
+
+/// Tulis manifest ke semua lokasi browser, kembalikan jumlah yang ditulis.
+fn write_manifests(json_str: &str) -> usize {
+    let mut written = 0;
+    for dir in get_all_nmh_dirs() {
+        let manifest = dir.join(format!("{}.json", HOST_NAME));
+        if fs::create_dir_all(dir).is_ok() {
+            if fs::write(&manifest, json_str).is_ok() {
+                written += 1;
+                tracing::debug!("Manifest: {}", manifest.display());
+            }
+        }
+    }
+    written
+}
 
 pub fn check_and_setup() -> Result<usize, Box<dyn std::error::Error>> {
-    let native_path = resolve_native_path();
+    let registered = load_registered_ids();
 
     let host_json = json!({
         "name": HOST_NAME,
         "description": "Fast Download Manager Native Host",
-        "path": native_path,
+        "path": resolve_native_path(),
         "type": "stdio",
-        "allowed_origins": [format!("chrome-extension://{}/", EXT_ID.trim())]
+        "allowed_origins": make_origins(&registered)
     });
 
     let json_str = serde_json::to_string_pretty(&host_json)?;
@@ -27,7 +78,9 @@ pub fn check_and_setup() -> Result<usize, Box<dyn std::error::Error>> {
     for dir in &dirs {
         let manifest = dir.join(format!("{}.json", HOST_NAME));
 
-        // Cek apakah perlu update (bandingkan konten penuh, bukan hanya path)
+        // Cek apakah perlu update (bandingkan konten penuh, bukan hanya path).
+        // Karena origin register ikut disertakan, manifest tidak lagi ditimpa
+        // secara tidak sengaja oleh check_and_setup.
         let need_update = if manifest.exists() {
             match fs::read_to_string(&manifest) {
                 Ok(content) => content.trim() != json_str.trim(),
@@ -60,29 +113,23 @@ pub fn register_extension_id(ext_id: &str) -> Result<usize, Box<dyn std::error::
         return Err("Invalid extension ID".into());
     }
 
-    let native_path = resolve_native_path();
-    let origin = format!("chrome-extension://{}/", ext_id);
+    // Simpan ID secara persisten + gabung dengan yang sudah ada
+    let mut registered = load_registered_ids();
+    if !registered.iter().any(|id| id == ext_id) {
+        registered.push(ext_id.to_string());
+        save_registered_ids(&registered);
+    }
 
     let host_json = json!({
         "name": HOST_NAME,
         "description": "Fast Download Manager Native Host",
-        "path": native_path,
+        "path": resolve_native_path(),
         "type": "stdio",
-        "allowed_origins": [origin]
+        "allowed_origins": make_origins(&registered)
     });
 
     let json_str = serde_json::to_string_pretty(&host_json)?;
-    let dirs = get_all_nmh_dirs();
-    let mut updated = 0;
-
-    for dir in &dirs {
-        let manifest = dir.join(format!("{}.json", HOST_NAME));
-        if fs::create_dir_all(dir).is_ok() {
-            if fs::write(&manifest, &json_str).is_ok() {
-                updated += 1;
-            }
-        }
-    }
+    let updated = write_manifests(&json_str);
 
     tracing::info!("Extension ID registered: {} ({} manifests)", ext_id, updated);
     Ok(updated)

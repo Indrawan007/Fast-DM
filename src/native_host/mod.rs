@@ -107,11 +107,11 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
             match forward_to_gui(&socket_path, &msg) {
                 Ok(resp) => resp,
                 Err(e) => {
-                    // Launch GUI dengan setsid agar TIDAK jadi child dari browser
+                    // Launch GUI dengan setsid agar TIDAK jadi child dari browser.
+                    // Jangan paksa GDK_BACKEND=x11 — pada sesi Wayland-only GUI tidak bisa start.
                     use std::os::unix::process::CommandExt;
                     let gui_path = resolve_gui_path();
                     let _ = std::process::Command::new(&gui_path)
-                        .env("GDK_BACKEND", "x11")
                         .process_group(0)  // New process group
                         .spawn();
 
