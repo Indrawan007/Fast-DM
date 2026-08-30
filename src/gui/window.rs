@@ -187,12 +187,14 @@ pub fn build_window(
 
         entry_add.set_text("");
 
-        // YouTube: minta pilihan kualitas langsung dari GUI (dialog yang tadinya dead-code)
-        // A4: tampilkan URL sebagai info video (dialog punya slot info uploader/durasi)
-        let quality = if crate::downloader::youtube::is_youtube_url(&url) {
+        // YouTube + halaman video lain: minta pilihan kualitas langsung dari GUI
+        // (IDM-like). File langsung (mp4/zip/dll) dilewati — tidak perlu dialog.
+        let wants_quality = crate::downloader::youtube::is_youtube_url(&url)
+            || !crate::downloader::is_direct_file_url(&url);
+        let quality = if wants_quality {
             youtube_dialog::show_quality_dialog(
                 win_add.upcast_ref(),
-                "Pilih kualitas video",
+                "Pilih kualitas",
                 &url,
                 "",
             )

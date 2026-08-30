@@ -20,6 +20,11 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
+      "js": ["sniffer.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["<all_urls>"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }

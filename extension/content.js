@@ -511,20 +511,26 @@
   function detectNonYTVideos() {
     if (isYouTube()) return;
 
-    document.querySelectorAll("video").forEach((video) => {
-      if (video.dataset.fastdmDone) return;
-      video.dataset.fastdmDone = "true";
+    // Media yang tertangkap sniffer (m3u8/mpd/mp4/dll) — gaya IDM Grabber.
+    // Paling baru ada di akhir array.
+    function candidateFor() {
+      const cands = window.__fastdmMediaCandidates || [];
+      return cands.length ? cands[cands.length - 1] : null;
+    }
 
-      const src = video.src || video.querySelector("source")?.src;
-      if (!src || src.startsWith("blob:") || src.startsWith("data:")) return;
+    document.querySelectorAll("video, audio").forEach((media) => {
+      if (media.dataset.fastdmDone) return;
 
-      const wrapper = video.parentElement;
+      const src = media.src || media.querySelector("source")?.src || "";
+      const direct =
+        src && !src.startsWith("blob:") && !src.startsWith("data:");
+
+      const wrapper = media.parentElement;
       if (!wrapper) return;
 
       const btn = document.createElement("button");
       btn.className = "fastdm-btn";
-      btn.innerHTML =
-        '<span class="fastdm-icon">⚡</span><span>Unduh</span>';
+      btn.innerHTML = '<span class="fastdm-icon">⚡</span><span>Unduh</span>';
 
       Object.assign(btn.style, {
         position: "absolute",
@@ -541,10 +547,13 @@
       btn.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
+        // 1) src langsung → 2) kandidat sniffer (.m3u8/.mpd) → 3) URL halaman
+        //    (Fallback 3 dibuat supaya yt-dlp bisa resolve via extractor situs)
+        const target = direct ? src : candidateFor() || window.location.href;
         chrome.runtime.sendMessage(
           {
             action: "download",
-            url: src,
+            url: target,
             headers: { Referer: window.location.href },
           },
           (response) => {
@@ -561,6 +570,10 @@
       if (wPos === "static") wrapper.style.position = "relative";
 
       wrapper.appendChild(btn);
+      // Tandai selesai: tombol pasang SEKALI. Untuk blob: URL target dibaca
+      // saat klik (kandidat sniffer bisa muncul belakangan), jadi tidak perlu
+      // scan ulang — tidak ada tombol ganda.
+      media.dataset.fastdmDone = "true";
     });
 
     // Detect YouTube embeds
@@ -579,8 +592,7 @@
 
       const btn = document.createElement("button");
       btn.className = "fastdm-btn";
-      btn.innerHTML =
-        '<span class="fastdm-icon">⚡</span><span>Unduh</span>';
+      btn.innerHTML = '<span class="fastdm-icon">⚡</span><span>Unduh</span>';
 
       Object.assign(btn.style, {
         position: "absolute",

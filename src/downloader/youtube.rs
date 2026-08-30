@@ -47,7 +47,7 @@ fn detect_browser() -> Option<&'static str> {
     None
 }
 
-fn cookie_args() -> Vec<String> {
+pub(crate) fn cookie_args() -> Vec<String> {
     let cookies_file = Config::config_dir().join("cookies.txt");
 
     // Use cookies.txt if fresh
@@ -74,11 +74,12 @@ fn cookie_args() -> Vec<String> {
     vec![]
 }
 
-/// Template --output yt-dlp:
 /// - nama user yang spesifik (punya ekstensi) → pakai nama itu (file tunggal)
 /// - nama hasil tebakan "download_<timestamp>" → pakai judul video (lebih berguna)
 /// - nama tanpa ekstensi → nama user + ekstensi hasil yt-dlp
-fn output_template(save_dir: &str, filename: &str) -> String {
+/// Template --output yt-dlp:
+...
+pub(crate) fn output_template(save_dir: &str, filename: &str) -> String {
     let f = filename.trim();
     if f.is_empty() || f.starts_with("download_") {
         return format!("{}/%(title)s.%(ext)s", save_dir);
@@ -90,7 +91,8 @@ fn output_template(save_dir: &str, filename: &str) -> String {
 }
 
 /// Mapping pilihan kualitas dari extension → argumen yt-dlp
-fn quality_args(quality: Option<&str>) -> Vec<String> {
+/// Mapping pilihan kualitas dari extension → argumen yt-dlp
+pub(crate) fn quality_args(quality: Option<&str>) -> Vec<String> {
     match quality {
         Some(q) if q.ends_with('p') && q[..q.len() - 1].chars().all(|c| c.is_ascii_digit()) => {
             let h = &q[..q.len() - 1];
@@ -177,11 +179,11 @@ pub async fn download(
     .ok();
 }
 
-fn run_ytdlp(
+pub(crate) fn run_ytdlp(
     cmd: Vec<String>,
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
-) {
+) -> bool {
     let mut child = match Command::new(&cmd[0]).args(&cmd[1..]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -197,7 +199,7 @@ fn run_ytdlp(
                 i.error_msg = msg;
                 let _ = tx.send(DownloadEvent::Error(i.clone()));
             });
-            return;
+            return false;
         }
     };
 
@@ -205,8 +207,9 @@ fn run_ytdlp(
     {
         let rt = tokio::runtime::Handle::current();
         let pid = child.id();
-        rt.block_on(async { info.lock().await.pid = Some(pid); });
-    }
+            rt.block_on(async { info.lock().await.pid = None; });
+            return false;
+        }
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -300,11 +303,11 @@ fn run_ytdlp(
     let err_detail = stderr_buf.lock().unwrap().clone();
 
     let rt = tokio::runtime::Handle::current();
-    rt.block_on(async {
+    let ok = rt.block_on(async {
         let mut i = info.lock().await;
         i.pid = None;
         if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-            return;
+            return false;
         }
 
         if exit_code == 0 {
@@ -316,14 +319,17 @@ fn run_ytdlp(
             }
             i.error_msg.clear();
             let _ = tx.send(DownloadEvent::Completed(i.clone()));
+            true
         } else {
             i.status = DownloadStatus::Error;
             let detail = if err_detail.is_empty() { String::new() } else { format!("\n{}", err_detail.trim()) };
             i.error_msg = format!("yt-dlp exit code: {}{}", exit_code, detail);
             i.speed = 0;
             let _ = tx.send(DownloadEvent::Error(i.clone()));
+            false
         }
     });
+    ok
 }
 
 /// Parse ETA yt-dlp ("MM:SS" atau "HH:MM:SS") → detik

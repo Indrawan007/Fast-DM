@@ -1,5 +1,6 @@
 pub mod aria2;
 pub mod types;
+pub mod universal;
 pub mod youtube;
 
 use crate::config::Config;
@@ -325,12 +326,27 @@ fn spawn_supervised(
     dirty: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
-        let is_yt = { info.lock().await.is_youtube };
+        let (is_yt, url) = {
+            let i = info.lock().await;
+            (i.is_youtube, i.url.clone())
+        };
 
         if is_yt {
-            youtube::download(info, tx.clone(), &config).await;
+            // YouTube: yt-dlp dengan dialog kualitas (behavior lama)
+            youtube::download(info.clone(), tx.clone(), &config).await;
+        } else if is_direct_file_url(&url) {
+            // File langsung (mp4/zip/dll): aria2 tanpa resolve — cepat
+            aria2::download(info.clone(), tx.clone(), &config).await;
         } else {
-            aria2::download(info, tx.clone(), &config).await;
+            // Semua URL lain (halaman video, TikTok/IG/FB/X/Vimeo, m3u8, dll):
+            // coba yt-dlp dulu (resolver universal, gaya IDM); kalau situs
+            // tidak didukung → fallback ke aria2.
+            match universal::download(info.clone(), tx.clone(), &config).await {
+                universal::Outcome::Completed | universal::Outcome::MissingTool => {}
+                universal::Outcome::Failed => {
+                    aria2::download(info.clone(), tx.clone(), &config).await;
+                }
+            }
         }
 
         // Status terminal (completed/error) → persist ke session.json
@@ -339,6 +355,21 @@ fn spawn_supervised(
         // Slot bebas → jalankan antrian tertua
         promote_next(downloads, tx, config, dirty).await;
     });
+}
+
+/// URL file langsung (punya ekstensi file/media) → langsung ke aria2 tanpa
+/// lewat yt-dlp. HLS/DASH (m3u8/mpd) tetap ke yt-dlp agar di-merge benar.
+pub fn is_direct_file_url(url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or(url).split('#').next().unwrap_or(url);
+    let lower = path.to_ascii_lowercase();
+    const EXTENSIONS: &[&str] = &[
+        ".mp4", ".webm", ".mkv", ".avi", ".mov", ".m4v", ".flv", ".wmv", ".3gp", ".ts",
+        ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav",
+        ".zip", ".tar", ".gz", ".7z", ".rar", ".xz",
+        ".pdf", ".iso", ".img", ".apk", ".deb", ".rpm",
+        ".jpg", ".jpeg", ".png", ".gif", ".webp",
+    ];
+    EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
 }
 
 /// Cari download Queued tertua dan jalankan jika ada slot kosong
