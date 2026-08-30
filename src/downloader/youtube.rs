@@ -74,11 +74,6 @@ pub(crate) fn cookie_args() -> Vec<String> {
     vec![]
 }
 
-/// - nama user yang spesifik (punya ekstensi) → pakai nama itu (file tunggal)
-/// - nama hasil tebakan "download_<timestamp>" → pakai judul video (lebih berguna)
-/// - nama tanpa ekstensi → nama user + ekstensi hasil yt-dlp
-/// Template --output yt-dlp:
-...
 pub(crate) fn output_template(save_dir: &str, filename: &str) -> String {
     let f = filename.trim();
     if f.is_empty() || f.starts_with("download_") {
@@ -90,7 +85,6 @@ pub(crate) fn output_template(save_dir: &str, filename: &str) -> String {
     format!("{}/{}.%(ext)s", save_dir, f)
 }
 
-/// Mapping pilihan kualitas dari extension → argumen yt-dlp
 /// Mapping pilihan kualitas dari extension → argumen yt-dlp
 pub(crate) fn quality_args(quality: Option<&str>) -> Vec<String> {
     match quality {
@@ -207,9 +201,8 @@ pub(crate) fn run_ytdlp(
     {
         let rt = tokio::runtime::Handle::current();
         let pid = child.id();
-            rt.block_on(async { info.lock().await.pid = None; });
-            return false;
-        }
+        rt.block_on(async { info.lock().await.pid = Some(pid); });
+    }
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -241,7 +234,7 @@ pub(crate) fn run_ytdlp(
             // Reap the child so it does not linger as a zombie process
             let _ = child.wait();
             rt.block_on(async { info.lock().await.pid = None; });
-            return;
+            return false;
         }
 
         if let Some(m) = RE_YTDLP_DEST.captures(&line) {
