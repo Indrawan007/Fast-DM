@@ -19,20 +19,22 @@
   // ═══════════════════════════════════════════════
 
   const YT_HOSTS = [
-    "youtube.com", "www.youtube.com",
-    "m.youtube.com", "music.youtube.com"
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
   ];
 
   const QUALITIES = [
-    { id: "best_mp4",   label: "Best Quality",   icon: "🎬", desc: "MP4" },
-    { id: "2160p",      label: "4K Ultra HD",     icon: "📺", desc: "2160p" },
-    { id: "1440p",      label: "2K QHD",          icon: "📺", desc: "1440p" },
-    { id: "1080p",      label: "Full HD",         icon: "📺", desc: "1080p" },
-    { id: "720p",       label: "HD",              icon: "📺", desc: "720p" },
-    { id: "480p",       label: "SD",              icon: "📺", desc: "480p" },
-    { id: "360p",       label: "Low",             icon: "📺", desc: "360p" },
-    { id: "audio_best", label: "Audio M4A",       icon: "🎵", desc: "Best" },
-    { id: "audio_mp3",  label: "Audio MP3",       icon: "🎵", desc: "320kbps" },
+    { id: "best_mp4", label: "Best Quality", icon: "🎬", desc: "MP4" },
+    { id: "2160p", label: "4K Ultra HD", icon: "📺", desc: "2160p" },
+    { id: "1440p", label: "2K QHD", icon: "📺", desc: "1440p" },
+    { id: "1080p", label: "Full HD", icon: "📺", desc: "1080p" },
+    { id: "720p", label: "HD", icon: "📺", desc: "720p" },
+    { id: "480p", label: "SD", icon: "📺", desc: "480p" },
+    { id: "360p", label: "Low", icon: "📺", desc: "360p" },
+    { id: "audio_best", label: "Audio M4A", icon: "🎵", desc: "Best" },
+    { id: "audio_mp3", label: "Audio MP3", icon: "🎵", desc: "320kbps" },
   ];
 
   // ═══════════════════════════════════════════════
@@ -67,20 +69,24 @@
   }
 
   function sendDownload(url, quality) {
-    chrome.runtime.sendMessage({
-      action: "download",
-      url: url,
-      headers: {},
-      quality: quality || "best_mp4",
-      cookies: document.cookie,
-      domain: location.hostname
-    }, (response) => {
-      if (chrome.runtime.lastError || !response || !response.success) {
-        showToast("Failed to send to Fast DM");
-      } else {
-        showToast("Sent to Fast DM — " + (quality || "best_mp4"));
-      }
-    });
+    // Jangan kirim document.cookie: cookie login YouTube (SID/HSID/__Secure-*)
+    // adalah HttpOnly sehingga TIDAK ada di document.cookie. Biarkan background
+    // mengambilnya lewat chrome.cookies.getAll() (bisa akses HttpOnly).
+    chrome.runtime.sendMessage(
+      {
+        action: "download",
+        url: url,
+        headers: {},
+        quality: quality || "best_mp4",
+      },
+      (response) => {
+        if (chrome.runtime.lastError || !response || !response.success) {
+          showToast("Failed to send to Fast DM");
+        } else {
+          showToast("Sent to Fast DM — " + (quality || "best_mp4"));
+        }
+      },
+    );
   }
 
   // ═══════════════════════════════════════════════
@@ -321,7 +327,7 @@
     dropdown.appendChild(headerVideo);
 
     // Video qualities
-    QUALITIES.filter(q => !q.id.startsWith("audio")).forEach(q => {
+    QUALITIES.filter((q) => !q.id.startsWith("audio")).forEach((q) => {
       dropdown.appendChild(createDropdownItem(q));
     });
 
@@ -337,7 +343,7 @@
     dropdown.appendChild(headerAudio);
 
     // Audio options
-    QUALITIES.filter(q => q.id.startsWith("audio")).forEach(q => {
+    QUALITIES.filter((q) => q.id.startsWith("audio")).forEach((q) => {
       dropdown.appendChild(createDropdownItem(q));
     });
 
@@ -350,20 +356,30 @@
       e.preventDefault();
       dropdownVisible = !dropdownVisible;
       dropdown.classList.toggle("open", dropdownVisible);
-      btn.querySelector(".fastdm-arrow").classList.toggle("open", dropdownVisible);
-    });
-
-    // ── Close dropdown on outside click ──
-    document.addEventListener("click", (e) => {
-      if (!container.contains(e.target)) {
-        dropdownVisible = false;
-        dropdown.classList.remove("open");
-        btn.querySelector(".fastdm-arrow").classList.remove("open");
-      }
+      btn
+        .querySelector(".fastdm-arrow")
+        .classList.toggle("open", dropdownVisible);
     });
 
     overlayContainer = container;
     return container;
+  }
+
+  // Daftarkan listener "klik di luar" HANYA SEKALI. Kalau didaftarkan di dalam
+  // createOverlay(), setiap navigasi SPA YouTube menumpuk listener baru yang
+  // tidak pernah dilepas (memory leak + perilaku ganda).
+  if (!window.__fastdmOutsideClickBound) {
+    window.__fastdmOutsideClickBound = true;
+    document.addEventListener("click", (e) => {
+      const c = overlayContainer;
+      if (c && !c.contains(e.target)) {
+        dropdownVisible = false;
+        const dd = c.querySelector(".fastdm-dropdown");
+        const arrow = c.querySelector(".fastdm-arrow");
+        if (dd) dd.classList.remove("open");
+        if (arrow) arrow.classList.remove("open");
+      }
+    });
   }
 
   function createDropdownItem(quality) {
@@ -375,13 +391,13 @@
       <span class="dd-desc">${quality.desc}</span>
     `;
 
-    let sending = false;  // Debounce
+    let sending = false; // Debounce
 
     item.addEventListener("click", (e) => {
       e.stopPropagation();
       e.preventDefault();
 
-      if (sending) return;  // Prevent double click
+      if (sending) return; // Prevent double click
       sending = true;
 
       const videoId = extractVideoId();
@@ -393,21 +409,26 @@
 
       const url = getVideoUrl(videoId);
 
-      chrome.runtime.sendMessage({
-        action: "download",
-        url: url,
-        quality: quality.id,
-        cookies: document.cookie,
-        domain: location.hostname
-      }, (response) => {
-        if (chrome.runtime.lastError || !response || !response.success) {
-          showToast("Failed to send to Fast DM");
-        } else {
-          showToast("Sent to Fast DM — " + quality.label);
-        }
-      });
+      // Cookies HttpOnly (login YouTube) tidak bisa dibaca dari content script —
+      // biarkan background mengambilnya via chrome.cookies.getAll().
+      chrome.runtime.sendMessage(
+        {
+          action: "download",
+          url: url,
+          quality: quality.id,
+        },
+        (response) => {
+          if (chrome.runtime.lastError || !response || !response.success) {
+            showToast("Failed to send to Fast DM");
+          } else {
+            showToast("Sent to Fast DM — " + quality.label);
+          }
+        },
+      );
 
-      setTimeout(() => { sending = false; }, 2000);
+      setTimeout(() => {
+        sending = false;
+      }, 2000);
     });
 
     return item;
@@ -428,20 +449,17 @@
 
     if (isShorts) {
       // Shorts: cari player aktif
-      player = document.querySelector(
-        "ytd-reel-video-renderer[is-active] .html5-video-player"
-      ) || document.querySelector(
-        "#shorts-player .html5-video-player"
-      ) || document.querySelector(
-        ".html5-video-player"
-      );
+      player =
+        document.querySelector(
+          "ytd-reel-video-renderer[is-active] .html5-video-player",
+        ) ||
+        document.querySelector("#shorts-player .html5-video-player") ||
+        document.querySelector(".html5-video-player");
     } else {
       // Watch page
-      player = document.querySelector(
-        "#movie_player"
-      ) || document.querySelector(
-        ".html5-video-player"
-      );
+      player =
+        document.querySelector("#movie_player") ||
+        document.querySelector(".html5-video-player");
     }
 
     if (!player) return;
@@ -505,7 +523,8 @@
 
       const btn = document.createElement("button");
       btn.className = "fastdm-btn";
-      btn.innerHTML = '<span class="fastdm-icon">⚡</span><span>Download</span>';
+      btn.innerHTML =
+        '<span class="fastdm-icon">⚡</span><span>Download</span>';
 
       Object.assign(btn.style, {
         position: "absolute",
@@ -516,23 +535,26 @@
         transition: "opacity 0.2s ease",
       });
 
-      wrapper.addEventListener("mouseenter", () => btn.style.opacity = "1");
-      wrapper.addEventListener("mouseleave", () => btn.style.opacity = "0");
+      wrapper.addEventListener("mouseenter", () => (btn.style.opacity = "1"));
+      wrapper.addEventListener("mouseleave", () => (btn.style.opacity = "0"));
 
       btn.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        chrome.runtime.sendMessage({
-          action: "download",
-          url: src,
-          headers: { Referer: window.location.href }
-        }, (response) => {
-          if (chrome.runtime.lastError || !response || !response.success) {
-            showToast("Failed to send to Fast DM");
-          } else {
-            showToast("Sent to Fast DM");
-          }
-        });
+        chrome.runtime.sendMessage(
+          {
+            action: "download",
+            url: src,
+            headers: { Referer: window.location.href },
+          },
+          (response) => {
+            if (chrome.runtime.lastError || !response || !response.success) {
+              showToast("Failed to send to Fast DM");
+            } else {
+              showToast("Sent to Fast DM");
+            }
+          },
+        );
       });
 
       const wPos = getComputedStyle(wrapper).position;
@@ -557,7 +579,8 @@
 
       const btn = document.createElement("button");
       btn.className = "fastdm-btn";
-      btn.innerHTML = '<span class="fastdm-icon">⚡</span><span>Download</span>';
+      btn.innerHTML =
+        '<span class="fastdm-icon">⚡</span><span>Download</span>';
 
       Object.assign(btn.style, {
         position: "absolute",
@@ -568,19 +591,22 @@
         transition: "opacity 0.2s ease",
       });
 
-      wrapper.addEventListener("mouseenter", () => btn.style.opacity = "1");
-      wrapper.addEventListener("mouseleave", () => btn.style.opacity = "0");
+      wrapper.addEventListener("mouseenter", () => (btn.style.opacity = "1"));
+      wrapper.addEventListener("mouseleave", () => (btn.style.opacity = "0"));
 
       btn.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        chrome.runtime.sendMessage({ action: "download", url: videoUrl }, (response) => {
-          if (chrome.runtime.lastError || !response || !response.success) {
-            showToast("Failed to send to Fast DM");
-          } else {
-            showToast("Sent to Fast DM");
-          }
-        });
+        chrome.runtime.sendMessage(
+          { action: "download", url: videoUrl },
+          (response) => {
+            if (chrome.runtime.lastError || !response || !response.success) {
+              showToast("Failed to send to Fast DM");
+            } else {
+              showToast("Sent to Fast DM");
+            }
+          },
+        );
       });
 
       const wPos = getComputedStyle(wrapper).position;
@@ -640,15 +666,15 @@
       const videos = new Set();
 
       // HTML5 videos
-      document.querySelectorAll("video").forEach(v => {
+      document.querySelectorAll("video").forEach((v) => {
         if (v.src && !v.src.startsWith("blob:")) videos.add(v.src);
-        v.querySelectorAll("source").forEach(s => {
+        v.querySelectorAll("source").forEach((s) => {
           if (s.src && !s.src.startsWith("blob:")) videos.add(s.src);
         });
       });
 
       // YouTube embeds
-      document.querySelectorAll("iframe").forEach(iframe => {
+      document.querySelectorAll("iframe").forEach((iframe) => {
         const src = iframe.src || "";
         const m = src.match(/embed\/([a-zA-Z0-9_-]+)/);
         if (m) videos.add("https://www.youtube.com/watch?v=" + m[1]);
@@ -660,7 +686,7 @@
 
       // Video links
       const videoExts = /\.(mp4|mkv|webm|avi|mov|flv|wmv|m4v|3gp|ts)(\?|$)/i;
-      document.querySelectorAll("a[href]").forEach(a => {
+      document.querySelectorAll("a[href]").forEach((a) => {
         if (videoExts.test(a.href)) videos.add(a.href);
       });
 

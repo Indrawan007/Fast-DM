@@ -187,6 +187,9 @@ impl DownloadEngine {
         if let Some(info) = downloads.get(id) {
             let mut i = info.lock().await;
             if matches!(i.status, DownloadStatus::Downloading | DownloadStatus::Resolving) {
+                // Kill child proses LANGSUNG (jangan menunggu baris output berikutnya,
+                // bisa lama/hang kalau aria2/yt-dlp sedang stall).
+                kill_child_pid(i.pid);
                 i.status = DownloadStatus::Paused;
                 i.speed = 0;
                 let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
@@ -212,6 +215,7 @@ impl DownloadEngine {
         let downloads = self.downloads.read().await;
         if let Some(info) = downloads.get(id) {
             let mut i = info.lock().await;
+            kill_child_pid(i.pid);
             i.status = DownloadStatus::Cancelled;
             i.speed = 0;
             let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
@@ -224,6 +228,7 @@ impl DownloadEngine {
         let downloads = self.downloads.read().await;
         if let Some(info) = downloads.get(id) {
             let mut i = info.lock().await;
+            kill_child_pid(i.pid);
             i.status = DownloadStatus::Cancelled;
             i.speed = 0;
         }
@@ -286,7 +291,10 @@ async fn promote_next(
     let max = usize::from(config.max_concurrent.max(1));
 
     let next = {
-        let map = downloads.read().await;
+        // write lock: pemilihan + penandaan status dilakukan ATOMIK,
+        // sehingga dua task yang selesai bersamaan tidak bisa sama-sama
+        // memilih antrian yang sama (over-slot / dobel spawn).
+        let map = downloads.write().await;
         let mut active = 0usize;
         let mut oldest: Option<(i64, Arc<Mutex<DownloadInfo>>)> = None;
 
@@ -305,22 +313,42 @@ async fn promote_next(
 
         if active >= max {
             None
+        } else if let Some((_, info)) = oldest {
+            // Scope guard: MutexGuard harus drop SEBELUM `info` dipindah keluar
+            let started = {
+                let mut i = info.lock().await;
+                if i.status != DownloadStatus::Queued {
+                    false // sudah di-cancel / sudah diambil task lain
+                } else {
+                    i.status = DownloadStatus::Resolving;
+                    let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                    true
+                }
+            };
+            if started {
+                Some(info)
+            } else {
+                None
+            }
         } else {
-            oldest.map(|(_, i)| i)
+            None
         }
     };
 
     if let Some(info) = next {
-        {
-            let mut i = info.lock().await;
-            // Bisa saja sudah di-cancel/di-resume ke slot lain — skip
-            if i.status != DownloadStatus::Queued {
-                return;
-            }
-            i.status = DownloadStatus::Resolving;
-            let _ = tx.send(DownloadEvent::Progress(i.clone()));
-        }
         spawn_supervised(downloads, info, tx, config, dirty);
+    }
+}
+
+/// Kirim SIGTERM ke child download (aria2c/yt-dlp) supaya berhenti segera.
+/// SIGTERM dipilih (bukan SIGKILL) agar aria2/yt-dlp sempat menulis control file
+/// sehingga download bisa di-resume.
+fn kill_child_pid(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        );
     }
 }
 

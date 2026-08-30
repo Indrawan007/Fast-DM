@@ -9,6 +9,7 @@ struct NativeMessage {
     url: Option<String>,
     filename: Option<String>,
     quality: Option<String>,
+    id: Option<String>,
     extension_id: Option<String>,
     #[serde(default)]
     headers: std::collections::HashMap<String, String>,
@@ -162,6 +163,8 @@ fn forward_to_gui(socket_path: &str, msg: &NativeMessage) -> Result<NativeRespon
         "url": msg.url,
         "filename": msg.filename,
         "quality": msg.quality,
+        "id": msg.id,
+        "extension_id": msg.extension_id,
         "headers": msg.headers,
         "cookies": msg.cookies,
         "domain": msg.domain,

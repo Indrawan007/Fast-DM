@@ -74,7 +74,11 @@ impl Config {
         let dir = Self::config_dir();
         fs::create_dir_all(&dir)?;
         let json = serde_json::to_string_pretty(self)?;
-        fs::write(Self::config_file(), json)?;
+        // Tulis atomik (tmp + rename) supaya config tidak korup kalau crash
+        let path = Self::config_file();
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, json)?;
+        fs::rename(&tmp, &path)?;
         Ok(())
     }
 }

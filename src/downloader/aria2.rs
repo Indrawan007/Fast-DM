@@ -7,8 +7,15 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio::sync::{mpsc, Mutex};
 
-static RE_PROGRESS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)B/(\d+)B\((\d+)%\)").unwrap());
-static RE_SPEED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"DL:(\d+)").unwrap());
+// Readout aria2c:
+//   --human-readable=true  -> [#2089b0 400.0KiB/33.2MiB(1%) CN:1 DL:115.7KiB ETA:4m51s]
+//   --human-readable=false -> [#2089b0 1048576/34896138(3%) CN:1 DL:524288 ETA:0s]
+// Regex harus menerima KEDUA format; sebelumnya hanya "123B/456B" yang tidak pernah
+// muncul sama sekali, sehingga progress/speed/ETA tidak pernah ter-update.
+static RE_PROGRESS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"([\d.]+[KMGT]?i?B?)/([\d.]+[KMGT]?i?B?)\((\d+)%\)"#).unwrap());
+static RE_SPEED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"DL:([\d.]+[KMGT]?i?B?/?s?)"#).unwrap());
 static RE_CN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"CN:(\d+)").unwrap());
 static RE_ETA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"ETA:(\S+)").unwrap());
 static RE_H: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)h").unwrap());
@@ -90,26 +97,16 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
     let _ = std::fs::create_dir_all(&tmp_dir);
     let input_path = tmp_dir.join(format!("{}.txt", info.id));
 
-    let mut input_content = format!("{}\n", info.url);
-    input_content += &format!("  dir={}\n", info.save_dir);
-    input_content += &format!("  out={}\n", info.filename);
-    // Header kustom dari browser extension (mis. Referer) — strip \r\n anti injection
-    for (k, v) in &info.headers {
-        let k = k.replace(['\r', '\n'], "");
-        let v = v.replace(['\r', '\n'], "");
-        if !k.is_empty() && !v.is_empty() {
-            input_content += &format!("  header={}: {}\n", k, v);
-        }
-    }
-    input_content += "  continue=true\n";
-    input_content += "  allow-overwrite=true\n";
-    input_content += "  auto-file-renaming=false\n";
+    // Hanya URL di input-file (untuk menangani URL panjang). Semua opsi lain
+    // dikirim sebagai argumen CLI: nilai dengan spasi (path folder, nama file,
+    // header) tidak salah di-parse oleh format input-file aria2.
+    let _ = std::fs::write(&input_path, format!("{}\n", info.url));
 
-    let _ = std::fs::write(&input_path, &input_content);
-
-    let cmd = vec![
+    let mut cmd = vec![
         "aria2c".into(),
         format!("--input-file={}", input_path.display()),
+        format!("--dir={}", info.save_dir),
+        format!("--out={}", info.filename),
         format!("--max-connection-per-server={}", config.max_connections),
         format!("--split={}", config.max_connections),
         "--min-split-size=1M".into(),
@@ -131,12 +128,24 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         format!("--max-overall-download-limit={}", config.max_overall_speed),
         "--check-integrity=false".into(),
         "--check-certificate=false".into(),
+        "--continue=true".into(),
+        "--allow-overwrite=true".into(),
+        "--auto-file-renaming=false".into(),
     ];
+
+    // Header kustom dari browser extension (mis. Referer) — strip \r\n anti injection.
+    // Dikirim per argumen agar nilai dengan spasi aman.
+    for (k, v) in &info.headers {
+        let k = k.replace(['\r', '\n'], "");
+        let v = v.replace(['\r', '\n'], "");
+        if !k.is_empty() && !v.is_empty() {
+            cmd.push(format!("--header={}: {}", k, v));
+        }
+    }
 
     // Cookies dari browser extension (Netscape format) — aria2 otomatis
     // hanya memakai cookie yang cocok dengan domain target
     let cookies = Config::config_dir().join("cookies.txt");
-    let mut cmd = cmd;
     if cookies.exists() {
         cmd.push(format!("--load-cookies={}", cookies.display()));
     }
@@ -183,6 +192,24 @@ fn run_aria2c(
     }
 
     let stdout = child.stdout.take().unwrap();
+
+    // Baca stderr di thread terpisah — kalau tidak, buffer pipe (64KB) bisa
+    // penuh oleh log error/warning dan aria2c berhenti menulis → deadlock.
+    let stderr = child.stderr.take().unwrap();
+    let stderr_buf = Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr_buf_clone = stderr_buf.clone();
+    let stderr_thread = std::thread::Builder::new()
+        .name("aria2-stderr".into())
+        .spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                let mut buf = stderr_buf_clone.lock().unwrap();
+                buf.push_str(&line);
+                buf.push('\n');
+            }
+        })
+        .ok();
+
     let reader = BufReader::new(stdout);
     let mut last_update = Instant::now();
 
@@ -199,15 +226,15 @@ fn run_aria2c(
             return;
         }
 
-        // Parse progress
+        // Parse progress (dukung format raw & human-readable)
         if let Some(m) = RE_PROGRESS.captures(&line) {
-            let downloaded: u64 = m[1].parse().unwrap_or(0);
-            let total: u64 = m[2].parse().unwrap_or(0);
+            let downloaded = parse_aria2_size(&m[1]);
+            let total = parse_aria2_size(&m[2]);
             let progress: f64 = m[3].parse().unwrap_or(0.0);
 
             let speed = RE_SPEED
                 .captures(&line)
-                .and_then(|m| m[1].parse().ok())
+                .map(|m| parse_aria2_size(&m[1]))
                 .unwrap_or(0u64);
 
             let connections = RE_CN
@@ -230,11 +257,18 @@ fn run_aria2c(
                     i.speed = speed;
                     i.connections = connections;
                     i.eta = eta;
+                    // Bersihkan error lama saat download berjalan lagi (mis. setelah Retry)
+                    i.error_msg.clear();
                     let _ = tx.send(DownloadEvent::Progress(i.clone()));
                 });
                 last_update = Instant::now();
             }
         }
+    }
+
+    // Tunggu pembaca stderr selesai (berarti proses sudah menutup stderr)
+    if let Some(thread) = stderr_thread {
+        let _ = thread.join();
     }
 
     let exit_code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
@@ -254,8 +288,14 @@ fn run_aria2c(
             i.speed = 0;
             let _ = tx.send(DownloadEvent::Completed(i.clone()));
         } else {
+            let err_detail = stderr_buf.lock().unwrap().clone();
+            let detail = if err_detail.trim().is_empty() {
+                String::new()
+            } else {
+                format!("\n{}", err_detail.trim())
+            };
             i.status = DownloadStatus::Error;
-            i.error_msg = format!("aria2c exit code: {}", exit_code);
+            i.error_msg = format!("aria2c exit code: {}{}", exit_code, detail);
             i.speed = 0;
             let _ = tx.send(DownloadEvent::Error(i.clone()));
         }
@@ -286,6 +326,31 @@ fn parse_eta(s: &str) -> u64 {
         total += m[1].parse::<u64>().unwrap_or(0);
     }
     total
+}
+
+/// Parse ukuran output aria2c: angka mentah ("1048576") maupun human-readable
+/// ("400.0KiB", "1.4MiB", "300KiB/s", "1.2Gi").
+fn parse_aria2_size(s: &str) -> u64 {
+    let s = s.trim();
+    let end = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(s.len());
+    let val: f64 = s[..end].parse().unwrap_or(0.0);
+    let unit = s[end..].to_ascii_lowercase();
+
+    let mult: f64 = if unit.contains("tib") {
+        1024.0 * 1024.0 * 1024.0 * 1024.0
+    } else if unit.contains("gib") || unit.starts_with('g') {
+        1024.0 * 1024.0 * 1024.0
+    } else if unit.contains("mib") || unit.starts_with('m') {
+        1024.0 * 1024.0
+    } else if unit.contains("kib") || unit.starts_with('k') {
+        1024.0
+    } else {
+        1.0
+    };
+
+    (val * mult) as u64
 }
 
 async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>) {

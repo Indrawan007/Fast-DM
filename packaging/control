@@ -3,7 +3,7 @@ Version: @VERSION@
 Section: net
 Priority: optional
 Architecture: amd64
-Depends: libgtk-4-1 (>= 4.12), aria2, yt-dlp
+Depends: libgtk-4-1 (>= 4.12), aria2, yt-dlp, ffmpeg, xdg-utils
 Maintainer: FastDM Contributors
 Description: High-speed download manager with browser integration
  Fast DM adalah download manager untuk Linux (Rust + aria2 + yt-dlp)
