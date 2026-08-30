@@ -19,36 +19,37 @@
         <input
           type="text"
           id="url-input"
-          placeholder="Paste download URL..."
+          placeholder="Tempel URL unduhan..."
           spellcheck="false"
         >
         <button id="download-btn" class="btn-primary">⬇</button>
       </div>
+      <div id="action-feedback" class="action-feedback" hidden></div>
     </div>
 
-    <!-- Detected Videos -->
+    <!-- Video Terdeteksi -->
     <div class="section">
       <div class="section-header">
-        <span>🎬 Detected Videos</span>
-        <button id="scan-btn" class="btn-small">Scan</button>
+        <span>🎬 Video Terdeteksi</span>
+        <button id="scan-btn" class="btn-small">Pindai</button>
       </div>
       <div id="video-list" class="list">
-        <div class="empty-text">Click "Scan" to detect videos</div>
+        <div class="empty-text">Klik "Pindai" untuk mendeteksi video</div>
       </div>
     </div>
 
     <!-- Settings -->
     <div class="section">
       <div class="section-header">
-        <span>⚙ Settings</span>
+        <span>⚙ Pengaturan</span>
       </div>
       <label class="toggle-row">
-        <span>Intercept Downloads</span>
+        <span>Intersep Unduhan</span>
         <input type="checkbox" id="toggle-intercept" checked>
         <span class="toggle-slider"></span>
       </label>
       <label class="toggle-row">
-        <span>Extension Enabled</span>
+        <span>Ekstensi Aktif</span>
         <input type="checkbox" id="toggle-enabled" checked>
         <span class="toggle-slider"></span>
       </label>
@@ -56,7 +57,7 @@
 
     <!-- Footer -->
     <div class="footer">
-      <span id="status-text">Checking connection...</span>
+      <span id="status-text">Memeriksa koneksi...</span>
     </div>
   </div>
 

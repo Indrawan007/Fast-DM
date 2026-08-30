@@ -275,4 +275,28 @@ pub const THEME_CSS: &str = r#"
 .fast-dm-window scrolledwindow scrollbar slider:hover {
     background-color: #45475a;
 }
+
+/* ═══ Dialog (settings, YouTube, konfirmasi) ═══
+   Dialog diberi class .fast-dm-window juga supaya tema sama dengan
+   window utama (B2). Rule di bawah menyamakan kontrol bawaan GTK. */
+.fast-dm-window label {
+    color: #cdd6f4;
+}
+.fast-dm-window entry,
+.fast-dm-window spinbutton {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+    border-radius: 8px;
+    padding: 6px 10px;
+}
+.fast-dm-window entry:focus,
+.fast-dm-window spinbutton:focus {
+    border-color: #89b4fa;
+}
+
+/* Tombol yang tidak relevan untuk status saat ini (B4) */
+.fast-dm-window button:disabled {
+    opacity: 0.35;
+}
 "#;

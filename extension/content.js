@@ -81,9 +81,9 @@
       },
       (response) => {
         if (chrome.runtime.lastError || !response || !response.success) {
-          showToast("Failed to send to Fast DM");
+          showToast("Gagal mengirim ke Fast DM");
         } else {
-          showToast("Sent to Fast DM — " + (quality || "best_mp4"));
+          showToast("Terkirim ke Fast DM — " + (quality || "best_mp4"));
         }
       },
     );
@@ -312,7 +312,7 @@
     btn.className = "fastdm-btn";
     btn.innerHTML = `
       <span class="fastdm-icon">⚡</span>
-      <span>Download</span>
+      <span>Unduh</span>
       <span class="fastdm-arrow">▾</span>
     `;
 
@@ -339,7 +339,7 @@
     // Header: Audio
     const headerAudio = document.createElement("div");
     headerAudio.className = "fastdm-dd-header";
-    headerAudio.textContent = "AUDIO ONLY";
+    headerAudio.textContent = "AUDIO SAJA";
     dropdown.appendChild(headerAudio);
 
     // Audio options
@@ -402,7 +402,7 @@
 
       const videoId = extractVideoId();
       if (!videoId) {
-        showToast("Cannot detect video");
+        showToast("Video tidak terdeteksi");
         sending = false;
         return;
       }
@@ -419,9 +419,9 @@
         },
         (response) => {
           if (chrome.runtime.lastError || !response || !response.success) {
-            showToast("Failed to send to Fast DM");
+            showToast("Gagal mengirim ke Fast DM");
           } else {
-            showToast("Sent to Fast DM — " + quality.label);
+            showToast("Terkirim ke Fast DM — " + quality.label);
           }
         },
       );
@@ -524,7 +524,7 @@
       const btn = document.createElement("button");
       btn.className = "fastdm-btn";
       btn.innerHTML =
-        '<span class="fastdm-icon">⚡</span><span>Download</span>';
+        '<span class="fastdm-icon">⚡</span><span>Unduh</span>';
 
       Object.assign(btn.style, {
         position: "absolute",
@@ -549,9 +549,9 @@
           },
           (response) => {
             if (chrome.runtime.lastError || !response || !response.success) {
-              showToast("Failed to send to Fast DM");
+              showToast("Gagal mengirim ke Fast DM");
             } else {
-              showToast("Sent to Fast DM");
+              showToast("Terkirim ke Fast DM");
             }
           },
         );
@@ -580,7 +580,7 @@
       const btn = document.createElement("button");
       btn.className = "fastdm-btn";
       btn.innerHTML =
-        '<span class="fastdm-icon">⚡</span><span>Download</span>';
+        '<span class="fastdm-icon">⚡</span><span>Unduh</span>';
 
       Object.assign(btn.style, {
         position: "absolute",
@@ -601,9 +601,9 @@
           { action: "download", url: videoUrl },
           (response) => {
             if (chrome.runtime.lastError || !response || !response.success) {
-              showToast("Failed to send to Fast DM");
+              showToast("Gagal mengirim ke Fast DM");
             } else {
-              showToast("Sent to Fast DM");
+              showToast("Terkirim ke Fast DM");
             }
           },
         );

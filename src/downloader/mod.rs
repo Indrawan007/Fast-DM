@@ -230,6 +230,47 @@ impl DownloadEngine {
         }
     }
 
+    /// Pause SEMUA unduhan (aktif + antrian) — dipakai tombol "Jeda Semua" (UI-UX C3).
+    pub async fn pause_all(&self) {
+        let downloads = self.downloads.read().await;
+        for info in downloads.values() {
+            let mut i = info.lock().await;
+            match i.status {
+                DownloadStatus::Downloading | DownloadStatus::Resolving => {
+                    kill_child_pid(i.pid);
+                    i.status = DownloadStatus::Paused;
+                    i.speed = 0;
+                    let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
+                    self.mark_dirty();
+                }
+                DownloadStatus::Queued => {
+                    i.status = DownloadStatus::Paused;
+                    let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
+                    self.mark_dirty();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Resume SEMUA unduhan yang paused/error — dipakai tombol "Lanjut Semua" (UI-UX C3).
+    pub async fn resume_all(&self) {
+        let ids: Vec<String> = {
+            let downloads = self.downloads.read().await;
+            let mut v = Vec::new();
+            for (id, info) in downloads.iter() {
+                let status = info.lock().await.status;
+                if matches!(status, DownloadStatus::Paused | DownloadStatus::Error) {
+                    v.push(id.clone());
+                }
+            }
+            v
+        };
+        for id in ids {
+            self.start_download(&id).await;
+        }
+    }
+
     pub async fn cancel_download(&self, id: &str) {
         let downloads = self.downloads.read().await;
         if let Some(info) = downloads.get(id) {
@@ -419,7 +460,7 @@ async fn flush_session(
 
 /// Validasi format --max-overall-download-limit aria2: angka, atau angka + K/M/G (opsional)
 /// contoh: "0", "512K", "2M", "10G"
-fn is_valid_speed_limit(s: &str) -> bool {
+pub(crate) fn is_valid_speed_limit(s: &str) -> bool {
     let s = s.trim();
     if s.is_empty() {
         return false;

@@ -6,13 +6,14 @@ use crate::gui::download_row::DownloadRow;
 use crate::gui::youtube_dialog;
 
 use gtk4::prelude::*;
+use gtk4::gdk::{ContentFormats, DragAction, DNDResult};
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, CssProvider,
-    Entry, Label, ListBox, Orientation, PolicyType, ScrolledWindow,
-    SelectionMode,
+    DropTarget, Entry, EventControllerKey, Label, ListBox, Orientation,
+    PolicyType, ScrolledWindow, SelectionMode,
 };
 use glib;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -51,7 +52,8 @@ pub fn build_window(
     let title = Label::new(Some("\u{26A1} Fast Download Manager"));
     title.add_css_class("header-title");
 
-    let subtitle = Label::new(Some("RUST + ARIA2"));
+    // B5: subtitle berisi info berguna → versi aplikasi
+    let subtitle = Label::new(Some("v2.1.3"));
     subtitle.add_css_class("header-subtitle");
     subtitle.set_valign(gtk4::Align::End);
 
@@ -63,22 +65,29 @@ pub fn build_window(
     let toolbar = GtkBox::new(Orientation::Horizontal, 8);
     toolbar.add_css_class("toolbar-box");
 
+    // B1: satu bahasa (Indonesia) di seluruh UI
     let url_entry = Entry::new();
-    url_entry.set_placeholder_text(Some("Paste download URL here..."));
+    url_entry.set_placeholder_text(Some("Tempel URL unduhan di sini..."));
     url_entry.set_hexpand(true);
     url_entry.add_css_class("url-entry");
 
-    let add_btn = Button::with_label("Download");
+    let add_btn = Button::with_label("Unduh");
     add_btn.add_css_class("btn-download");
 
-    let clear_btn = Button::with_label("Clear Done");
+    let pause_all_btn = Button::with_label("Jeda Semua");
+    pause_all_btn.add_css_class("btn-clear");
+    pause_all_btn.set_tooltip_text(Some("Jeda semua unduhan aktif / lanjutkan semua"));
+    pause_all_btn.set_sensitive(false); // di-enable oleh event listener saat ada unduhan
+
+    let clear_btn = Button::with_label("Bersihkan Selesai");
     clear_btn.add_css_class("btn-clear");
 
-    let settings_btn = Button::with_label("Settings");
+    let settings_btn = Button::with_label("Pengaturan");
     settings_btn.add_css_class("btn-clear");
 
     toolbar.append(&url_entry);
     toolbar.append(&add_btn);
+    toolbar.append(&pause_all_btn);
     toolbar.append(&clear_btn);
     toolbar.append(&settings_btn);
     root.append(&toolbar);
@@ -100,9 +109,9 @@ pub fn build_window(
 
     let ph_icon = Label::new(Some("\u{26A1}"));
     ph_icon.add_css_class("ph-icon");
-    let ph_title = Label::new(Some("No downloads yet"));
+    let ph_title = Label::new(Some("Belum ada unduhan"));
     ph_title.add_css_class("ph-title");
-    let ph_sub = Label::new(Some("Paste a URL above or use the browser extension"));
+    let ph_sub = Label::new(Some("Tempel URL di atas atau pakai ekstensi browser"));
     ph_sub.add_css_class("ph-sub");
 
     placeholder.append(&ph_icon);
@@ -117,15 +126,19 @@ pub fn build_window(
     let statsbar = GtkBox::new(Orientation::Horizontal, 24);
     statsbar.add_css_class("stats-box");
 
-    let stats_active = Label::new(Some("Active 0"));
+    // B3: statistik memisahkan aktif vs antrian
+    let stats_active = Label::new(Some("Aktif 0"));
     stats_active.add_css_class("stats-value");
     let stats_speed = Label::new(Some("0 B/s"));
     stats_speed.add_css_class("stats-speed");
+    let stats_queued = Label::new(Some("Antri 0"));
+    stats_queued.add_css_class("stats-value");
     let stats_total = Label::new(Some("Total 0"));
     stats_total.add_css_class("stats-value");
 
     statsbar.append(&stats_active);
     statsbar.append(&stats_speed);
+    statsbar.append(&stats_queued);
     statsbar.append(&stats_total);
     root.append(&statsbar);
 
@@ -174,11 +187,12 @@ pub fn build_window(
         entry_add.set_text("");
 
         // YouTube: minta pilihan kualitas langsung dari GUI (dialog yang tadinya dead-code)
+        // A4: tampilkan URL sebagai info video (dialog punya slot info uploader/durasi)
         let quality = if crate::downloader::youtube::is_youtube_url(&url) {
             youtube_dialog::show_quality_dialog(
                 win_add.upcast_ref(),
                 "Pilih kualitas video",
-                "",
+                &url,
                 "",
             )
         } else {
@@ -200,6 +214,55 @@ pub fn build_window(
 
     let on_add_clone = on_add.clone();
     url_entry.connect_activate(move |_| on_add_clone());
+
+    // ── C2: drag & drop URL (dari browser/file manager) ke window ──
+    let drop = DropTarget::new(
+        Some(&ContentFormats::new(&["text/uri-list"])),
+        DragAction::COPY,
+    );
+    window.add_controller(&drop);
+
+    let entry_drop = url_entry.clone();
+    let on_add_drop = on_add.clone();
+    drop.connect_drop(move |_, value, _x, _y| {
+        let mut urls: Vec<String> = Vec::new();
+        if let Ok(text) = value.get::<String>() {
+            for line in text.lines() {
+                let uri = line.trim();
+                if uri.is_empty() || uri.starts_with("file://") {
+                    continue; // file lokal bukan URL yang bisa diunduh
+                }
+                urls.push(uri.to_string());
+            }
+        }
+        if !urls.is_empty() {
+            // Tunda ke idle: on_add bisa memunculkan dialog modal (YouTube),
+            // jangan jalankan nested main loop di tengah sinyal drop.
+            let entry = entry_drop.clone();
+            let add = on_add_drop.clone();
+            glib::idle_add_local_once(move || {
+                for u in urls {
+                    entry.set_text(&u);
+                    add();
+                }
+            });
+        }
+        DNDResult::Success
+    });
+
+    // ── C3: shortcut keyboard Ctrl+L → fokus input URL ──
+    let key_ctrl = EventControllerKey::new();
+    window.add_controller(&key_ctrl);
+    let entry_ctrl = url_entry.clone();
+    key_ctrl.connect_key_pressed(move |_, key, _code, mods| {
+        if mods.contains(gtk4::gdk::ModifierType::CONTROL) && key == gtk4::gdk::Key::l {
+            entry_ctrl.grab_focus();
+            entry_ctrl.select_region(0, -1);
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
 
     // ── Clear Done handler ──
     let rows_clear = rows.clone();
@@ -247,6 +310,32 @@ pub fn build_window(
         }
     });
 
+    // ── C3: Jeda Semua / Lanjut Semua ──
+    // state=false → masih ada yang aktif (aksi = Jeda); state=true → aksi = Lanjut.
+    // Label & state disinkronkan ulang oleh event listener (state nyata), bukan hanya klik.
+    let pause_all_state = Rc::new(Cell::new(false));
+    let pause_all_btn_h = pause_all_btn.clone();
+    let engine_pa = engine.clone();
+    let rt_pa = rt.clone();
+    let state_pa = pause_all_state.clone();
+    pause_all_btn.connect_clicked(move |_| {
+        let eng = engine_pa.clone();
+        let rt = rt_pa.clone();
+        let state = state_pa.clone();
+        let btn = pause_all_btn_h.clone();
+        glib::spawn_future_local(async move {
+            let do_pause = !state.get();
+            if do_pause {
+                let _ = rt.spawn(async move { eng.pause_all().await }).await;
+            } else {
+                let _ = rt.spawn(async move { eng.resume_all().await }).await;
+            }
+            // state=false → masih ada yang aktif (aksi berikutnya = Jeda)
+            state.set(do_pause);
+            btn.set_label(if do_pause { "Lanjut Semua" } else { "Jeda Semua" });
+        });
+    });
+
     // ── Settings handler ──
     let win_settings = window.clone();
     let engine_settings = engine.clone();
@@ -269,16 +358,16 @@ pub fn build_window(
         let btn_feedback = settings_btn_h.clone();
         glib::spawn_future_local(async move {
             match handle.await {
-                Ok(Ok(())) => btn_feedback.set_label("✓ Saved"),
+                Ok(Ok(())) => btn_feedback.set_label("✓ Tersimpan"),
                 Ok(Err(e)) => {
                     tracing::warn!("Settings rejected: {}", e);
-                    btn_feedback.set_label("✕ Invalid");
+                    btn_feedback.set_label("✕ Gagal Simpan");
                 }
-                Err(_) => btn_feedback.set_label("✕ Failed"),
+                Err(_) => btn_feedback.set_label("✕ Gagal"),
             }
             let btn = btn_feedback.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(1500), move || {
-                btn.set_label("Settings");
+                btn.set_label("Pengaturan");
                 glib::ControlFlow::Break
             });
         });
@@ -292,8 +381,11 @@ pub fn build_window(
     let rt_ev = rt.clone();
     let stats_a = stats_active.clone();
     let stats_s = stats_speed.clone();
+    let stats_q = stats_queued.clone();
     let stats_t = stats_total.clone();
     let statuses_ev = download_statuses.clone();
+    let pa_btn = pause_all_btn.clone();
+    let pa_state = pause_all_state.clone();
 
     glib::spawn_future_local(async move {
         let mut last_stats = std::time::Instant::now();
@@ -462,15 +554,36 @@ pub fn build_window(
                         let active: Vec<_> = all.iter()
                             .filter(|d| matches!(d.status, DownloadStatus::Downloading))
                             .collect();
+                        let queued = all.iter()
+                            .filter(|d| matches!(d.status, DownloadStatus::Queued))
+                            .count();
                         let total_speed: u64 = active.iter().map(|d| d.speed).sum();
 
-                        sa.set_text(&format!("Active {}", active.len()));
+                        sa.set_text(&format!("Aktif {}", active.len()));
+                        sq.set_text(&format!("Antri {}", queued));
                         ss.set_text(&if total_speed > 0 {
                             format!("{}/s", format_size(total_speed))
                         } else {
                             "0 B/s".to_string()
                         });
                         st.set_text(&format!("Total {}", all.len()));
+
+                        // Sinkron tombol Jeda/Lanjut Semua dengan state NYATA (C3)
+                        let has_active = all.iter().any(|d| matches!(d.status,
+                            DownloadStatus::Downloading | DownloadStatus::Resolving));
+                        let has_pausable = all.iter().any(|d| matches!(d.status,
+                            DownloadStatus::Paused | DownloadStatus::Error));
+                        if has_active {
+                            pa_state.set(false);
+                            pa_btn.set_label("Jeda Semua");
+                        } else if has_pausable {
+                            pa_state.set(true);
+                            pa_btn.set_label("Lanjut Semua");
+                        } else {
+                            pa_state.set(false);
+                            pa_btn.set_label("Jeda Semua");
+                        }
+                        pa_btn.set_sensitive(has_active || has_pausable);
                     }
                 });
             }
@@ -493,21 +606,81 @@ pub fn build_window(
         });
     }
 
-    // Kill semua child process (aria2c/yt-dlp) saat window ditutup — anti orphan
+    // ── A1: tutup jendela TIDAK diam-diam mematikan download ──
+    // Jika masih ada unduhan aktif/antri, minta konfirmasi dulu.
     let engine_close = engine.clone();
     let rt_close = rt.clone();
+    let win_close = window.clone();
+    let close_confirmed = Rc::new(Cell::new(false));
+    let close_confirmed_cb = close_confirmed.clone();
     window.connect_close_request(move |_| {
+        // Putaran kedua: user sudah konfirmasi → hentikan proses (SIGTERM agar
+        // aria2 sempat menulis .aria2 control file untuk resume) lalu tutup.
+        if close_confirmed_cb.get() {
+            let eng = engine_close.clone();
+            let all = rt_close.block_on(async move { eng.get_all_downloads().await });
+            for d in all {
+                if let Some(pid) = d.pid {
+                    let _ = nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(pid as i32),
+                        nix::sys::signal::Signal::SIGTERM,
+                    );
+                }
+            }
+            return glib::Propagation::Proceed;
+        }
+
         let eng = engine_close.clone();
         let all = rt_close.block_on(async move { eng.get_all_downloads().await });
-        for d in all {
-            if let Some(pid) = d.pid {
-                let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(pid as i32),
-                    nix::sys::signal::Signal::SIGKILL,
-                );
-            }
+        let active: usize = all.iter()
+            .filter(|d| matches!(d.status,
+                DownloadStatus::Downloading
+                    | DownloadStatus::Resolving
+                    | DownloadStatus::Queued))
+            .count();
+
+        if active == 0 {
+            return glib::Propagation::Proceed;
         }
-        glib::Propagation::Proceed
+
+        let dlg = gtk4::Dialog::with_buttons(
+            Some("Konfirmasi"),
+            Some(&win_close),
+            gtk4::DialogFlags::MODAL | gtk4::DialogFlags::DESTROY_WITH_PARENT,
+            &[
+                ("Batal", gtk4::ResponseType::Cancel),
+                ("Hentikan & Tutup", gtk4::ResponseType::Accept),
+            ],
+        );
+        dlg.add_css_class("fast-dm-window");
+        let content = dlg.content_area();
+        content.set_spacing(8);
+        content.set_margin_top(16);
+        content.set_margin_bottom(12);
+        content.set_margin_start(20);
+        content.set_margin_end(20);
+
+        let lbl = Label::new(Some(&format!(
+            "Masih ada {} unduhan aktif.\nHentikan semua proses dan tutup aplikasi?",
+            active
+        )));
+        lbl.set_wrap(true);
+        lbl.set_halign(gtk4::Align::Start);
+        content.append(&lbl);
+        dlg.show();
+
+        let confirmed = close_confirmed_cb.clone();
+        let win2 = win_close.clone();
+        dlg.connect_response(move |d, resp| {
+            if resp == gtk4::ResponseType::Accept {
+                confirmed.set(true);
+                win2.close(); // memicu close_request lagi → SIGTERM + tutup
+            }
+            d.close();
+        });
+
+        // Jangan tutup dulu — tunggu keputusan user
+        glib::Propagation::Stop
     });
 
     window.present();
@@ -523,16 +696,19 @@ fn settings_row(label: &str, widget: &impl IsA<gtk4::Widget>) -> GtkBox {
     row
 }
 
-/// Dialog settings — perubahan berlaku untuk download baru tanpa restart
+/// Dialog settings — perubahan berlaku untuk download baru tanpa restart.
+/// Validasi INLINE (A2) sebelum dialog ditutup; folder bisa dipilih via dialog (C1).
 #[allow(deprecated)] // gtk4::Dialog deprecated sejak 4.10 — pola sama seperti youtube_dialog.rs
 fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
     let dialog = gtk4::Dialog::with_buttons(
-        Some("Settings"),
+        Some("Pengaturan"),
         Some(parent),
         gtk4::DialogFlags::MODAL | gtk4::DialogFlags::DESTROY_WITH_PARENT,
         &[],
     );
-    dialog.set_default_size(420, -1);
+    // B2: samakan tema dialog dengan window utama (CSS di-scope ke class ini)
+    dialog.add_css_class("fast-dm-window");
+    dialog.set_default_size(460, -1);
 
     let content = dialog.content_area();
     content.set_spacing(10);
@@ -541,9 +717,35 @@ fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
     content.set_margin_start(20);
     content.set_margin_end(20);
 
+    // ── C1: folder unduhan + tombol "Pilih Folder…" ──
+    let folder_row = GtkBox::new(Orientation::Horizontal, 8);
     let folder_entry = Entry::new();
     folder_entry.set_text(&cur.download_dir);
-    content.append(&settings_row("Download folder", &folder_entry));
+    folder_entry.set_hexpand(true);
+    let browse_btn = Button::with_label("Pilih Folder…");
+    browse_btn.add_css_class("btn-clear");
+    browse_btn.set_tooltip_text(Some("Pilih folder tujuan via dialog"));
+
+    let folder_entry_b = folder_entry.clone();
+    let parent_chooser = (*parent).clone();
+    browse_btn.connect_clicked(move |_| {
+        let chooser = gtk4::FileDialog::builder()
+            .title("Pilih folder unduhan")
+            .accept_label(Some("Pilih"))
+            .build();
+        let entry = folder_entry_b.clone();
+        chooser.select_folder(Some(&parent_chooser), gtk4::gio::Cancellable::NONE, move |res| {
+            if let Ok(file) = res {
+                if let Some(path) = file.path() {
+                    entry.set_text(&path.to_string_lossy().to_string());
+                }
+            }
+        });
+    });
+
+    folder_row.append(&folder_entry);
+    folder_row.append(&browse_btn);
+    content.append(&settings_row("Folder unduhan", &folder_row));
 
     let conn_spin = gtk4::SpinButton::with_range(1.0, 32.0, 1.0);
     conn_spin.set_value(cur.max_connections as f64);
@@ -551,12 +753,25 @@ fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
 
     let conc_spin = gtk4::SpinButton::with_range(1.0, 10.0, 1.0);
     conc_spin.set_value(cur.max_concurrent as f64);
-    content.append(&settings_row("Download bersamaan (antrian)", &conc_spin));
+    content.append(&settings_row("Unduhan bersamaan (antrian)", &conc_spin));
 
+    // ── A3: batas kecepatan + hint format · A2: pesan error inline ──
+    let speed_box = GtkBox::new(Orientation::Vertical, 4);
     let speed_entry = Entry::new();
     speed_entry.set_text(&cur.max_overall_speed);
-    speed_entry.set_placeholder_text(Some("0 = unlimited, mis. 512K / 2M"));
-    content.append(&settings_row("Speed limit total", &speed_entry));
+    speed_entry.set_placeholder_text(Some("0, 512K, 2M, 10G"));
+    let speed_hint = Label::new(Some("0 = tanpa batas · contoh: 512K, 2M, 10G"));
+    speed_hint.add_css_class("detail-label");
+    speed_hint.set_halign(gtk4::Align::Start);
+    let speed_error = Label::new(Some(""));
+    speed_error.add_css_class("error-label");
+    speed_error.set_halign(gtk4::Align::Start);
+    speed_error.set_wrap(true);
+    speed_error.set_visible(false);
+    speed_box.append(&speed_entry);
+    speed_box.append(&speed_hint);
+    speed_box.append(&speed_error);
+    content.append(&settings_row("Batas kecepatan total", &speed_box));
 
     let verify_tls_chk = gtk4::CheckButton::with_label("Verifikasi sertifikat TLS (aman)");
     verify_tls_chk.set_active(cur.verify_tls);
@@ -581,11 +796,27 @@ fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
         }
     });
 
+    // A2: validasi INLINE sebelum dialog ditutup — user tahu field mana yang salah
     let dialog_weak = dialog.downgrade();
+    let speed_entry_save = speed_entry.clone();
+    let speed_error_save = speed_error.clone();
     save_btn.connect_clicked(move |_| {
+        let speed = speed_entry_save.text().trim().to_string();
+        if !speed.is_empty() && !crate::downloader::is_valid_speed_limit(&speed) {
+            speed_error_save.set_text("Format tidak valid — gunakan: 0, 512K, 2M, 10G");
+            speed_error_save.set_visible(true);
+            return; // dialog tetap terbuka
+        }
+        speed_error_save.set_visible(false);
         if let Some(d) = dialog_weak.upgrade() {
             d.response(gtk4::ResponseType::Ok);
         }
+    });
+
+    // Sembunyikan pesan error begitu user mengetik ulang
+    let speed_error_hide = speed_error.clone();
+    speed_entry.connect_changed(move |_| {
+        speed_error_hide.set_visible(false);
     });
 
     btn_box.append(&cancel_btn);
@@ -632,7 +863,8 @@ fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
     }
     cfg.max_connections = conn_spin.value() as u8;
     cfg.max_concurrent = conc_spin.value() as u8;
-    let speed = speed_entry.text().trim().to_string();
+    // Normalisasi: "2m" → "2M", "10g" → "10G"
+    let speed = speed_entry.text().trim().to_uppercase();
     if !speed.is_empty() {
         cfg.max_overall_speed = speed;
     }

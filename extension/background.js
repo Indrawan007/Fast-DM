@@ -112,17 +112,17 @@ chrome.runtime.onInstalled.addListener((details) => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: "fastdm-download-link",
-      title: "⚡ Download with Fast DM",
+      title: "⚡ Unduh dengan Fast DM",
       contexts: ["link"],
     });
     chrome.contextMenus.create({
       id: "fastdm-download-video",
-      title: "⚡ Download Video with Fast DM",
+      title: "⚡ Unduh Video dengan Fast DM",
       contexts: ["video", "audio"],
     });
     chrome.contextMenus.create({
       id: "fastdm-download-image",
-      title: "⚡ Download Image with Fast DM",
+      title: "⚡ Unduh Gambar dengan Fast DM",
       contexts: ["image"],
     });
   });

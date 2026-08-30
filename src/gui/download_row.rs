@@ -43,8 +43,10 @@ impl DownloadRow {
         filename_lbl.set_halign(gtk4::Align::Start);
         filename_lbl.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
         filename_lbl.add_css_class("filename-label");
+        // C6: tunjukkan URL sumber saat hover (dua file bernama sama jadi bisa dibedakan)
+        filename_lbl.set_tooltip_text(Some(&info.url));
 
-        let status_lbl = Label::new(Some(&info.status.to_string().to_uppercase()));
+        let status_lbl = Label::new(Some(status_label(&info.status)));
         status_lbl.add_css_class("badge");
 
         row1.append(&filename_lbl);
@@ -109,12 +111,15 @@ impl DownloadRow {
         row4.set_halign(gtk4::Align::End);
         row4.set_margin_top(4);
 
-        let pause_btn  = make_btn("Pause",       &["btn-action", "btn-pause"]);
-        let resume_btn = make_btn("Resume",      &["btn-action", "btn-resume"]);
-        let retry_btn  = make_btn("Retry",       &["btn-action", "btn-retry"]);
-        let cancel_btn = make_btn("Cancel",      &["btn-action", "btn-cancel"]);
-        let open_btn   = make_btn("Open Folder", &["btn-action", "btn-open"]);
-        let remove_btn = make_btn("Remove",      &["btn-action", "btn-remove"]);
+        // B4: tombol selalu tampil (layout stabil) — yang tidak relevan di-disable
+        let pause_btn  = make_btn("Jeda",    &["btn-action", "btn-pause"], "Jeda unduhan");
+        let resume_btn = make_btn("Lanjut",  &["btn-action", "btn-resume"], "Lanjutkan unduhan");
+        let retry_btn  = make_btn("Ulangi",  &["btn-action", "btn-retry"], "Coba lagi");
+        let cancel_btn = make_btn("Batal",   &["btn-action", "btn-cancel"], "Batalkan unduhan");
+        let open_btn   = make_btn("Folder",  &["btn-action", "btn-open"], "Buka folder tujuan");
+        // A5: jelaskan bahwa Remove tidak menghapus file
+        let remove_btn = make_btn("Hapus",   &["btn-action", "btn-remove"],
+            "Hapus dari daftar (file tetap ada di disk)");
 
         row4.append(&retry_btn);
         row4.append(&resume_btn);
@@ -156,6 +161,7 @@ impl DownloadRow {
 
     pub fn update(&mut self, info: &DownloadInfo) {
         self.filename_lbl.set_text(&info.filename);
+        self.filename_lbl.set_tooltip_text(Some(&info.url));
         self.progress_bar.set_fraction((info.progress / 100.0).min(1.0));
         self.pct_label.set_text(&format!("{:.1}%", info.progress));
         self.size_lbl.set_text(&format!(
@@ -174,7 +180,7 @@ impl DownloadRow {
             self.eta_lbl.set_text("");
         }
 
-        self.status_lbl.set_text(&info.status.to_string().to_uppercase());
+        self.status_lbl.set_text(status_label(&info.status));
         self.update_badge(&info.status);
         self.update_progress_class(&info.status);
 
@@ -230,17 +236,32 @@ impl DownloadRow {
         let cancel = matches!(status, DownloadStatus::Cancelled);
         let queued = matches!(status, DownloadStatus::Queued);
 
-        self.pause_btn.set_visible(active);
-        self.resume_btn.set_visible(paused);
-        self.retry_btn.set_visible(error);
-        self.cancel_btn.set_visible(active || paused || error || queued);
-        self.open_btn.set_visible(done);
-        self.remove_btn.set_visible(done || cancel || error);
+        // B4: jangan set_visible (layout melompat) — pakai sensitive + tooltip
+        self.pause_btn.set_sensitive(active);
+        self.resume_btn.set_sensitive(paused);
+        self.retry_btn.set_sensitive(error);
+        self.cancel_btn.set_sensitive(active || paused || error || queued);
+        self.open_btn.set_sensitive(done);
+        self.remove_btn.set_sensitive(done || cancel || error);
     }
 }
 
-fn make_btn(label: &str, classes: &[&str]) -> Button {
+/// B1: label status dalam Bahasa Indonesia (dipakai badge & tooltip).
+fn status_label(status: &DownloadStatus) -> &'static str {
+    match status {
+        DownloadStatus::Downloading => "MENGUNDUH",
+        DownloadStatus::Resolving   => "MEMPROSES",
+        DownloadStatus::Completed   => "SELESAI",
+        DownloadStatus::Error       => "GAGAL",
+        DownloadStatus::Paused      => "JEDA",
+        DownloadStatus::Cancelled   => "DIBATALKAN",
+        DownloadStatus::Queued      => "ANTRIAN",
+    }
+}
+
+fn make_btn(label: &str, classes: &[&str], tooltip: &str) -> Button {
     let btn = Button::with_label(label);
+    btn.set_tooltip_text(Some(tooltip));
     for c in classes {
         btn.add_css_class(c);
     }

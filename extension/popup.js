@@ -5,18 +5,29 @@ document.addEventListener("DOMContentLoaded", () => {
   const videoList       = document.getElementById("video-list");
   const statusDot       = document.getElementById("status-dot");
   const statusText      = document.getElementById("status-text");
+  const feedback        = document.getElementById("action-feedback");
   const toggleIntercept = document.getElementById("toggle-intercept");
   const toggleEnabled   = document.getElementById("toggle-enabled");
+
+  // ── C5: feedback persisten (bukan menyalahgunakan placeholder) ──
+  let feedbackTimer = null;
+  function setFeedback(msg, ok) {
+    feedback.textContent = msg;
+    feedback.className = "action-feedback " + (ok ? "ok" : "err");
+    feedback.hidden = false;
+    clearTimeout(feedbackTimer);
+    feedbackTimer = setTimeout(() => { feedback.hidden = true; }, 3500);
+  }
 
   // ── Check Connection + Auto Register ──
   function checkConnection() {
     chrome.runtime.sendMessage({ action: "ping" }, (response) => {
       if (chrome.runtime.lastError || !response || !response.success) {
         statusDot.className = "status-dot disconnected";
-        statusText.textContent = "Fast DM is not running. Launch: fast-dm";
+        statusText.textContent = "Fast DM tidak berjalan. Jalankan: fast-dm";
       } else {
         statusDot.className = "status-dot connected";
-        statusText.textContent = "Connected to Fast DM ✓";
+        statusText.textContent = "Terhubung ke Fast DM ✓";
       }
     });
   }
@@ -33,15 +44,9 @@ document.addEventListener("DOMContentLoaded", () => {
       (response) => {
         if (response && response.success) {
           urlInput.value = "";
-          urlInput.placeholder = "✓ Sent to Fast DM!";
-          setTimeout(() => {
-            urlInput.placeholder = "Paste download URL...";
-          }, 2000);
+          setFeedback("✓ Terkirim ke Fast DM!", true);
         } else {
-          urlInput.placeholder = "✕ Failed — is Fast DM running?";
-          setTimeout(() => {
-            urlInput.placeholder = "Paste download URL...";
-          }, 3000);
+          setFeedback("✕ Gagal — pastikan Fast DM berjalan", false);
         }
       }
     );
@@ -65,7 +70,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // ── Scan Videos ──
-  scanBtn.addEventListener("click", () => {
+  function scanVideos() {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
 
@@ -75,7 +80,7 @@ document.addEventListener("DOMContentLoaded", () => {
         (response) => {
           if (chrome.runtime.lastError) {
             videoList.innerHTML =
-              '<div class="empty-text">Cannot scan this page</div>';
+              '<div class="empty-text">Tidak bisa memindai halaman ini</div>';
             return;
           }
 
@@ -83,7 +88,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
           if (videos.length === 0) {
             videoList.innerHTML =
-              '<div class="empty-text">No videos detected</div>';
+              '<div class="empty-text">Tidak ada video terdeteksi</div>';
             return;
           }
 
@@ -105,17 +110,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
             const btn = document.createElement("button");
             btn.className = "video-dl-btn";
-            btn.textContent = "⬇ Download";
+            btn.textContent = "⬇ Unduh";
             btn.addEventListener("click", () => {
               chrome.runtime.sendMessage({
                 action: "download",
                 url: url,
                 headers: { Referer: tabs[0].url },
               });
-              btn.textContent = "✓ Sent";
+              btn.textContent = "✓ Terkirim";
               btn.disabled = true;
               setTimeout(() => {
-                btn.textContent = "⬇ Download";
+                btn.textContent = "⬇ Unduh";
                 btn.disabled = false;
               }, 2000);
             });
@@ -127,7 +132,12 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       );
     });
-  });
+  }
+
+  scanBtn.addEventListener("click", scanVideos);
+
+  // ── C4: scan otomatis saat popup dibuka (tombol tetap ada untuk scan ulang) ──
+  setTimeout(scanVideos, 150);
 
   // ── Settings ──
   chrome.runtime.sendMessage({ action: "getConfig" }, (cfg) => {

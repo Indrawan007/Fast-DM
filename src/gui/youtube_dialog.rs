@@ -32,11 +32,13 @@ pub fn show_quality_dialog(
     duration_str: &str,
 ) -> Option<String> {
     let dialog = Dialog::with_buttons(
-        Some("YouTube Download"),
+        Some("Pilih Kualitas Video"),
         Some(parent),
         gtk4::DialogFlags::MODAL | gtk4::DialogFlags::DESTROY_WITH_PARENT,
         &[],
     );
+    // B2: samakan tema dialog dengan window utama
+    dialog.add_css_class("fast-dm-window");
     dialog.set_default_size(480, 460);
 
     let content = dialog.content_area();
@@ -54,10 +56,15 @@ pub fn show_quality_dialog(
     title_lbl.add_css_class("filename-label");
     content.append(&title_lbl);
 
-    // Info
+    // Info — A4: URL sumber (uploader/durasi belum tersedia di tahap ini),
+    // dengan ellipsize agar URL panjang tidak melebar.
     let info_box = GtkBox::new(Orientation::Horizontal, 12);
     if !uploader.is_empty() {
         let up = Label::new(Some(uploader));
+        up.set_halign(gtk4::Align::Start);
+        up.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+        up.set_max_width_chars(48);
+        up.set_wrap(true);
         up.add_css_class("detail-label");
         info_box.append(&up);
     }
@@ -70,7 +77,7 @@ pub fn show_quality_dialog(
     content.append(&gtk4::Separator::new(Orientation::Horizontal));
 
     // Quality header
-    let q_label = Label::new(Some("Quality"));
+    let q_label = Label::new(Some("Kualitas"));
     q_label.set_halign(gtk4::Align::Start);
     q_label.add_css_class("filename-label");
     content.append(&q_label);
@@ -129,11 +136,11 @@ pub fn show_quality_dialog(
     btn_box.set_halign(gtk4::Align::End);
     btn_box.set_margin_top(8);
 
-    let cancel_btn = Button::with_label("Cancel");
+    let cancel_btn = Button::with_label("Batal");
     cancel_btn.add_css_class("btn-action");
     cancel_btn.add_css_class("btn-cancel");
 
-    let dl_btn = Button::with_label("Download");
+    let dl_btn = Button::with_label("Unduh");
     dl_btn.add_css_class("btn-download");
 
     let dialog_weak = dialog.downgrade();
