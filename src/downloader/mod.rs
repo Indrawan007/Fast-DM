@@ -181,20 +181,27 @@ impl DownloadEngine {
                 }
             }
 
-            let mut i = info.lock().await;
-            if active >= max {
-                // Slot penuh → antri (Queued)
-                i.status = DownloadStatus::Queued;
-                i.speed = 0;
-                let _ = tx.send(DownloadEvent::Progress(i.clone()));
-                None
-            } else {
-                // Klaim slot: tandai Resolving + percobaan ke-N (retry tracking)
-                i.status = DownloadStatus::Resolving;
-                i.retry_count = i.retry_count.saturating_add(1);
-                let _ = tx.send(DownloadEvent::Progress(i.clone()));
-                Some(info)
-            }
+            // Scope guard (pola promote_next): MutexGuard `i` harus drop
+            // SEBELUM `info` dipindah keluar blok — kalau tidak, E0505
+            // (cannot move out of `info` because it is borrowed).
+            let start = {
+                let mut i = info.lock().await;
+                if active >= max {
+                    // Slot penuh → antri (Queued)
+                    i.status = DownloadStatus::Queued;
+                    i.speed = 0;
+                    let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                    false
+                } else {
+                    // Klaim slot: tandai Resolving + percobaan ke-N (retry tracking)
+                    i.status = DownloadStatus::Resolving;
+                    i.retry_count = i.retry_count.saturating_add(1);
+                    let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                    true
+                }
+            };
+
+            if start { Some(info) } else { None }
         };
 
         if let Some(info) = claimed {
