@@ -54,7 +54,7 @@ pub fn build_window(
     title.add_css_class("header-title");
 
     // B5: subtitle berisi info berguna → versi aplikasi
-    let subtitle = Label::new(Some("v2.2.1"));
+    let subtitle = Label::new(Some("v2.2.2"));
     subtitle.add_css_class("header-subtitle");
     subtitle.set_valign(gtk4::Align::End);
 
@@ -188,7 +188,6 @@ pub fn build_window(
         entry_add.set_text("");
 
         // YouTube + halaman video lain: minta pilihan kualitas langsung dari GUI
-        // (IDM-like). File langsung (mp4/zip/dll) dilewati — tidak perlu dialog.
         // (IDM-like). B20: hanya untuk URL yang memang lewat jalur yt-dlp —
         // YouTube, manifest HLS/DASH (.m3u8/.mpd), wrapper halaman
         // (.php/.html/...), atau URL tanpa ekstensi sama sekali.

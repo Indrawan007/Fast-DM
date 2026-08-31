@@ -54,6 +54,7 @@ impl Config {
     pub fn config_file() -> PathBuf {
         Self::config_dir().join("config.json")
     }
+
     /// B7: file cookie per-domain (cookies_<host>.txt). Per-domain supaya dua
     /// download bersamaan dari situs berbeda tidak saling menimpa cookies.
     pub fn cookies_file_for(domain: &str) -> PathBuf {

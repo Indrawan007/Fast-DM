@@ -42,7 +42,7 @@ fn detect_browser() -> Option<&'static str> {
         ("chromium", ".config/thorium"),
     ];
 
-    if let Ok(out) = std::process::Command::new("xdg-settings")     // B17
+    if let Ok(out) = std::process::Command::new("xdg-settings")
         .args(["get", "default-web-browser"])
         .output()
     {
@@ -57,7 +57,6 @@ fn detect_browser() -> Option<&'static str> {
             }
         }
     }
-
 
     for (name, path) in &candidates {
         if home.join(path).is_dir() {
@@ -124,58 +123,6 @@ pub(crate) fn output_template(save_dir: &str, filename: &str) -> String {
         return format!("{}/%(title)s.%(ext)s", save_dir);
     }
     // B6: escape '%' → '%%' — nilai --output yt-dlp adalah template;
-    // nama file hasil decode URL yang mengandung '%' akan salah parse.
-    let f = f.replace('%', "%%");
-    if f.contains('.') {
-        return format!("{}/{}", save_dir, f);
-    }
-    format!("{}/{}.%(ext)s", save_dir, f)
-}
-
-pub(crate) fn cookie_args(url: &str) -> Vec<String> {
-    // B7: cookies per-domain dari extension (fresh < 2 jam) → pakai file itu
-    if let Some(host) = url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_string()))
-    {
-        let cookies_file = Config::cookies_file_for(&host);
-        if is_fresh_cookie_file(&cookies_file) {
-            return vec![
-                "--cookies".into(),
-                cookies_file.to_string_lossy().to_string(),
-            ];
-        }
-    }
-
-    // Use browser cookies
-    if let Some(browser) = detect_browser() {
-        return vec!["--cookies-from-browser".into(), browser.into()];
-    }
-
-    vec![]
-}
-
-/// Cookie file ada, > 100 byte, dan terakhir diubah < 2 jam lalu
-fn is_fresh_cookie_file(path: &std::path::Path) -> bool {
-    match std::fs::metadata(path) {
-        Ok(meta) => {
-            meta.len() > 100
-                && meta
-                    .modified()
-                    .ok()
-                    .and_then(|m| m.elapsed().ok())
-                    .is_some_and(|e| e.as_secs() < 7200)
-        }
-        Err(_) => false,
-    }
-}
-
-pub(crate) fn output_template(save_dir: &str, filename: &str) -> String {
-    let f = filename.trim();
-    if f.is_empty() || f.starts_with("download_") {
-        return format!("{}/%(title)s.%(ext)s", save_dir);
-    }
-        // B6: escape '%' → '%%' — nilai --output yt-dlp adalah template;
     // nama file hasil decode URL yang mengandung '%' akan salah parse.
     let f = f.replace('%', "%%");
     if f.contains('.') {
@@ -334,6 +281,7 @@ pub(crate) fn run_ytdlp(
             if status == DownloadStatus::Cancelled {
                 let _ = child.kill();
             }
+            // Reap the child so it does not linger as a zombie process
             let _ = child.wait();
             rt.block_on(async { info.lock().await.pid = None; });
             return false;
