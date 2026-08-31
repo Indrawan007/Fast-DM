@@ -54,7 +54,7 @@ pub fn build_window(
     title.add_css_class("header-title");
 
     // B5: subtitle berisi info berguna → versi aplikasi
-    let subtitle = Label::new(Some("v2.2.1"));
+    let subtitle = Label::new(Some("v2.2.2"));
     subtitle.add_css_class("header-subtitle");
     subtitle.set_valign(gtk4::Align::End);
 
@@ -188,7 +188,6 @@ pub fn build_window(
         entry_add.set_text("");
 
         // YouTube + halaman video lain: minta pilihan kualitas langsung dari GUI
-        // (IDM-like). File langsung (mp4/zip/dll) dilewati — tidak perlu dialog.
         // (IDM-like). B20: hanya untuk URL yang memang lewat jalur yt-dlp —
         // YouTube, manifest HLS/DASH (.m3u8/.mpd), wrapper halaman
         // (.php/.html/...), atau URL tanpa ekstensi sama sekali.
@@ -261,9 +260,9 @@ pub fn build_window(
         }
         if urls.is_empty() {
             return false; // tidak ada URL → jangan klaim drop
-
         }
-                // Tunda ke idle: on_add bisa memunculkan dialog modal (YouTube),
+
+        // Tunda ke idle: on_add bisa memunculkan dialog modal (YouTube),
         // jangan jalankan nested main loop di tengah sinyal drop.
         let entry = entry_drop.clone();
         let add = on_add_drop.clone();
@@ -302,10 +301,11 @@ pub fn build_window(
         let to_remove: Vec<String> = statuses.iter()
             .filter(|(_, status)| {
                 matches!(status,
+                    DownloadStatus::Completed |
                     DownloadStatus::Cancelled |
                     DownloadStatus::Error
-                )});
-}
+                )
+            })
             .map(|(id, _)| id.clone())
             .collect();
         drop(statuses);
@@ -334,6 +334,7 @@ pub fn build_window(
         for id in &to_remove {
             st.remove(id);
         }
+    });
 
     // ── C3: Jeda Semua / Lanjut Semua ──
     // state=false → masih ada yang aktif (aksi = Jeda); state=true → aksi = Lanjut.

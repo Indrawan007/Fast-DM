@@ -84,7 +84,7 @@ pub async fn download(
     ]);
 
     // Cookies (dari cookies.txt / browser) + Referer & header kustom extension
-   cmd.extend(cookie_args(&url));
+    cmd.extend(cookie_args(&url));
     for (k, v) in &headers {
         let k = k.replace(['\r', '\n'], "");
         let v = v.replace(['\r', '\n'], "");

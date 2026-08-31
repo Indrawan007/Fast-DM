@@ -115,10 +115,9 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
                     // stdout/stdin native host (pipe length-prefixed milik
                     // browser); output GUI ke stdout akan merusak protokol
                     // native messaging.
-
                     let _ = std::process::Command::new(&gui_path)
                         .process_group(0)  // New process group
-                                                .stdin(std::process::Stdio::null())
+                        .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
                         .spawn();

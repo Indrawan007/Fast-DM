@@ -42,7 +42,7 @@ fn detect_browser() -> Option<&'static str> {
         ("chromium", ".config/thorium"),
     ];
 
-   if let Ok(out) = std::process::Command::new("xdg-settings")
+    if let Ok(out) = std::process::Command::new("xdg-settings")
         .args(["get", "default-web-browser"])
         .output()
     {
@@ -57,7 +57,6 @@ fn detect_browser() -> Option<&'static str> {
             }
         }
     }
-
 
     for (name, path) in &candidates {
         if home.join(path).is_dir() {
@@ -123,7 +122,7 @@ pub(crate) fn output_template(save_dir: &str, filename: &str) -> String {
     if f.is_empty() || f.starts_with("download_") {
         return format!("{}/%(title)s.%(ext)s", save_dir);
     }
-        // B6: escape '%' → '%%' — nilai --output yt-dlp adalah template;
+    // B6: escape '%' → '%%' — nilai --output yt-dlp adalah template;
     // nama file hasil decode URL yang mengandung '%' akan salah parse.
     let f = f.replace('%', "%%");
     if f.contains('.') {
