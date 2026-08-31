@@ -250,6 +250,9 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
     return;
   }
 
+  // CATATAN (B18): saat onCreated, fileSize umumnya masih 0 dan mime kosong,
+  // jadi deteksi dalam praktiknya mengandalkan ekstensi file di URL
+  // (limitasi API chrome.downloads — bukan bug).
   if (!shouldInterceptUrl(url, downloadItem.fileSize, downloadItem.mime))
     return;
 
@@ -389,7 +392,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.cookies || null,
       message.domain || null,
     )
-      .then((r) => sendResponse(r))
+      // B14: sendDownload tidak pernah me-reject (internal catch → null),
+      // jadi terjemahkan null jadi respons gagal yang eksplisit.
+      .then((r) =>
+        sendResponse(
+          r || { success: false, error: "Gagal mengirim ke native host" },
+        ),
+      )
       .catch((e) => sendResponse({ success: false, error: e.message }));
     return true;
   }

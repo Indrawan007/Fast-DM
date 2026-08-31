@@ -149,10 +149,22 @@ pub fn resolve_native_path() -> String {
             if candidate.exists() {
                 return candidate.to_string_lossy().to_string();
             }
-            // Cek di root project (development)
-            let project_root = parent.parent().and_then(|p| p.parent());
-            if let Some(root) = project_root {
-                let candidate = root.join("fast-dm-native");
+            // B16: Development (cargo run/build) — exe ada di target/<profile>/.
+            // Buat wrapper kecil di situ (manifest NMH tidak bisa membawa
+            // argumen --native), sehingga native messaging bisa diuji tanpa
+            // install .deb.
+            let in_target = parent
+                .file_name()
+                .map_or(false, |p| p == "debug" || p == "release")
+                && parent
+                    .parent()
+                    .map_or(false, |p| p.file_name() == Some(std::ffi::OsStr::new("target")));
+            if in_target {
+                let _ = fs::write(
+                    &candidate,
+                    format!("#!/bin/sh\nexec \"{}\" --native \"$@\"\n", exe.display()),
+                );
+                let _ = fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755));
                 if candidate.exists() {
                     return candidate.to_string_lossy().to_string();
                 }

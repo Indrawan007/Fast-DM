@@ -6,8 +6,10 @@
  * - hook fetch() dan XMLHttpRequest → kumpulkan URL .m3u8/.mpd/.mp4/.webm/dll
  * - scan element <video>/<audio>/<source>/<a href>
  *
- * Hasil disimpan di window.__fastdmMediaCandidates (array, paling baru terakhir).
- * content.js membacanya saat tombol "Unduh" diklik pada video blob:/streaming.
+ * Hasil disimpan di document.documentElement.dataset.fastdmMedia (JSON array,
+ * paling baru terakhir). Script ini berjalan di MAIN world agar hook
+ * fetch/XHR menangkap request MILIK HALAMAN; content.js (ISOLATED world)
+ * membacanya lewat DOM — satu-satunya jembatan antar world.
  */
 (() => {
   "use strict";
@@ -17,6 +19,17 @@
 
   const candidates = new Set();
   const MAX = 50;
+  // MAIN world tidak berbagi objek JS dengan content script (ISOLATED world);
+  // jembatan datanya adalah DOM.
+  function persist() {
+    try {
+      document.documentElement.dataset.fastdmMedia = JSON.stringify(
+        Array.from(candidates),
+      );
+    } catch (e) {
+      /* ignore */
+    }
+  }
 
   function add(url) {
     try {
@@ -29,7 +42,7 @@
         const first = candidates.values().next().value;
         candidates.delete(first);
       }
-      window.__fastdmMediaCandidates = Array.from(candidates);
+      persist();
     } catch (e) {
       /* ignore */
     }

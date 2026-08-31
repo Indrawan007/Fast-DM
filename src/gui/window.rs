@@ -54,7 +54,7 @@ pub fn build_window(
     title.add_css_class("header-title");
 
     // B5: subtitle berisi info berguna → versi aplikasi
-    let subtitle = Label::new(Some("v2.2.0"));
+    let subtitle = Label::new(Some("v2.2.1"));
     subtitle.add_css_class("header-subtitle");
     subtitle.set_valign(gtk4::Align::End);
 
@@ -189,8 +189,26 @@ pub fn build_window(
 
         // YouTube + halaman video lain: minta pilihan kualitas langsung dari GUI
         // (IDM-like). File langsung (mp4/zip/dll) dilewati — tidak perlu dialog.
-        let wants_quality = crate::downloader::youtube::is_youtube_url(&url)
-            || !crate::downloader::is_direct_file_url(&url);
+        // (IDM-like). B20: hanya untuk URL yang memang lewat jalur yt-dlp —
+        // YouTube, manifest HLS/DASH (.m3u8/.mpd), wrapper halaman
+        // (.php/.html/...), atau URL tanpa ekstensi sama sekali.
+        // File langsung (mp4/zip/dll — jalur aria2) dilewati.
+        let wants_quality = {
+            let path_lower = url
+                .split('?')
+                .next()
+                .unwrap_or(&url)
+                .split('#')
+                .next()
+                .unwrap_or(&url)
+                .to_ascii_lowercase();
+            const PAGE_OR_STREAM_EXTS: &[&str] = &[
+                ".php", ".html", ".htm", ".asp", ".aspx", ".jsp", ".m3u8", ".mpd",
+            ];
+            let page_or_stream = PAGE_OR_STREAM_EXTS.iter().any(|e| path_lower.ends_with(e))
+                || !path_lower.contains('.');
+            crate::downloader::youtube::is_youtube_url(&url) || page_or_stream
+        };
         let quality = if wants_quality {
             youtube_dialog::show_quality_dialog(
                 win_add.upcast_ref(),
@@ -221,7 +239,7 @@ pub fn build_window(
     // ── C2: drag & drop URL (dari browser/file manager) ke window ──
     let drop_target = DropTarget::builder()
         .actions(DragAction::COPY)
-        .formats(&ContentFormats::new(&["text/uri-list"]))
+        .formats(&ContentFormats::new(&["text/uri-list", "text/plain"]))
         .build();
     window.add_controller(drop_target.clone());
 
@@ -232,24 +250,29 @@ pub fn build_window(
         if let Ok(text) = value.get::<String>() {
             for line in text.lines() {
                 let uri = line.trim();
-                if uri.is_empty() || uri.starts_with("file://") {
+                if uri.is_empty()
+                    || uri.starts_with('#') // baris komentar text/uri-list
+                    || uri.starts_with("file://")
+                {
                     continue; // file lokal bukan URL yang bisa diunduh
                 }
                 urls.push(uri.to_string());
             }
         }
-        if !urls.is_empty() {
-            // Tunda ke idle: on_add bisa memunculkan dialog modal (YouTube),
-            // jangan jalankan nested main loop di tengah sinyal drop.
-            let entry = entry_drop.clone();
-            let add = on_add_drop.clone();
-            glib::idle_add_local_once(move || {
-                for u in urls {
-                    entry.set_text(&u);
-                    add();
-                }
-            });
+        if urls.is_empty() {
+            return false; // tidak ada URL → jangan klaim drop
+
         }
+                // Tunda ke idle: on_add bisa memunculkan dialog modal (YouTube),
+        // jangan jalankan nested main loop di tengah sinyal drop.
+        let entry = entry_drop.clone();
+        let add = on_add_drop.clone();
+        glib::idle_add_local_once(move || {
+            for u in urls {
+                entry.set_text(&u);
+                add();
+            }
+        });
         true
     });
 
@@ -279,10 +302,10 @@ pub fn build_window(
         let to_remove: Vec<String> = statuses.iter()
             .filter(|(_, status)| {
                 matches!(status,
-                    DownloadStatus::Completed |
-                    DownloadStatus::Cancelled
-                )
-            })
+                    DownloadStatus::Cancelled |
+                    DownloadStatus::Error
+                )});
+}
             .map(|(id, _)| id.clone())
             .collect();
         drop(statuses);
@@ -311,7 +334,6 @@ pub fn build_window(
         for id in &to_remove {
             st.remove(id);
         }
-    });
 
     // ── C3: Jeda Semua / Lanjut Semua ──
     // state=false → masih ada yang aktif (aksi = Jeda); state=true → aksi = Lanjut.

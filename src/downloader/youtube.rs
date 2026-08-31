@@ -24,7 +24,10 @@ pub fn is_youtube_url(url: &str) -> bool {
         || RE_YT_MUSIC.is_match(url)
 }
 
-/// Detect browser for cookies — gunakan nama support yt-dlp
+/// Detect browser for cookies — gunakan nama support yt-dlp.
+/// B17: browser DEFAULT sistem (xdg-settings) diprioritaskan — cookie login
+/// user biasanya di browser default, bukan browser pertama yang kebetulan
+/// ter-install.
 fn detect_browser() -> Option<&'static str> {
     let home = dirs::home_dir()?;
     let candidates = [
@@ -39,30 +42,56 @@ fn detect_browser() -> Option<&'static str> {
         ("chromium", ".config/thorium"),
     ];
 
+   if let Ok(out) = std::process::Command::new("xdg-settings")
+        .args(["get", "default-web-browser"])
+        .output()
+    {
+        if out.status.success() {
+            let desktop = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
+            if let Some(name) = desktop_to_browser(&desktop) {
+                if let Some(&(_, path)) = candidates.iter().find(|c| c.0 == name) {
+                    if home.join(path).is_dir() {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+    }
+
+
     for (name, path) in &candidates {
         if home.join(path).is_dir() {
-            return Some(name);
+            return Some(*name);
         }
     }
     None
 }
 
-pub(crate) fn cookie_args() -> Vec<String> {
-    let cookies_file = Config::config_dir().join("cookies.txt");
+/// Nama file .desktop browser default → nama browser yt-dlp
+fn desktop_to_browser(desktop: &str) -> Option<&'static str> {
+    if desktop.contains("google-chrome") { return Some("chrome"); }
+    if desktop.contains("microsoft-edge") { return Some("edge"); }
+    if desktop.contains("thorium") { return Some("chromium"); }
+    if desktop.contains("chromium") { return Some("chromium"); }
+    if desktop.contains("firefox") { return Some("firefox"); }
+    if desktop.contains("brave") { return Some("brave"); }
+    if desktop.contains("opera") { return Some("opera"); }
+    if desktop.contains("vivaldi") { return Some("vivaldi"); }
+    None
+}
 
-    // Use cookies.txt if fresh
-    if cookies_file.exists() {
-        if let Ok(meta) = std::fs::metadata(&cookies_file) {
-            if let Ok(modified) = meta.modified() {
-                if modified.elapsed().unwrap_or_default().as_secs() < 7200 {
-                    if meta.len() > 100 {
-                        return vec![
-                            "--cookies".into(),
-                            cookies_file.to_string_lossy().to_string(),
-                        ];
-                    }
-                }
-            }
+pub(crate) fn cookie_args(url: &str) -> Vec<String> {
+    // B7: cookies per-domain dari extension (fresh < 2 jam) → pakai file itu
+    if let Some(host) = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+    {
+        let cookies_file = Config::cookies_file_for(&host);
+        if is_fresh_cookie_file(&cookies_file) {
+            return vec![
+                "--cookies".into(),
+                cookies_file.to_string_lossy().to_string(),
+            ];
         }
     }
 
@@ -74,11 +103,29 @@ pub(crate) fn cookie_args() -> Vec<String> {
     vec![]
 }
 
+/// Cookie file ada, > 100 byte, dan terakhir diubah < 2 jam lalu
+fn is_fresh_cookie_file(path: &std::path::Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            meta.len() > 100
+                && meta
+                    .modified()
+                    .ok()
+                    .and_then(|m| m.elapsed().ok())
+                    .is_some_and(|e| e.as_secs() < 7200)
+        }
+        Err(_) => false,
+    }
+}
+
 pub(crate) fn output_template(save_dir: &str, filename: &str) -> String {
     let f = filename.trim();
     if f.is_empty() || f.starts_with("download_") {
         return format!("{}/%(title)s.%(ext)s", save_dir);
     }
+        // B6: escape '%' → '%%' — nilai --output yt-dlp adalah template;
+    // nama file hasil decode URL yang mengandung '%' akan salah parse.
+    let f = f.replace('%', "%%");
     if f.contains('.') {
         return format!("{}/{}", save_dir, f);
     }
@@ -149,7 +196,7 @@ pub async fn download(
         "--embed-metadata".into(),
     ]);
 
-    cmd.extend(cookie_args());
+    cmd.extend(cookie_args(&url));
 
     // Header kustom dari browser extension (mis. Referer)
     for (k, v) in &headers {
@@ -230,7 +277,11 @@ pub(crate) fn run_ytdlp(
         let status = rt.block_on(async { info.lock().await.status });
 
         if matches!(status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-            let _ = child.kill();
+            // B8: Paused → SIGTERM sudah dikirim pause_download(); tunggu proses
+            // berhenti rapi (file .part tetap bisa di-resume). Cancelled → kill.
+            if status == DownloadStatus::Cancelled {
+                let _ = child.kill();
+            }
             // Reap the child so it does not linger as a zombie process
             let _ = child.wait();
             rt.block_on(async { info.lock().await.pid = None; });

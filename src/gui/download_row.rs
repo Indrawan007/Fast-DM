@@ -242,7 +242,9 @@ impl DownloadRow {
         self.retry_btn.set_sensitive(error);
         self.cancel_btn.set_sensitive(active || paused || error || queued);
         self.open_btn.set_sensitive(done);
-        self.remove_btn.set_sensitive(done || cancel || error);
+        // B11: item Paused/Queued juga bisa dihapus — clear_download() sudah
+        // men-kill prosesnya, tidak perlu cancel manual dulu.
+        self.remove_btn.set_sensitive(done || cancel || error || paused || queued);
     }
 }
 

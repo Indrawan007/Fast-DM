@@ -160,46 +160,46 @@ impl DownloadEngine {
     }
 
     pub async fn start_download(&self, id: &str) {
-        let info = {
-            let downloads = self.downloads.read().await;
-            match downloads.get(id) {
-                Some(i) => i.clone(),
-                None => return,
-            }
-        };
-
-        // Tegakkan max_concurrent: jika slot penuh, antri (Queued)
         let max = usize::from(self.config.read().await.max_concurrent.max(1));
-        let active = {
-            let downloads = self.downloads.read().await;
-            let mut n = 0usize;
+        let config = self.config.read().await.clone();
+        let tx = self.event_tx.clone();
+
+        // B3: hitung slot + klaim status dilakukan dalam SATU write-lock
+        // (pola promote_next) — dua start yang bersamaan tidak bisa sama-sama
+        // lolos batas max_concurrent (double-spawn / over-slot).
+        let claimed: Option<Arc<Mutex<DownloadInfo>>> = {
+            let downloads = self.downloads.write().await;
+            let Some(info) = downloads.get(id).cloned() else { return };
+
+            let mut active = 0usize;
             for other in downloads.values() {
-                let status = other.lock().await.status;
-                if matches!(status, DownloadStatus::Downloading | DownloadStatus::Resolving) {
-                    n += 1;
+                if matches!(
+                    other.lock().await.status,
+                    DownloadStatus::Downloading | DownloadStatus::Resolving
+                ) {
+                    active += 1;
                 }
             }
-            n
+        let mut i = info.lock().await;
+if active >= max {
+                // Slot penuh → antri (Queued)
+                i.status = DownloadStatus::Queued;
+                i.speed = 0;
+                let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                None
+            } else {
+                // Klaim slot: tandai Resolving + percobaan ke-N (retry tracking)
+                i.status = DownloadStatus::Resolving;
+                i.retry_count = i.retry_count.saturating_add(1);
+                let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                Some(info)
+            }
         };
 
-        let tx = self.event_tx.clone();
-        let config = self.config.read().await.clone();
+        if let Some(info) = claimed {
+            spawn_supervised(self.downloads.clone(), info, tx, config, self.dirty.clone());
 
-        if active >= max {
-            let mut i = info.lock().await;
-            i.status = DownloadStatus::Queued;
-            i.speed = 0;
-            let _ = tx.send(DownloadEvent::Progress(i.clone()));
-            return;
         }
-
-        // Tandai percobaan ke-N (dipakai retry tracking)
-        {
-            let mut i = info.lock().await;
-            i.retry_count = i.retry_count.saturating_add(1);
-        }
-
-        spawn_supervised(self.downloads.clone(), info, tx, config, self.dirty.clone());
     }
 
     pub async fn pause_download(&self, id: &str) {
@@ -385,6 +385,10 @@ async fn promote_next(
         // write lock: pemilihan + penandaan status dilakukan ATOMIK,
         // sehingga dua task yang selesai bersamaan tidak bisa sama-sama
         // memilih antrian yang sama (over-slot / dobel spawn).
+        //
+        // B13 — KONTRAK LOCK-ORDERING (anti-deadlock): selalu kunci map
+        // (RwLock) dulu, baru Mutex info di dalamnya. Jangan pernah terbalik
+        // (kunci info lalu minta map) di kode mana pun.
         let map = downloads.write().await;
         let mut active = 0usize;
         let mut oldest: Option<(i64, Arc<Mutex<DownloadInfo>>)> = None;

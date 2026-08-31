@@ -54,6 +54,22 @@ impl Config {
     pub fn config_file() -> PathBuf {
         Self::config_dir().join("config.json")
     }
+    /// B7: file cookie per-domain (cookies_<host>.txt). Per-domain supaya dua
+    /// download bersamaan dari situs berbeda tidak saling menimpa cookies.
+    pub fn cookies_file_for(domain: &str) -> PathBuf {
+        let host = domain.trim().trim_start_matches("www.").to_ascii_lowercase();
+        let safe: String = host
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        Self::config_dir().join(format!("cookies_{safe}.txt"))
+    }
 
     pub fn load() -> &'static Config {
         CONFIG.get_or_init(|| {

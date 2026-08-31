@@ -513,9 +513,19 @@
 
     // Media yang tertangkap sniffer (m3u8/mpd/mp4/dll) — gaya IDM Grabber.
     // Paling baru ada di akhir array.
+    // Kandidat ditulis sniffer.js di MAIN world lewat DOM (ISOLATED world
+    // tidak berbagi objek JS dengan MAIN world — window.* tidak bisa dibaca).
     function candidateFor() {
-      const cands = window.__fastdmMediaCandidates || [];
-      return cands.length ? cands[cands.length - 1] : null;
+      try {
+        const raw = document.documentElement.dataset.fastdmMedia;
+        if (!raw) return null;
+        const cands = JSON.parse(raw);
+        return Array.isArray(cands) && cands.length
+          ? cands[cands.length - 1]
+          : null;
+      } catch (e) {
+        return null;
+      }
     }
 
     document.querySelectorAll("video, audio").forEach((media) => {
@@ -713,9 +723,9 @@
       sendResponse({ videos: Array.from(videos) });
     }
 
-    if (message.action === "getCookies") {
-      sendResponse({ cookies: document.cookie });
-    }
+    // B15: handler "getCookies" dihapus — dead code & potensi masalah privasi
+    // (document.cookie tidak memuat cookie HttpOnly; background sudah ambil
+    // cookies via chrome.cookies.getAll).
   });
 
   // ═══════════════════════════════════════════════

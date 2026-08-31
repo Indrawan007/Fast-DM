@@ -41,12 +41,18 @@ pub async fn download(
 
     // Cek ketersediaan yt-dlp SEKALI: kalau tidak ada, jangan fallback ke aria2
     // (larinya hanya menghasilkan error membingungkan).
-    let available = Command::new("yt-dlp")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok();
+    // B10: spawn_blocking — jangan blokir thread executor tokio menunggu proses.
+    let available = tokio::task::spawn_blocking(|| {
+        Command::new("yt-dlp")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
 
     if !available {
         let rt = tokio::runtime::Handle::current();
@@ -78,7 +84,7 @@ pub async fn download(
     ]);
 
     // Cookies (dari cookies.txt / browser) + Referer & header kustom extension
-    cmd.extend(cookie_args());
+   cmd.extend(cookie_args(&url));
     for (k, v) in &headers {
         let k = k.replace(['\r', '\n'], "");
         let v = v.replace(['\r', '\n'], "");

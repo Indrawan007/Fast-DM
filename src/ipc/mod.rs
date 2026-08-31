@@ -193,7 +193,8 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
     }
 }
 
-/// Konversi cookie string browser ("k=v; k=v") → file Netscape untuk yt-dlp
+/// Konversi cookie string browser ("k=v; k=v") → file Netscape per-domain
+/// untuk yt-dlp/aria2 (B7: per-domain agar tidak saling menimpa)
 fn write_cookies_txt(cookie_header: &str, domain: &str) -> Result<(), String> {
     if cookie_header.len() > 256 * 1024 {
         return Err("cookies too large".into());
@@ -229,7 +230,7 @@ fn write_cookies_txt(cookie_header: &str, domain: &str) -> Result<(), String> {
         return Err("no cookies".into());
     }
 
-    let path = Config::config_dir().join("cookies.txt");
+    let path = Config::cookies_file_for(host);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }

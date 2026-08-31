@@ -3,7 +3,7 @@
 set -e
 cd "$(dirname "$0")/.."
 
-VER=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+VER=$(sed -n '/^\[package\]/,/^\[/{s/^version *= *"\(.*\)".*/\1/p;}' Cargo.toml | head -1)
 echo "==> Building fast-dm $VER"
 cargo build --release
 

@@ -5,3 +5,4 @@
 3. Langsung tulis kode yang dimodifikasi.
 4. Jika membutuhkan informasi tambahan, tanyakan DENGAN SPESIFIK daripada berasumsi.
 5. Gunakan pendekatan paling modular dan sederhana (KISS principle).
+6. setiap update kode → versi naik (patch bug = +0.0.1, fitur baru = +0.1.0).

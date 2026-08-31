@@ -24,6 +24,14 @@ impl FastDmApp {
             .build();
 
         app.connect_activate(move |app| {
+            // B2: launch kedua (app-id sama) hanya di-forward sebagai sinyal
+            // activate ke proses pertama — jangan bangun window/engine/runtime
+            // baru (leak runtime + dua flusher menulis session.json saling timpa).
+            if let Some(win) = app.windows().first() {
+                win.present();
+                return;
+            }
+
             let (event_tx, event_rx) = mpsc::unbounded_channel::<DownloadEvent>();
             let gui_event_tx = event_tx.clone();
 

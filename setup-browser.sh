@@ -21,7 +21,7 @@ HOST_JSON=$(cat <<JSON
   "path": "$NATIVE_PATH",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://${EXT_ID}/*"
+    "chrome-extension://${EXT_ID}/"
   ]
 }
 JSON

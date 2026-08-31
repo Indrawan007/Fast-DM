@@ -155,11 +155,15 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         cmd.push("--check-certificate=false".into());
     }
 
-    // Cookies dari browser extension (Netscape format) — aria2 otomatis
-    // hanya memakai cookie yang cocok dengan domain target
-    let cookies = Config::config_dir().join("cookies.txt");
-    if cookies.exists() {
-        cmd.push(format!("--load-cookies={}", cookies.display()));
+    // Cookies dari browser extension (Netscape format, file per-domain) —
+    // aria2 otomatis hanya memakai cookie yang cocok dengan domain target
+    if let Ok(u) = url::Url::parse(&info.url) {
+        if let Some(host) = u.host_str() {
+            let cookies = Config::cookies_file_for(host);
+            if cookies.exists() {
+                cmd.push(format!("--load-cookies={}", cookies.display()));
+            }
+        }
     }
 
     (cmd, Some(input_path.to_string_lossy().to_string()))
@@ -231,7 +235,12 @@ fn run_aria2c(
         let status = rt.block_on(async { info.lock().await.status });
 
         if matches!(status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-            let _ = child.kill();
+            // B8: Paused → SIGTERM sudah dikirim pause_download(); TUNGGU aria2c
+            // menulis control file .aria2 (supaya bisa di-resume), jangan SIGKILL.
+            // Cancelled → paksa kill.
+            if status == DownloadStatus::Cancelled {
+                let _ = child.kill();
+            }
             // Reap the child so it does not linger as a zombie process
             let _ = child.wait();
             rt.block_on(async { info.lock().await.pid = None; });
@@ -523,8 +532,11 @@ async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) -> 
 /// Supaya resolve & aria2 memakai sesi login yang sama dengan browser.
 fn cookie_header_for(url: &str) -> Option<String> {
     let host = url::Url::parse(url).ok()?.host_str()?.trim_start_matches("www.").to_ascii_lowercase();
-    let path = Config::config_dir().join("cookies.txt");
-    let text = std::fs::read_to_string(path).ok()?;
+    // File per-domain dulu; fallback ke cookies.txt lama (versi sebelumnya)
+    let path = Config::cookies_file_for(&host);
+    let text = std::fs::read_to_string(&path)
+        .or_else(|_| std::fs::read_to_string(Config::config_dir().join("cookies.txt")))
+        .ok()?;
     let mut pairs: Vec<String> = Vec::new();
 
     for line in text.lines() {
