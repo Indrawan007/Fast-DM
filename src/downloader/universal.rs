@@ -39,8 +39,6 @@ pub async fn download(
         )
     };
 
-    // Cek ketersediaan yt-dlp SEKALI: kalau tidak ada, jangan fallback ke aria2
-    // (larinya hanya menghasilkan error membingungkan).
     // B10: spawn_blocking — jangan blokir thread executor tokio menunggu proses.
     let available = tokio::task::spawn_blocking(|| {
         Command::new("yt-dlp")

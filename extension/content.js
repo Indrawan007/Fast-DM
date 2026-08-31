@@ -511,8 +511,6 @@
   function detectNonYTVideos() {
     if (isYouTube()) return;
 
-    // Media yang tertangkap sniffer (m3u8/mpd/mp4/dll) — gaya IDM Grabber.
-    // Paling baru ada di akhir array.
     // Kandidat ditulis sniffer.js di MAIN world lewat DOM (ISOLATED world
     // tidak berbagi objek JS dengan MAIN world — window.* tidak bisa dibaca).
     function candidateFor() {
@@ -719,7 +717,6 @@
       document.querySelectorAll("a[href]").forEach((a) => {
         if (videoExts.test(a.href)) videos.add(a.href);
       });
-
       sendResponse({ videos: Array.from(videos) });
     }
 

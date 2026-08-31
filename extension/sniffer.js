@@ -19,6 +19,7 @@
 
   const candidates = new Set();
   const MAX = 50;
+
   // MAIN world tidak berbagi objek JS dengan content script (ISOLATED world);
   // jembatan datanya adalah DOM.
   function persist() {

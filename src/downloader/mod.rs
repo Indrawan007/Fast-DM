@@ -180,8 +180,9 @@ impl DownloadEngine {
                     active += 1;
                 }
             }
-        let mut i = info.lock().await;
-if active >= max {
+
+            let mut i = info.lock().await;
+            if active >= max {
                 // Slot penuh → antri (Queued)
                 i.status = DownloadStatus::Queued;
                 i.speed = 0;
@@ -198,7 +199,6 @@ if active >= max {
 
         if let Some(info) = claimed {
             spawn_supervised(self.downloads.clone(), info, tx, config, self.dirty.clone());
-
         }
     }
 

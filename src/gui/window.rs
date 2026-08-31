@@ -261,9 +261,9 @@ pub fn build_window(
         }
         if urls.is_empty() {
             return false; // tidak ada URL → jangan klaim drop
-
         }
-                // Tunda ke idle: on_add bisa memunculkan dialog modal (YouTube),
+
+        // Tunda ke idle: on_add bisa memunculkan dialog modal (YouTube),
         // jangan jalankan nested main loop di tengah sinyal drop.
         let entry = entry_drop.clone();
         let add = on_add_drop.clone();
@@ -302,10 +302,11 @@ pub fn build_window(
         let to_remove: Vec<String> = statuses.iter()
             .filter(|(_, status)| {
                 matches!(status,
+                    DownloadStatus::Completed |
                     DownloadStatus::Cancelled |
                     DownloadStatus::Error
-                )});
-}
+                )
+            })
             .map(|(id, _)| id.clone())
             .collect();
         drop(statuses);
@@ -334,6 +335,7 @@ pub fn build_window(
         for id in &to_remove {
             st.remove(id);
         }
+    });
 
     // ── C3: Jeda Semua / Lanjut Semua ──
     // state=false → masih ada yang aktif (aksi = Jeda); state=true → aksi = Lanjut.
