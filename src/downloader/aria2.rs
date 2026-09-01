@@ -241,61 +241,7 @@ fn run_aria2c(
         .name("aria2-stderr".into())
         .spawn(move || {
             let reader = BufReader::new(stderr);
-            let mut buf = stderr_buf_clone.lock().unwrap();
-
-        if let Some(host) = u.host_str() {
-            if let Some(cookies) = Config::find_cookies_file(host) {
-                cmd.push(format!("--load-cookies={}", cookies.display()));
-            }
-        }
-    // (pid belum ada → kill_child_pid no-op). Tanpa guard, status ditimpa
-    // Resolving dan download yang "dibatalkan" jalan terus.
-    {
-        let i = info.lock().await;
-        if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-            return;
-        }
-    }
-
-    // Resolve filename
-    {
-        let mut i = info.lock().await;
-        "--human-readable=false".into(),
-        "--show-console-readout=true".into(),
-        "--download-result=full".into(),
-        // Limit user adalah TOTAL aplikasi, tapi tiap download = proses
-        // aria2c sendiri → bagi dengan jumlah download bersamaan agar
-        // N unduhan paralel tidak N kali lebih cepat dari limit user.
-        format!(
-            "--max-overall-download-limit={}",
-            per_process_speed_limit(config)
-        ),
-        // check-integrity sengaja TIDAK dimatikan (default aria2 = true):
-        // tanpa ini, resume setelah crash bisa menandai file korup sebagai
-        // selesai.
-        "--continue=true".into(),
-        // Konfigurasi auto_file_renaming sebelumnya diabaikan (hardcoded
-        // false) — file tabrakan SELALU ditimpa. Sekarang dihormati:
-        // default true → tabrakan menjadi "file (1).ext". allow-overwrite
-        // harus berlawanan: kalau overwrite=true, aria2 menimpa SEBELUM
-        // sempat auto-rename.
-        format!("--allow-overwrite={}", !config.auto_file_renaming).into(),
-        format!("--auto-file-renaming={}", config.auto_file_renaming).into(),
-    ];
-
-    // Header kustom dari browser extension (mis. Referer) — strip \r\n anti injection.
-        cmd.push("--check-certificate=false".into());
-    }
-
-    // Cookies dari browser extension (Netscape format, file per-domain,
-    // termasuk domain induk) — aria2 otomatis hanya memakai cookie yang
-    // cocok dengan domain target
-    if let Ok(u) = url::Url::parse(&info.url) {
-        if let Some(host) = u.host_str() {
-            if let Some(cookies) = Config::find_cookies_file(host) {
-                cmd.push(format!("--load-cookies={}", cookies.display()));
-            }
-        }
+            for line in reader.lines().flatten() {
                 let mut buf = stderr_buf_clone.lock().unwrap();
                 buf.push_str(&line);
                 buf.push('\n');
@@ -450,7 +396,6 @@ fn parse_speed_setting(s: &str) -> u64 {
     (num * mult) as u64
 }
 
-
 fn parse_eta(s: &str) -> u64 {
     let mut total = 0u64;
 
@@ -509,7 +454,6 @@ fn resolve_client(verify_tls: bool) -> Option<&'static reqwest::Client> {
     })
     .ok()
 }
-
 
 async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) -> Result<(), String> {
     let (url, headers) = {
