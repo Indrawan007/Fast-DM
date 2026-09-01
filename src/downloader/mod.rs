@@ -246,7 +246,6 @@ impl DownloadEngine {
             self.start_download(id).await;
         }
     }
-    }
 
     /// Pause SEMUA unduhan (aktif + antrian) — dipakai tombol "Jeda Semua" (UI-UX C3).
     pub async fn pause_all(&self) {

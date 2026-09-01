@@ -426,7 +426,6 @@ fn parse_speed(s: &str) -> u64 {
         if unit.contains("gib") { return (val * 1073741824.0) as u64; }
         if unit.contains("mib") { return (val * 1048576.0) as u64; }
         if unit.contains("kib") { return (val * 1024.0) as u64; }
-        return val as u64;
        // Format lama/alternatif: "2.5M/s", "500K/s", "1.2G/s"
         if unit.starts_with('g') { return (val * 1073741824.0) as u64; }
         if unit.starts_with('m') { return (val * 1048576.0) as u64; }

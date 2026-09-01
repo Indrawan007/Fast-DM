@@ -241,12 +241,13 @@ fn run_aria2c(
         .name("aria2-stderr".into())
         .spawn(move || {
             let reader = BufReader::new(stderr);
-            for line in reader.lines().flatten() {
+            let mut buf = stderr_buf_clone.lock().unwrap();
 
-    tx: mpsc::UnboundedSender<DownloadEvent>,
-    config: &Config,
-) {
-    // Guard: user bisa cancel/pause di jeda sebelum proses aria2c lahir
+        if let Some(host) = u.host_str() {
+            if let Some(cookies) = Config::find_cookies_file(host) {
+                cmd.push(format!("--load-cookies={}", cookies.display()));
+            }
+        }
     // (pid belum ada → kill_child_pid no-op). Tanpa guard, status ditimpa
     // Resolving dan download yang "dibatalkan" jalan terus.
     {

@@ -103,7 +103,7 @@
 
   function start() {
     scan();
-    const mo = new MutationObserver(() => scan());
+    const mo = new MutationObserver(() => scheduleScan());
     mo.observe(document.documentElement, {
       childList: true,
       subtree: true,
