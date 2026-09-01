@@ -60,7 +60,7 @@ impl Config {
     /// B7: file cookie per-domain (cookies_<host>.txt). Per-domain supaya dua
     /// download bersamaan dari situs berbeda tidak saling menimpa cookies.
     pub fn cookies_file_for(domain: &str) -> PathBuf {
-        Self::cookies_file_for_host(Self::normalize_host(domain))
+Self::cookies_file_for_host(&Self::normalize_host(domain))
     }
 
     /// Cari file cookie untuk host — coba host persis dulu, lalu naik ke
