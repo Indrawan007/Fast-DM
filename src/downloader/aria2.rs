@@ -444,15 +444,22 @@ fn resolve_client(verify_tls: bool) -> Option<&'static reqwest::Client> {
     static VERIFY: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     static NO_VERIFY: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     let slot = if verify_tls { &VERIFY } else { &NO_VERIFY };
-    slot.get_or_try_init(|| {
-        reqwest::Client::builder()
+    // OnceLock::get_or_try_init belum stabil (rust-lang #109737) → pakai
+    // pola get/set yang stabil. set() gagal diam-diam jika slot sudah
+    // terisi oleh thread lain — aman; jika build() gagal, slot tetap
+    // kosong dan panggilan berikutnya mencoba lagi (bukan terkunci gagal).
+    if slot.get().is_none() {
+        let client = reqwest::Client::builder()
             .user_agent(CHROME_UA)
             .danger_accept_invalid_certs(!verify_tls)
             .redirect(reqwest::redirect::Policy::limited(10))
             .timeout(std::time::Duration::from_secs(10))
-            .build()
-    })
-    .ok()
+            .build();
+        if let Ok(c) = client {
+            let _ = slot.set(c);
+        }
+    }
+    slot.get()
 }
 
 async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) -> Result<(), String> {
