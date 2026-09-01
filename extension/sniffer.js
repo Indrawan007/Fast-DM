@@ -35,8 +35,18 @@
   function add(url) {
     try {
       if (!url || typeof url !== "string") return;
-      if (!/^https?:/i.test(url)) return; // abaikan blob:, data:, file:
-      const clean = url.split("#")[0];
+      // BUG FIX: XHR/fetch sering memakai URL RELATIF ("video.m3u8") —
+      // resolve terhadap location agar tetap tertangkap.
+      let abs = url;
+      if (!/^https?:/i.test(abs)) {
+        try {
+          abs = new URL(url, location.href).href;
+        } catch (e) {
+          return; // tidak bisa di-resolve → abaikan
+        }
+      }
+      if (!/^https?:/i.test(abs)) return; // abaikan blob:, data:, file:
+      const clean = abs.split("#")[0];
       if (!MEDIA_RE.test(clean)) return;
       candidates.add(clean);
       if (candidates.size > MAX) {
@@ -80,6 +90,15 @@
       add(el.currentSrc);
     }
     document.querySelectorAll("a[href]").forEach((a) => add(a.href));
+  }
+
+  let scanTimer = null;
+  function scheduleScan() {
+    if (scanTimer) return;
+    scanTimer = setTimeout(() => {
+      scanTimer = null;
+      scan();
+    }, 300);
   }
 
   function start() {

@@ -23,8 +23,11 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
+        // Fallback bertingkat — JANGAN unwrap() langsung: home_dir() bisa
+        // None (mis. HOME tidak diset) dan panic akan mematikan app saat start.
         let download_dir = dirs::download_dir()
-            .unwrap_or_else(|| dirs::home_dir().unwrap().join("Downloads"))
+            .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
+            .unwrap_or_else(|| PathBuf::from("Downloads"))
             .to_string_lossy()
             .to_string();
 
@@ -57,7 +60,36 @@ impl Config {
     /// B7: file cookie per-domain (cookies_<host>.txt). Per-domain supaya dua
     /// download bersamaan dari situs berbeda tidak saling menimpa cookies.
     pub fn cookies_file_for(domain: &str) -> PathBuf {
-        let host = domain.trim().trim_start_matches("www.").to_ascii_lowercase();
+        Self::cookies_file_for_host(Self::normalize_host(domain))
+    }
+
+    /// Cari file cookie untuk host — coba host persis dulu, lalu naik ke
+    /// domain induk (sub.example.com → example.com). Extension menyimpan
+    /// cookies memakai host HALAMAN, sedangkan file media sering berada di
+    /// subdomain CDN yang berbeda; tanpa pencarian induk, login-protected
+    /// download dari subdomain kehilangan cookies-nya.
+    pub fn find_cookies_file(host: &str) -> Option<PathBuf> {
+        let mut h = Self::normalize_host(host);
+        while !h.is_empty() {
+            let p = Self::cookies_file_for_host(&h);
+            if p.exists() {
+                return Some(p);
+            }
+            // Buang label kiri: "a.b.c" → "b.c"; berhenti di "c"
+            h = match h.find('.') {
+                Some(i) => h[i + 1..].to_string(),
+                None => String::new(),
+            };
+        }
+        None
+    }
+
+    /// "WWW.Example.COM" → "example.com"
+    fn normalize_host(domain: &str) -> String {
+        domain.trim().trim_start_matches("www.").to_ascii_lowercase()
+    }
+
+    fn cookies_file_for_host(host: &str) -> PathBuf {
         let safe: String = host
             .chars()
             .map(|c| {

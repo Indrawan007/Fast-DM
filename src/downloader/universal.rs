@@ -26,8 +26,14 @@ pub async fn download(
     tx: mpsc::UnboundedSender<DownloadEvent>,
     _config: &Config,
 ) -> Outcome {
+    // Guard: user bisa cancel/pause di jeda sebelum child proses lahir
+    // (pid belum ada → kill_child_pid tidak berdampak). Tanpa guard, status
+    // ditimpa Downloading dan download yang "dibatalkan" jalan terus.
     let (url, save_dir, headers, quality, filename) = {
         let mut i = info.lock().await;
+        if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
+            return Outcome::Failed;
+        }
         i.status = DownloadStatus::Downloading;
         let _ = tx.send(DownloadEvent::Progress(i.clone()));
         (
@@ -40,17 +46,26 @@ pub async fn download(
     };
 
     // B10: spawn_blocking — jangan blokir thread executor tokio menunggu proses.
-    let available = tokio::task::spawn_blocking(|| {
-        Command::new("yt-dlp")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
+    // Hasil di-cache per-sesi: spawn "yt-dlp --version" (~50–100 ms) tidak
+    // perlu diulang untuk setiap download.
+    static YTDLP_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let available = if let Some(cached) = YTDLP_AVAILABLE.get() {
+        *cached
+    } else {
+        let avail = tokio::task::spawn_blocking(|| {
+            Command::new("yt-dlp")
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false);
+        let _ = YTDLP_AVAILABLE.set(avail);
+        avail
+    };
 
     if !available {
         let rt = tokio::runtime::Handle::current();

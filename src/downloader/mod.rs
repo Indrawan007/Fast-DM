@@ -160,9 +160,10 @@ impl DownloadEngine {
     }
 
     pub async fn start_download(&self, id: &str) {
-        let max = usize::from(self.config.read().await.max_concurrent.max(1));
         let config = self.config.read().await.clone();
+        let max = usize::from(config.max_concurrent.max(1));
         let tx = self.event_tx.clone();
+
 
         // B3: hitung slot + klaim status dilakukan dalam SATU write-lock
         // (pola promote_next) — dua start yang bersamaan tidak bisa sama-sama
@@ -226,16 +227,25 @@ impl DownloadEngine {
     }
 
     pub async fn resume_download(&self, id: &str) {
-        let downloads = self.downloads.read().await;
-        if let Some(info) = downloads.get(id) {
-            let status = {
-                let i = info.lock().await;
-                i.status
-            };
-            if matches!(status, DownloadStatus::Paused | DownloadStatus::Error) {
-                self.start_download(id).await;
+        // DEADLOCK FIX: guard read-lock harus di-drop SEBELUM start_download()
+        // — start_download meminta write-lock pada map yang sama, dan RwLock
+        // tokio tidak reentrant: read-guard lama tidak akan pernah di-drop
+        // selama kita menunggu write-lock → deadlock permanen.
+        let resumable = {
+            let downloads = self.downloads.read().await;
+            if let Some(info) = downloads.get(id) {
+                Some(info.lock().await.status)
+            } else {
+                None
             }
+        };
+        if matches!(
+            resumable,
+            Some(DownloadStatus::Paused | DownloadStatus::Error)
+        ) {
+            self.start_download(id).await;
         }
+    }
     }
 
     /// Pause SEMUA unduhan (aktif + antrian) — dipakai tombol "Jeda Semua" (UI-UX C3).
@@ -351,7 +361,16 @@ fn spawn_supervised(
             match universal::download(info.clone(), tx.clone(), &config).await {
                 universal::Outcome::Completed | universal::Outcome::MissingTool => {}
                 universal::Outcome::Failed => {
-                    aria2::download(info.clone(), tx.clone(), &config).await;
+                    let aborted = {
+                        let i = info.lock().await;
+                        matches!(
+                            i.status,
+                            DownloadStatus::Cancelled | DownloadStatus::Paused
+                        )
+                    };
+                    if !aborted {
+                        aria2::download(info.clone(), tx.clone(), &config).await;
+                    }
                 }
             }
         }
@@ -367,7 +386,9 @@ fn spawn_supervised(
 /// URL file langsung (punya ekstensi file/media) → langsung ke aria2 tanpa
 /// lewat yt-dlp. HLS/DASH (m3u8/mpd) tetap ke yt-dlp agar di-merge benar.
 pub fn is_direct_file_url(url: &str) -> bool {
-    let path = url.split('?').next().unwrap_or(url).split('#').next().unwrap_or(url);
+    // Potong FRAGMENT dulu baru QUERY — fragment setelah ekstensi
+    // (mis. "https://x.com/file.mp4#t=10") membuat cek ekstensi lama gagal.
+    let path = url.split('#').next().unwrap_or(url).split('?').next().unwrap_or(url);
     let lower = path.to_ascii_lowercase();
     const EXTENSIONS: &[&str] = &[
         ".mp4", ".webm", ".mkv", ".avi", ".mov", ".m4v", ".flv", ".wmv", ".3gp", ".ts",

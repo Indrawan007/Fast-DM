@@ -274,13 +274,18 @@
   // ═══════════════════════════════════════════════
   // Toast Notification
   // ═══════════════════════════════════════════════
-
+  let toastHideTimer = null;
   function showToast(message) {
     let toast = document.querySelector(".fastdm-toast");
     if (!toast) {
       toast = document.createElement("div");
       toast.className = "fastdm-toast";
       document.body.appendChild(toast);
+    }
+
+    if (toastHideTimer) {
+      clearTimeout(toastHideTimer);
+      toastHideTimer = null;
     }
 
     toast.textContent = message;
@@ -292,8 +297,9 @@
       });
     });
 
-    setTimeout(() => {
+    toastHideTimer = setTimeout(() => {
       toast.classList.remove("show");
+      toastHideTimer = null;
     }, 2500);
   }
 

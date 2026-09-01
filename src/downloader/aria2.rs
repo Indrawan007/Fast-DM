@@ -33,6 +33,16 @@ pub async fn download(
     tx: mpsc::UnboundedSender<DownloadEvent>,
     config: &Config,
 ) {
+    // Guard: user bisa cancel/pause di jeda sebelum proses aria2c lahir
+    // (pid belum ada → kill_child_pid no-op). Tanpa guard, status ditimpa
+    // Resolving dan download yang "dibatalkan" jalan terus.
+    {
+        let i = info.lock().await;
+        if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
+            return;
+        }
+    }
+
     // Resolve filename
     {
         let mut i = info.lock().await;
@@ -133,11 +143,24 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         "--human-readable=false".into(),
         "--show-console-readout=true".into(),
         "--download-result=full".into(),
-        format!("--max-overall-download-limit={}", config.max_overall_speed),
-        "--check-integrity=false".into(),
+        // Limit user adalah TOTAL aplikasi, tapi tiap download = proses
+        // aria2c sendiri → bagi dengan jumlah download bersamaan agar
+        // N unduhan paralel tidak N kali lebih cepat dari limit user.
+        format!(
+            "--max-overall-download-limit={}",
+            per_process_speed_limit(config)
+        ),
+        // check-integrity sengaja TIDAK dimatikan (default aria2 = true):
+        // tanpa ini, resume setelah crash bisa menandai file korup sebagai
+        // selesai.
         "--continue=true".into(),
-        "--allow-overwrite=true".into(),
-        "--auto-file-renaming=false".into(),
+        // Konfigurasi auto_file_renaming sebelumnya diabaikan (hardcoded
+        // false) — file tabrakan SELALU ditimpa. Sekarang dihormati:
+        // default true → tabrakan menjadi "file (1).ext". allow-overwrite
+        // harus berlawanan: kalau overwrite=true, aria2 menimpa SEBELUM
+        // sempat auto-rename.
+        format!("--allow-overwrite={}", !config.auto_file_renaming).into(),
+        format!("--auto-file-renaming={}", config.auto_file_renaming).into(),
     ];
 
     // Header kustom dari browser extension (mis. Referer) — strip \r\n anti injection.
@@ -155,12 +178,12 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         cmd.push("--check-certificate=false".into());
     }
 
-    // Cookies dari browser extension (Netscape format, file per-domain) —
-    // aria2 otomatis hanya memakai cookie yang cocok dengan domain target
+    // Cookies dari browser extension (Netscape format, file per-domain,
+    // termasuk domain induk) — aria2 otomatis hanya memakai cookie yang
+    // cocok dengan domain target
     if let Ok(u) = url::Url::parse(&info.url) {
         if let Some(host) = u.host_str() {
-            let cookies = Config::cookies_file_for(host);
-            if cookies.exists() {
+            if let Some(cookies) = Config::find_cookies_file(host) {
                 cmd.push(format!("--load-cookies={}", cookies.display()));
             }
         }
@@ -219,9 +242,72 @@ fn run_aria2c(
         .spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().flatten() {
+
+    tx: mpsc::UnboundedSender<DownloadEvent>,
+    config: &Config,
+) {
+    // Guard: user bisa cancel/pause di jeda sebelum proses aria2c lahir
+    // (pid belum ada → kill_child_pid no-op). Tanpa guard, status ditimpa
+    // Resolving dan download yang "dibatalkan" jalan terus.
+    {
+        let i = info.lock().await;
+        if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
+            return;
+        }
+    }
+
+    // Resolve filename
+    {
+        let mut i = info.lock().await;
+        "--human-readable=false".into(),
+        "--show-console-readout=true".into(),
+        "--download-result=full".into(),
+        // Limit user adalah TOTAL aplikasi, tapi tiap download = proses
+        // aria2c sendiri → bagi dengan jumlah download bersamaan agar
+        // N unduhan paralel tidak N kali lebih cepat dari limit user.
+        format!(
+            "--max-overall-download-limit={}",
+            per_process_speed_limit(config)
+        ),
+        // check-integrity sengaja TIDAK dimatikan (default aria2 = true):
+        // tanpa ini, resume setelah crash bisa menandai file korup sebagai
+        // selesai.
+        "--continue=true".into(),
+        // Konfigurasi auto_file_renaming sebelumnya diabaikan (hardcoded
+        // false) — file tabrakan SELALU ditimpa. Sekarang dihormati:
+        // default true → tabrakan menjadi "file (1).ext". allow-overwrite
+        // harus berlawanan: kalau overwrite=true, aria2 menimpa SEBELUM
+        // sempat auto-rename.
+        format!("--allow-overwrite={}", !config.auto_file_renaming).into(),
+        format!("--auto-file-renaming={}", config.auto_file_renaming).into(),
+    ];
+
+    // Header kustom dari browser extension (mis. Referer) — strip \r\n anti injection.
+        cmd.push("--check-certificate=false".into());
+    }
+
+    // Cookies dari browser extension (Netscape format, file per-domain,
+    // termasuk domain induk) — aria2 otomatis hanya memakai cookie yang
+    // cocok dengan domain target
+    if let Ok(u) = url::Url::parse(&info.url) {
+        if let Some(host) = u.host_str() {
+            if let Some(cookies) = Config::find_cookies_file(host) {
+                cmd.push(format!("--load-cookies={}", cookies.display()));
+            }
+        }
                 let mut buf = stderr_buf_clone.lock().unwrap();
                 buf.push_str(&line);
                 buf.push('\n');
+                // Batasi 16 KB (pertahankan yang terbaru) — log error bisa
+                // sangat panjang untuk download yang bermasalah
+                if buf.len() > 16 * 1024 {
+                    let cut = buf.len() - 8 * 1024;
+                    let drop = buf[..cut]
+                        .find(|c: char| c == '\n')
+                        .map(|i| i + 1)
+                        .unwrap_or(cut);
+                    buf.drain(..drop);
+                }
             }
         })
         .ok();
@@ -334,6 +420,36 @@ fn has_space(dir: &str, needed: u64) -> bool {
     }
 }
 
+/// Limit total user → limit per-proses aria2c ("0" = tanpa batas).
+fn per_process_speed_limit(config: &Config) -> String {
+    let total = parse_speed_setting(&config.max_overall_speed);
+    if total == 0 {
+        return "0".into(); // "0" maupun "0K" = tanpa batas
+    }
+    let per = total / (usize::from(config.max_concurrent.max(1)) as u64).max(1);
+    if per < 1024 {
+        return "1K".into();
+    }
+    format!("{:.0}K", per as f64 / 1024.0)
+}
+
+/// "0" | "512K" | "2M" | "10G" → byte/detik (konvensi aria2: K = 1024)
+fn parse_speed_setting(s: &str) -> u64 {
+    let s = s.trim();
+    let (num, unit) = s.split_at(
+        s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()),
+    );
+    let num: f64 = num.parse().unwrap_or(0.0);
+    let mult: f64 = match unit.trim().to_ascii_uppercase().as_str() {
+        "K" => 1024.0,
+        "M" => 1024.0 * 1024.0,
+        "G" => 1024.0 * 1024.0 * 1024.0,
+        _ => 1.0,
+    };
+    (num * mult) as u64
+}
+
+
 fn parse_eta(s: &str) -> u64 {
     let mut total = 0u64;
 
@@ -374,21 +490,36 @@ fn parse_aria2_size(s: &str) -> u64 {
     (val * mult) as u64
 }
 
+/// HTTP client resolve — DI-BAGIKAN (dibuat sekali, bukan per-download).
+/// Membuat client baru tiap unduhan berarti setup TLS + koneksi ulang yang
+/// tidak perlu. Return Option untuk mempertahankan semantics lama: kalau
+/// client gagal dibangun, resolve dilewati (bukan panic → abort).
+fn resolve_client(verify_tls: bool) -> Option<&'static reqwest::Client> {
+    static VERIFY: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    static NO_VERIFY: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let slot = if verify_tls { &VERIFY } else { &NO_VERIFY };
+    slot.get_or_try_init(|| {
+        reqwest::Client::builder()
+            .user_agent(CHROME_UA)
+            .danger_accept_invalid_certs(!verify_tls)
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+    })
+    .ok()
+}
+
+
 async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) -> Result<(), String> {
     let (url, headers) = {
         let i = info.lock().await;
         (i.url.clone(), i.headers.clone())
     };
 
-    let client = match reqwest::Client::builder()
-        .user_agent(CHROME_UA)
-        .danger_accept_invalid_certs(!verify_tls)
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return Ok(()),
+    let Some(client) = resolve_client(verify_tls) else {
+        // Client tidak bisa dibangun → lewati resolve (sebutir nama dari URL
+        // tetap dipakai) — perilaku sama seperti versi sebelumnya.
+        return Ok(());
     };
 
     // Header kustom (mis. Referer) juga dipakai saat resolve agar server yang
@@ -532,11 +663,12 @@ async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) -> 
 /// Supaya resolve & aria2 memakai sesi login yang sama dengan browser.
 fn cookie_header_for(url: &str) -> Option<String> {
     let host = url::Url::parse(url).ok()?.host_str()?.trim_start_matches("www.").to_ascii_lowercase();
-    // File per-domain dulu; fallback ke cookies.txt lama (versi sebelumnya)
-    let path = Config::cookies_file_for(&host);
-    let text = std::fs::read_to_string(&path)
-        .or_else(|_| std::fs::read_to_string(Config::config_dir().join("cookies.txt")))
-        .ok()?;
+    // File per-domain dulu (termasuk domain induk — file video sering ada di
+    // subdomain CDN, sedangkan cookies disimpan dengan host halaman);
+    // fallback ke cookies.txt lama (versi sebelumnya)
+    let path = Config::find_cookies_file(&host)
+        .unwrap_or_else(|| Config::config_dir().join("cookies.txt"));
+    let text = std::fs::read_to_string(&path).ok()?;
     let mut pairs: Vec<String> = Vec::new();
 
     for line in text.lines() {
