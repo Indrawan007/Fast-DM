@@ -68,6 +68,22 @@ pub async fn start_server(engine: Arc<DownloadEngine>) -> Result<(), Box<dyn std
                 Ok(_) => {}
             }
 
+            // read_line tanpa batas → klien jahat bisa mengirim baris giga-
+            // bytean dan OOM-kan app. Tolak di atas 1 MB (native host sendiri
+            // juga membatasi message di 1 MB).
+            if line.len() > 1024 * 1024 {
+                let response = IpcResponse {
+                    success: false,
+                    id: None,
+                    error: Some("Request terlalu besar".into()),
+                    message: None,
+                };
+                let json = serde_json::to_string(&response).unwrap_or_default();
+                let _ = writer.write_all(json.as_bytes()).await;
+                let _ = writer.write_all(b"\n").await;
+                return;
+            }
+
             let response = match serde_json::from_str::<IpcMessage>(&line) {
                 Ok(msg) => handle_message(msg, &engine).await,
                 Err(e) => IpcResponse {

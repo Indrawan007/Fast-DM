@@ -54,7 +54,9 @@ pub fn build_window(
     title.add_css_class("header-title");
 
     // B5: subtitle berisi info berguna → versi aplikasi
-    let subtitle = Label::new(Some("v2.2.1"));
+     // (dinamis dari Cargo.toml — tidak lagi hardcoded sehingga tidak
+    // pernah basi saat versi naik)
+    let subtitle = Label::new(Some(&format!("v{}", env!("CARGO_PKG_VERSION"))));
     subtitle.add_css_class("header-subtitle");
     subtitle.set_valign(gtk4::Align::End);
 
@@ -194,19 +196,20 @@ pub fn build_window(
         // (.php/.html/...), atau URL tanpa ekstensi sama sekali.
         // File langsung (mp4/zip/dll — jalur aria2) dilewati.
         let wants_quality = {
-            let path_lower = url
-                .split('?')
-                .next()
-                .unwrap_or(&url)
-                .split('#')
-                .next()
-                .unwrap_or(&url)
-                .to_ascii_lowercase();
+            // BUG FIX: cek ekstensi harus terhadap PATH URL saja, bukan string
+            // URL utuh — host selalu mengandung titik (contoh.com), sehingga
+            // kondisi "URL tanpa ekstensi" lama hampir tidak pernah terpenuhi.
+            let path_lower = url::Url::parse(&url)
+                .ok()
+                .map(|u| u.path().to_ascii_lowercase())
+                .unwrap_or_default();
             const PAGE_OR_STREAM_EXTS: &[&str] = &[
                 ".php", ".html", ".htm", ".asp", ".aspx", ".jsp", ".m3u8", ".mpd",
             ];
-            let page_or_stream = PAGE_OR_STREAM_EXTS.iter().any(|e| path_lower.ends_with(e))
-                || !path_lower.contains('.');
+            let no_ext =
+                path_lower.is_empty() || path_lower == "/" || !path_lower.contains('.');
+            let page_or_stream =
+                PAGE_OR_STREAM_EXTS.iter().any(|e| path_lower.ends_with(e)) || no_ext;
             crate::downloader::youtube::is_youtube_url(&url) || page_or_stream
         };
         let quality = if wants_quality {
@@ -581,8 +584,14 @@ pub fn build_window(
                     if let Ok(all) = rt.spawn(async move {
                         eng.get_all_downloads().await
                     }).await {
+                        // "Aktif" = mengunduh ATAU memproses (resolving) —
+                        // konsisten dengan logika slot engine (keduanya
+                        // menempati slot download bersamaan).
                         let active: Vec<_> = all.iter()
-                            .filter(|d| matches!(d.status, DownloadStatus::Downloading))
+                            .filter(|d| matches!(
+                                d.status,
+                                DownloadStatus::Downloading | DownloadStatus::Resolving
+                            ))
                             .collect();
                         let queued = all.iter()
                             .filter(|d| matches!(d.status, DownloadStatus::Queued))

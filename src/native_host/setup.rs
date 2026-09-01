@@ -2,6 +2,7 @@ use crate::config::Config;
 use glob::glob;
 use serde_json::json;
 use std::fs;
+use std::os::unix::fs::PermissionsExt; // from_mode()
 use std::path::{Path, PathBuf};
 
 const HOST_NAME: &str = "com.fastdm.native";

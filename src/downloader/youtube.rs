@@ -24,11 +24,20 @@ pub fn is_youtube_url(url: &str) -> bool {
         || RE_YT_MUSIC.is_match(url)
 }
 
-/// Detect browser for cookies — gunakan nama support yt-dlp.
+/// Deteksi browser untuk cookies — gunakan nama support yt-dlp.
 /// B17: browser DEFAULT sistem (xdg-settings) diprioritaskan — cookie login
 /// user biasanya di browser default, bukan browser pertama yang kebetulan
 /// ter-install.
+/// Di-cache per-sesi: mendeteksi browser (spawn xdg-settings + stat folder)
+/// tidak perlu diulang untuk setiap download.
+static BROWSER: LazyLock<Option<&'static str>> =
+    LazyLock::new(detect_browser_inner);
+
 fn detect_browser() -> Option<&'static str> {
+    *BROWSER
+}
+
+fn detect_browser_inner() -> Option<&'static str> {
     let home = dirs::home_dir()?;
     let candidates = [
         ("chrome",   ".config/google-chrome"),
@@ -81,17 +90,21 @@ fn desktop_to_browser(desktop: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn cookie_args(url: &str) -> Vec<String> {
-    // B7: cookies per-domain dari extension (fresh < 2 jam) → pakai file itu
+    // B7: cookies per-domain dari extension (fresh < 2 jam) → pakai file itu.
+    // Pencarian naik ke domain induk (sub.example.com → example.com) karena
+    // extension menyimpan cookies memakai host halaman, sedangkan file video
+    // kadang ada di subdomain CDN yang berbeda.
     if let Some(host) = url::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_string()))
     {
-        let cookies_file = Config::cookies_file_for(&host);
-        if is_fresh_cookie_file(&cookies_file) {
-            return vec![
-                "--cookies".into(),
-                cookies_file.to_string_lossy().to_string(),
-            ];
+        if let Some(cookies_file) = Config::find_cookies_file(&host) {
+            if is_fresh_cookie_file(&cookies_file) {
+                return vec![
+                    "--cookies".into(),
+                    cookies_file.to_string_lossy().to_string(),
+                ];
+            }
         }
     }
 
@@ -103,11 +116,12 @@ pub(crate) fn cookie_args(url: &str) -> Vec<String> {
     vec![]
 }
 
-/// Cookie file ada, > 100 byte, dan terakhir diubah < 2 jam lalu
+/// Cookie file ada (isi bukan hanya header), dan terakhir diubah < 2 jam lalu
 fn is_fresh_cookie_file(path: &std::path::Path) -> bool {
     match std::fs::metadata(path) {
         Ok(meta) => {
-            meta.len() > 100
+            // Header Netscape = 29 byte; > 30 berarti minimal ada 1 cookie
+            meta.len() > 30
                 && meta
                     .modified()
                     .ok()
@@ -124,58 +138,6 @@ pub(crate) fn output_template(save_dir: &str, filename: &str) -> String {
         return format!("{}/%(title)s.%(ext)s", save_dir);
     }
     // B6: escape '%' → '%%' — nilai --output yt-dlp adalah template;
-    // nama file hasil decode URL yang mengandung '%' akan salah parse.
-    let f = f.replace('%', "%%");
-    if f.contains('.') {
-        return format!("{}/{}", save_dir, f);
-    }
-    format!("{}/{}.%(ext)s", save_dir, f)
-}
-
-pub(crate) fn cookie_args(url: &str) -> Vec<String> {
-    // B7: cookies per-domain dari extension (fresh < 2 jam) → pakai file itu
-    if let Some(host) = url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_string()))
-    {
-        let cookies_file = Config::cookies_file_for(&host);
-        if is_fresh_cookie_file(&cookies_file) {
-            return vec![
-                "--cookies".into(),
-                cookies_file.to_string_lossy().to_string(),
-            ];
-        }
-    }
-
-    // Use browser cookies
-    if let Some(browser) = detect_browser() {
-        return vec!["--cookies-from-browser".into(), browser.into()];
-    }
-
-    vec![]
-}
-
-/// Cookie file ada, > 100 byte, dan terakhir diubah < 2 jam lalu
-fn is_fresh_cookie_file(path: &std::path::Path) -> bool {
-    match std::fs::metadata(path) {
-        Ok(meta) => {
-            meta.len() > 100
-                && meta
-                    .modified()
-                    .ok()
-                    .and_then(|m| m.elapsed().ok())
-                    .is_some_and(|e| e.as_secs() < 7200)
-        }
-        Err(_) => false,
-    }
-}
-
-pub(crate) fn output_template(save_dir: &str, filename: &str) -> String {
-    let f = filename.trim();
-    if f.is_empty() || f.starts_with("download_") {
-        return format!("{}/%(title)s.%(ext)s", save_dir);
-    }
-        // B6: escape '%' → '%%' — nilai --output yt-dlp adalah template;
     // nama file hasil decode URL yang mengandung '%' akan salah parse.
     let f = f.replace('%', "%%");
     if f.contains('.') {
@@ -217,8 +179,14 @@ pub async fn download(
     tx: mpsc::UnboundedSender<DownloadEvent>,
     _config: &Config,
 ) {
+    // Guard: user bisa pause/cancel di jeda sebelum child process lahir
+    // (pid belum ada, jadi kill_child_pid tidak berdampak apa-apa). Tanpa guard,
+    // status ditimpa Downloading dan download yang "dibatalkan" jalan terus.
     let (url, save_dir, headers, quality, filename) = {
         let mut i = info.lock().await;
+        if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
+            return;
+        }
         i.status = DownloadStatus::Downloading;
         let _ = tx.send(DownloadEvent::Progress(i.clone()));
         (
@@ -317,6 +285,16 @@ pub(crate) fn run_ytdlp(
                 let mut buf = stderr_buf_clone.lock().unwrap();
                 buf.push_str(&line);
                 buf.push('\n');
+                // Batasi 16 KB (pertahankan yang terbaru) — situs bermasalah
+                // bisa membanjiri stderr tanpa batas
+                if buf.len() > 16 * 1024 {
+                    let cut = buf.len() - 8 * 1024;
+                    let drop = buf[..cut]
+                        .find(|c: char| c == '\n')
+                        .map(|i| i + 1)
+                        .unwrap_or(cut);
+                    buf.drain(..drop);
+                }
             }
         })
         .ok();
@@ -448,6 +426,11 @@ fn parse_speed(s: &str) -> u64 {
         if unit.contains("gib") { return (val * 1073741824.0) as u64; }
         if unit.contains("mib") { return (val * 1048576.0) as u64; }
         if unit.contains("kib") { return (val * 1024.0) as u64; }
+        return val as u64;
+       // Format lama/alternatif: "2.5M/s", "500K/s", "1.2G/s"
+        if unit.starts_with('g') { return (val * 1073741824.0) as u64; }
+        if unit.starts_with('m') { return (val * 1048576.0) as u64; }
+        if unit.starts_with('k') { return (val * 1024.0) as u64; }
         return val as u64;
     }
     0

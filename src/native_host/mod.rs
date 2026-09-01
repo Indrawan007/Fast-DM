@@ -118,17 +118,43 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
 
                     let _ = std::process::Command::new(&gui_path)
                         .process_group(0)  // New process group
-                                                .stdin(std::process::Stdio::null())
+                        .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
                         .spawn();
 
-                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    // BUG FIX: cold start GUI (inisialisasi GTK) bisa > 2 dtk
+                    // di mesin lambat — sleep tetap 2 dtk sering kalah cepat
+                    // sehingga request pertama user gagal. Poll sampai socket
+                    // merespons (maks ~15 dtk) lalu forward sekali lagi.
+                    let mut ready = false;
+                    for _ in 0..150 {
+                        // &socket_path (bukan move): loop butuh path berulang
+                        match std::os::unix::net::UnixStream::connect(&socket_path) {
+                            Ok(_) => {
+                                ready = true;
+                                break;
+                            }
+                            Err(_) => {
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                            }
+                        }
+                    }
 
-                    forward_to_gui(&socket_path, &msg).unwrap_or(NativeResponse {
-                        success: false, message: None,
-                        error: Some(format!("Cannot reach GUI: {}", e)),
-                    })
+                    if ready {
+                        forward_to_gui(&socket_path, &msg).unwrap_or(NativeResponse {
+                            success: false, message: None,
+                            error: Some("Cannot reach GUI".into()),
+                        })
+                    } else {
+                        NativeResponse {
+                            success: false, message: None,
+                            error: Some(format!(
+                                "Cannot reach GUI: Fast DM tidak bisa dijalankan ({})",
+                                e
+                            )),
+                        }
+                    }
                 }
             }
         }
