@@ -10,6 +10,8 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   terduga dari URL + folder awal = Download dari Pengaturan; unduhan dimulai
   ke path pilihan user (engine tetap men-sanitasi nama & membuat folder).
 - Untuk URL video (YouTube/HLS/halaman), dialog kualitas TETAP menyusul setelah
+- Catatan API: gtk4-rs 0.9 menamai callback FileDialog `save()` (bukan
+  `save_file` — itu alias dokumentasi C); mengikuti pola `select_folder` settings.
   file dipilih — satu alur, tanpa duplikasi logika.
 - Refactor: normalisasi URL & keputusan "perlu dialog kualitas?" (B20)
   diekstrak ke `normalize_url_input` / `wants_quality_dialog` — dipakai bersama

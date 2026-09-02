@@ -372,16 +372,18 @@ pub fn build_window(
                 .modal(true)
                 .build();
 
-            // win_parent untuk argumen &-borrow; win_cb untuk dialog kualitas
-            // di DALAM callback — satu variabel tidak bisa dipakai keduanya
-            // (borrow + move pada expression yang sama).
+            // v2.5.1: gtk4-rs 0.9 menamai method callback FileDialog cukup
+            // `save()` — pola identik dengan `select_folder` di dialog settings
+            // (nama `save_file` adalah alias dokumentasi C, bukan method Rust;
+            // `save_future()` juga ada, tapi callback lebih konsisten di sini).
+            // win_parent = klon utk argumen &-borrow; dialog kualitas memakai
+            // klon sendiri (hindari borrow+move variabel sama satu expression).
             let win_parent = win_ref.clone();
             let win_cb = win_ref.clone();
             let engine_cb = engine_ref.clone();
             let rt_cb = rt_ref.clone();
             let entry_cb = entry_sa.clone();
-            let url = url.clone();
-            dlg.save_file(
+            dlg.save(
                 Some(&win_parent),
                 gtk4::gio::Cancellable::NONE,
                 move |res| {
@@ -400,9 +402,9 @@ pub fn build_window(
                         .unwrap_or(start_dir);
                     entry_cb.set_text(""); // UI bersih seperti alur Unduh normal
 
-                    // v2.3.2 lesson (E0382/'static): callback dialog disimpan
-                    // sampai respons user — maka closure `start` wajib MEMILIKI
-                    // datanya sendiri (bukan meminjam url/fname/dir lokal).
+                    // v2.3.2 lesson (E0382/'static): closure `start` disimpan
+                    // dialog kualitas sampai respons user tiba — wajib memiliki
+                    // datanya sendiri (salinan), bukan meminjam lokal scope ini.
                     let eng = engine_cb.clone();
                     let rt = rt_cb.clone();
                     let url_for_start = url.clone();
