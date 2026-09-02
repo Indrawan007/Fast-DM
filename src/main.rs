@@ -38,9 +38,15 @@ fn main() {
     if cli.native {
         // Native messaging host mode
         native_host::run();
-    } else {
-        // GUI mode
-        let app = app::FastDmApp::new();
-        app.run();
+        return;
+    }
+
+    // GUI mode — propagate inisialisasi error (bukan panic).
+    // Kode exit 1 = init gagal (Tokio runtime, GTK build, dll).
+    let app = app::FastDmApp::new();
+    if let Err(e) = app.run() {
+        tracing::error!("Inisialisasi gagal: {}", e);
+        eprintln!("Fast DM gagal start: {}", e);
+        std::process::exit(1);
     }
 }
