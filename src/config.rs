@@ -34,6 +34,14 @@ pub struct Config {
     /// `wl-clipboard` (Wayland) atau `xclip` (X11). Default OFF (opt-in).
     #[serde(default)]
     pub clipboard_monitor: bool,
+    /// v2.7.0 (B2): port daemon RPC aria2 (loopback-only). Ubah bila 6800
+    /// sudah dipakai aria2/daemon lain di mesin.
+    #[serde(default = "default_rpc_port")]
+    pub rpc_port: u16,
+}
+
+fn default_rpc_port() -> u16 {
+    6800
 }
 
 fn default_true() -> bool {
@@ -65,6 +73,7 @@ impl Default for Config {
             auto_resume: true,
             proxy_url: String::new(),
             clipboard_monitor: false,
+            rpc_port: 6800,
         }
     }
 }
@@ -74,6 +83,36 @@ impl Config {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join("fast-dm")
+    }
+
+    /// v2.7.0 (B2): secret RPC stabil-per-installasi. Disimpan di file 600
+    /// agar daemon yatim dari sesi app sebelumnya tetap bisa di-reuse (probe
+    /// ber-token cocok) sementara proses lain tidak bisa mengontrolnya.
+    pub fn rpc_secret() -> String {
+        Self::rpc_secret_in(&Self::config_dir())
+    }
+
+    /// Inti `rpc_secret()` — dir parameterisasi supaya bisa diuji tanpa
+    /// menyentuh XDG config asli (test paralel tidak boleh beradu env var).
+    pub fn rpc_secret_in(dir: &Path) -> String {
+        let p = dir.join("rpc.secret");
+        if let Ok(s) = fs::read_to_string(&p) {
+            let t = s.trim().to_string();
+            if !t.is_empty() && t.len() <= 64 {
+                return t;
+            }
+        }
+        let fresh = uuid::Uuid::new_v4().simple().to_string()[..16].to_string();
+        if fs::create_dir_all(dir).is_ok() {
+            if fs::write(&p, &fresh).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
+        fresh
     }
 
     /// XDG_RUNTIME_DIR hanya diterima bila benar-benar aman: absolute,
@@ -452,6 +491,33 @@ mod tests {
     }
 
     // ── is_valid_proxy_url (D3) ──
+
+    #[test]
+    fn rpc_port_defaults_and_legacy_config_loads() {
+        // config.json lama (tanpa field) → default 6800, bukan 0/error
+        let cfg: Config = serde_json::from_str(r#"{"download_dir":"/x"}"#).unwrap();
+        assert_eq!(cfg.rpc_port, 6800);
+        let cfg2: Config = serde_json::from_str(r#"{"rpc_port":6900}"#).unwrap();
+        assert_eq!(cfg2.rpc_port, 6900);
+        assert_eq!(Config::default().rpc_port, 6800);
+    }
+
+    #[test]
+    fn rpc_secret_is_stable_and_private() {
+        let dir = std::env::temp_dir().join(format!("fast-dm-secret-{}", std::process::pid()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = Config::rpc_secret_in(&dir);
+        let b = Config::rpc_secret_in(&dir);
+        assert_eq!(a, b, "secret harus stabil antar-panggilan");
+        assert_eq!(a.len(), 16);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let m = std::fs::metadata(dir.join("rpc.secret")).unwrap().permissions().mode();
+            assert_eq!(m & 0o777, 0o600, "secret tidak boleh terbaca group/other");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn proxy_url_valid_forms() {

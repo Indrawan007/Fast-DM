@@ -1,4 +1,5 @@
 pub mod aria2;
+pub mod aria2_rpc;
 pub mod types;
 pub mod universal;
 pub mod youtube;
@@ -465,6 +466,14 @@ fn spawn_supervised(
         if is_yt {
             // YouTube: yt-dlp dengan dialog kualitas (behavior lama)
             youtube::download(info.clone(), tx.clone(), &config).await;
+        } else if aria2_rpc::is_magnet(&url) {
+            // v2.7.0 (B2.1): magnet/torrent → daemon RPC aria2. Limit total
+            // di sini ditegakkan GLOBAL oleh daemon (changeGlobalOption),
+            // jadi `config.max_overall_speed` yang terbagi per-proses dari
+            // M3 sengaja TIDAK dipakai ulang (daemon tidak butuh bagian).
+            let mut cfg = config.clone();
+            cfg.max_overall_speed = promote_config.max_overall_speed.clone();
+            aria2_rpc::download(info.clone(), tx.clone(), &cfg).await;
         } else if is_direct_file_url(&url) {
             // File langsung (mp4/zip/dll): aria2 tanpa resolve — cepat
             aria2::download(info.clone(), tx.clone(), &config).await;

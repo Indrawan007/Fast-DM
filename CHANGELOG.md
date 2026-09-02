@@ -3,6 +3,33 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.7.0] - 2026-09-03
+
+### Added — B2.1: daemon RPC aria2 + unduh magnet/torrent
+- Modul baru `downloader/aria2_rpc.rs`: klien JSON-RPC 2.0 (reqwest, tanpa
+  dependensi baru) + supervisor daemon `aria2c --enable-rpc` — spawn sekali
+  per sesi, `kill_on_drop`, reuse daemon yatim milik sendiri via probe
+  `getVersion` ber-token.
+- **Magnet akhirnya bisa**: `magnet:?…` yang sebelumnya ditolak semua backend
+  kini masuk antrean normal (slot & antrian engine tetap berlaku) via
+  `addUri` + poll `tellStatus` 600 ms; nama file diisi otomatis dari metadata
+  begitu dikenal aria2 (hanya bila user tidak menentukan nama).
+- **Limit total live**: saat unduhan RPC start, `changeGlobalOption`
+  `max-overall-download-limit` disetel dari config — daemon membagi ulang
+  sendiri ke semua unduhan aktif (perbaikan langsung keluhan M3 "tidak
+  di-recalculate" untuk jalur RPC).
+- Pause/resume = `forcePause`/`unpause` (parsian & state utuh di daemon,
+  tanpa SIGKILL); cancel = `forceRemove` (parsial dibiarkan, konsisten jalur
+  proses). GID lama dideteksi ulang oleh aria2 → resume lintas sesi jalan.
+- Keamanan: RPC bind loopback + secret acak per install
+  (`~/.config/fast-dm/rpc.secret`, mode 600) — daemon asing tak bisa
+  mengontrol, daemon kita dari sesi lalu tetap ter-autentikasi.
+- Config baru: `rpc_port` (default 6800, `#[serde(default)]` — config lama
+  aman). URL `magnet:` lolos normalisasi input & tanpa dialog kualitas.
+- Gate batch: http/https langsung TETAP lewat `aria2.rs` per-proses (nol
+  regresi); migrasi penuh ke daemon = B2.2.
+- +10 unit test murni (request/response/daemon-args/patch/secret/magnet).
+
 ## [2.6.1] - 2026-09-03
 
 ### Fixed

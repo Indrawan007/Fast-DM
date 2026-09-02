@@ -1217,6 +1217,10 @@ where
 /// Normalisasi input user: tanpa skema → asumsikan https (perilaku lama on_add).
 pub(crate) fn normalize_url_input(raw: &str) -> String {
     let url = raw.trim().to_string();
+    // v2.7.0 (B2): magnet bukan URL web — jangan di-prefix https://
+    if url.to_ascii_lowercase().starts_with("magnet:") {
+        return url;
+    }
     if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("ftp://") {
         url
     } else {
@@ -1228,6 +1232,10 @@ pub(crate) fn normalize_url_input(raw: &str) -> String {
 /// Ekstensi dicek terhadap PATH saja — host selalu mengandung titik, sehingga
 /// cek ke string utuh membuat kondisi "tanpa ekstensi" hampir tak terpenuhi.
 pub(crate) fn wants_quality_dialog(url: &str) -> bool {
+    // v2.7.0 (B2): magnet tidak punya "kualitas" → tanpa dialog
+    if url.to_ascii_lowercase().starts_with("magnet:") {
+        return false;
+    }
     let path_lower = url::Url::parse(url)
         .ok()
         .map(|u| u.path().to_ascii_lowercase())
@@ -1243,6 +1251,20 @@ pub(crate) fn wants_quality_dialog(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_url_passes_magnet_through() {
+        assert_eq!(
+            normalize_url_input("  magnet:?xt=urn:btih:ab12 "),
+            "magnet:?xt=urn:btih:ab12"
+        );
+        assert_eq!(normalize_url_input("MAGNET:?xt=x"), "MAGNET:?xt=x");
+    }
+
+    #[test]
+    fn wants_quality_skips_magnet() {
+        assert!(!wants_quality_dialog("magnet:?xt=urn:btih:deadbeef"));
+    }
 
     #[test]
     fn normalize_url_adds_https_when_scheme_missing() {

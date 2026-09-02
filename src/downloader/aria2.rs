@@ -29,7 +29,7 @@ static RE_CD_QUOTED: LazyLock<Regex> =
 static RE_CD_UNQUOTED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"filename\s*=\s*([^\s;]+)").unwrap());
 
-const CHROME_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+pub(crate) const CHROME_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 pub async fn download(
     info: Arc<Mutex<DownloadInfo>>,
@@ -697,7 +697,7 @@ fn cookie_header_for(url: &str) -> Option<String> {
     }
 }
 
-fn is_generic_filename(name: &str) -> bool {
+pub(crate) fn is_generic_filename(name: &str) -> bool {
     if name.is_empty() {
         return true;
     }
