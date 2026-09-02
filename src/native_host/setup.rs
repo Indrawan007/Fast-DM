@@ -56,7 +56,7 @@ fn browser_profile_exists(nmh_dir: &Path) -> bool {
 fn write_manifests(json_str: &str) -> usize {
     let mut written = 0;
     for dir in get_all_nmh_dirs() {
-        if !browser_profile_exists(dir) {
+        if !browser_profile_exists(&dir) {
             continue;
         }
         let manifest = dir.join(format!("{}.json", HOST_NAME));
@@ -90,10 +90,11 @@ pub fn check_and_setup() -> Result<usize, Box<dyn std::error::Error>> {
     for dir in &dirs {
         let manifest = dir.join(format!("{}.json", HOST_NAME));
 
-        // M8: lewati browser yang tidak ter-install (profil tidak ada)
+        // M8: lewati browser yang tidak ter-install (profil         // M8: lewati browser yang tidak ter-install (profil tidak ada)
         if !browser_profile_exists(dir) {
             continue;
         }
+
 
         // Cek apakah perlu update (bandingkan konten penuh, bukan hanya path).
         // Karena origin register ikut disertakan, manifest tidak lagi ditimpa
