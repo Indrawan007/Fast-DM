@@ -17,3 +17,4 @@ extension_key.pem
 extension/*.crx
 # Generated files (built artifacts atau output tooling)
 # CATATAN: jangan meng-ignore "extension/" — folder itu source, bukan output.
+.arena_notes.md
