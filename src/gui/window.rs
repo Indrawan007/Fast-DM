@@ -218,11 +218,12 @@ pub fn build_window(
             let rt = rt.clone();
             let url = url.clone();
             glib::spawn_future_local(async move {
-                let _ = rt.spawn(async move {
-                    eng.add_download(&url, None, None, true, Default::default(), quality)
-                        .await
-                })
-                .await;
+                let _ = rt
+                    .spawn(async move {
+                        eng.add_download(&url, None, None, true, Default::default(), quality)
+                            .await
+                    })
+                    .await;
             });
         };
 
