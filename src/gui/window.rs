@@ -323,7 +323,7 @@ pub fn build_window(
                 if ban_t.is_visible() {
                     ban_t.set_visible(false);
                 }
-                return glib::ControlFlow::Continue(());
+                return glib::ControlFlow::Continue;
             }
             let tool: Option<&'static str> = {
                 let mut tr = tool_t.borrow_mut();
@@ -335,23 +335,23 @@ pub fn build_window(
                 return glib::ControlFlow::Break;
             };
             let Some(txt) = clipboard_text(tool) else {
-                return glib::ControlFlow::Continue(());
+                return glib::ControlFlow::Continue;
             };
             // Dedup: konten sama (termasuk non-URL) tidak diulang-ulang.
             if txt.is_empty() || txt == *last_t.borrow() {
-                return glib::ControlFlow::Continue(());
+                return glib::ControlFlow::Continue;
             }
             *last_t.borrow_mut() = txt.clone();
             if txt.len() > 2048 || !(txt.starts_with("http://") || txt.starts_with("https://")) {
                 if ban_t.is_visible() {
                     ban_t.set_visible(false);
                 }
-                return glib::ControlFlow::Continue(());
+                return glib::ControlFlow::Continue;
             }
             *pend_t.borrow_mut() = Some(txt.clone());
             lbl_t.set_text(&format!("📋 URL terdeteksi di clipboard: {}", txt));
             ban_t.set_visible(true);
-            glib::ControlFlow::Continue(())
+            glib::ControlFlow::Continue
         });
     }
 
