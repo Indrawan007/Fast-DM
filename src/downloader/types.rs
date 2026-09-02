@@ -56,6 +56,7 @@ pub struct DownloadInfo {
     pub pid: Option<u32>,
     /// epoch MILLISECONDS (v2.3.0, L4 — dulu detik sehingga antrian FIFO tidak
     /// deterministik bila dua download dibuat pada detik yang sama)
+
     #[serde(default)]
     pub created: i64,
 }
@@ -240,6 +241,7 @@ mod tests {
         assert_eq!(info.downloaded, 0);
         assert_eq!(info.progress, 0.0);
         assert!(info.error_msg.is_empty());
+        assert!(info.pid.is_none());
         assert!(info.status_detail.is_empty());
         assert!(info.pid.is_none());
         // created sekarang milliseconds — harus jauh > 0

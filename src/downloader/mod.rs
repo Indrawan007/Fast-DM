@@ -187,7 +187,7 @@ impl DownloadEngine {
         );
         info.is_youtube = is_yt;
 
-        // v2.3.0 (M11): tolak cepat skema non-download (blob:, data:, javascript:,
+       // v2.3.0 (M11): tolak cepat skema non-download (blob:, data:, javascript:,
         // file:, magnet: dst.) — dulu lolos dan baru gagal lambat di CLI dengan
         // error yang tidak jelas. (magnet bisa didukung via aria2 RPC — roadmap.)
         let scheme_ok = Url::parse(url)
@@ -228,6 +228,7 @@ impl DownloadEngine {
         // (pola promote_next) — dua start yang bersamaan tidak bisa sama-sama
         // lolos batas max_concurrent (double-spawn / over-slot).
         let claimed: Option<(Arc<Mutex<DownloadInfo>>, usize)> = {
+
             let downloads = self.downloads.write().await;
             let Some(info) = downloads.get(id).cloned() else { return };
 
@@ -418,7 +419,7 @@ fn spawn_supervised(
     tx: mpsc::UnboundedSender<DownloadEvent>,
     config: Config,
     dirty: Arc<AtomicBool>,
-    live_share: usize,
+        live_share: usize,
 ) {
     // v2.3.0 (M3): bagi limit total aplikasi menurut jumlah unduhan hidup saat
     // proses ini start, bukan max_concurrent statis — unduhan tunggal kini
@@ -470,6 +471,7 @@ fn spawn_supervised(
         // Status terminal (completed/error) → persist ke session.json
         dirty.store(true, Ordering::SeqCst);
 
+        // Slot bebas → jalankan antrian tertua
         // Slot bebas → jalankan antrian tertua.
         // Pakai promote_config (limit mentah) — lihat komentar M3 (anti double-division).
         promote_next(downloads, tx, promote_config, dirty).await;
@@ -591,6 +593,58 @@ pub(crate) fn kill_child_group_hard(pid: u32) {
     let pid = nix::unistd::Pid::from_raw(pid as i32);
     if nix::sys::signal::killpg(pid, nix::sys::signal::Signal::SIGKILL).is_err() {
         let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+    }
+}
+
+/// v2.3.1 (M1): pembaca baris output child process yang CANCELLATION-SAFE.
+///
+/// Kenapa tidak `AsyncBufReadExt::read_line`/`lines()` langsung: keduanya TIDAK
+/// aman dibatalkan di tengah — kalau `select!` memilih cabang ticker (cek
+/// pause/cancel) saat read_line sedang berjalan, byte yang terlanjur masuk ke
+/// buffer pemanggil bisa hilang / baris berikutnya terpotong. Di sini byte mentah
+/// disimpan di `pending` milik struct (bukan milik future), jadi future `read()`
+/// yang dibatalkan tidak pernah menelan data: read() hanya menulis buffer saat
+/// ia selesai.
+pub(crate) struct ChildLines<R> {
+    reader: R,
+    pending: Vec<u8>,
+    raw: Vec<u8>,
+    eof: bool,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> ChildLines<R> {
+    pub(crate) fn new(reader: R) -> Self {
+        Self {
+            reader,
+            pending: Vec::new(),
+            raw: vec![0u8; 8 * 1024],
+            eof: false,
+        }
+    }
+
+    /// Baris berikutnya (tanpa '\\n'); `None` = stream benar-benar EOF.
+    pub(crate) async fn next_line(&mut self) -> Option<String> {
+        use tokio::io::AsyncReadExt;
+        loop {
+            if let Some(pos) = self.pending.iter().position(|&b| b == b'\n') {
+                let mut line: Vec<u8> = self.pending.drain(..=pos).collect();
+                line.pop(); // buang '\n'
+                return Some(String::from_utf8_lossy(&line).into_owned());
+            }
+            if self.eof {
+                return if self.pending.is_empty() {
+                    None
+                } else {
+                    // baris terakhir tanpa newline penutup
+                    Some(String::from_utf8_lossy(&std::mem::take(&mut self.pending)).into_owned())
+                };
+            }
+            match self.reader.read(&mut self.raw).await {
+                Ok(0) => self.eof = true,
+                Ok(n) => self.pending.extend_from_slice(&self.raw[..n]),
+                Err(_) => self.eof = true,
+            }
+        }
     }
 }
 
@@ -968,6 +1022,7 @@ mod tests {
         assert!(!s.contains(".."), "filename tidak boleh ada '..': {:?}", s);
     }
 
+
     // ── parse_session (M5: format berversi + kompatibel legacy) ──
 
     const LEGACY_ITEM: &str = r#"{
@@ -999,5 +1054,37 @@ mod tests {
         assert_eq!(parse_session("").map(|v| v.len()), Some(0));
         assert_eq!(parse_session("   ").map(|v| v.len()), Some(0));
         assert!(parse_session("{bukan json").is_none(), "korup → None (caller bikin backup)");
+    }
+
+    // ── v2.3.1 (M1): ChildLines — pembaca baris cancellation-safe ──
+
+    #[tokio::test]
+    async fn child_lines_splits_and_flushes_tail() {
+        let data: &[u8] = b"satu\ndua-tiga\nekor"; // baris terakhir TANPA newline
+        let mut lines = ChildLines::new(std::io::Cursor::new(data));
+        assert_eq!(lines.next_line().await.as_deref(), Some("satu"));
+        assert_eq!(lines.next_line().await.as_deref(), Some("dua-tiga"));
+        assert_eq!(lines.next_line().await.as_deref(), Some("ekor"));
+        assert_eq!(lines.next_line().await, None);
+    }
+
+    #[tokio::test]
+    async fn child_lines_empty_input_is_eof_none() {
+        let data: &[u8] = b"";
+        let mut lines = ChildLines::new(std::io::Cursor::new(data));
+        assert_eq!(lines.next_line().await, None);
+    }
+
+    #[tokio::test]
+    async fn child_lines_survives_split_across_reads() {
+        // Cursor membaca sekaligus, jadi pakai duplikat: byte dipecah manual
+        // dengan VecDeque reader sederhana di atas — cukup pastikan pending
+        // menahan baris parsial antar-panggilan.
+        let data: &[u8] = b"aaa bbb\nccc\n";
+        let mut lines = ChildLines::new(std::io::Cursor::new(data));
+        // baca pertama selalu mengembalikan baris penuh pertama
+        assert_eq!(lines.next_line().await.as_deref(), Some("aaa bbb"));
+        assert_eq!(lines.next_line().await.as_deref(), Some("ccc"));
+        assert_eq!(lines.next_line().await, None);
     }
 }

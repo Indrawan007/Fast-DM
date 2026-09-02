@@ -3,9 +3,31 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.3.1] - 2026-09-02
+
+### Changed — M1: proses anak downloader jadi async penuh (`tokio::process`)
+- `aria2.rs` + `youtube.rs`: pola `std::process` di dalam `spawn_blocking` +
+  `Handle::current().block_on` per baris output diganti reader baris async
+  (`ChildLines`, cancellation-safe), **ticker 500 ms** untuk cek pause/cancel
+  — tombol kini bekerja walau child tidak mengeluarkan output (stall jaringan),
+  **wait paus terbatas 30 dtk** + eskalasi SIGKILL ke process group (dulu bisa
+  menggantung permanen bila child mengabaikan SIGTERM), dan `kill_on_drop`
+  sebagai jaring pengaman; stderr tidak lagi butuh thread khusus.
+- Kill group kini dijaga `Option<pid>`: `killpg(0)` (bahaya: group Fast-DM
+  sendiri) tidak mungkin lagi terjadi bila proses sudah selesai.
+
+### Fixed
+- `universal.rs`: dua pemanggilan `Handle::current().block_on` **dari dalam
+  konteks async** (jalur yt-dlp-missing dan reset-fallback) — keduanya panic
+  "Cannot block the current thread from within a runtime" saat tereksekusi;
+  diganti await langsung.
+- Koreksi kompilasi v2.3.0 (sudah masuk di `787a260`): tipe stream peer-cred
+  ipc, trait `FileTypeExt`, perbandingan uid nix 0.29, `&dir` di setup NMH.
+
 ## [2.3.0] - 2026-09-02
 
 ### Fixed — keamanan (lihat CODE-REVIEW.md)
+
 - **K1** IPC socket pindah dari `/tmp/fast-dm-<uid>.sock` (publik & bisa
   di-preempt user lain) ke `XDG_RUNTIME_DIR/fast-dm/fast-dm.sock` (0700) dengan
   fallback `~/.config/fast-dm/run/`. Koneksi diterima hanya bila `SO_PEERCRED`
@@ -25,6 +47,7 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   (sebelumnya ditulis dengan kedaluwarsa 1 tahun tanpa pembersihan).
 
 ### Changed
+
 - **K5** Unduhan tertunda hasil restore sesi **benar-benar** dilanjutkan
   otomatis saat aplikasi dibuka (README sebelumnya mengklaim begitu padahal
   kode hanya menandai Paused). Dapat dimatikan lewat Pengaturan →
@@ -36,8 +59,9 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   dibackup sebagai `session.json.corrupt-<ts>` alih-alih hilang diam-diam.
 
 ### Added
+
 - Ekstensi yang dikenali untuk jalur-download-cepat (`.exe .msi .dmg .bz2
-  .docx …`) diselaraskan dengan daftar intersep browser — URL non-media tak
+.docx …`) diselaraskan dengan daftar intersep browser — URL non-media tak
   lagi mencoba yt-dlp dulu (hemat 1–3 detik).
 - Deteksi URL YouTube lebih toleran (`/live/`, `/embed/`, `/v/`, query param
   `v=` di posisi mana pun) → dialog kualitas muncul untuk format tersebut.
@@ -50,5 +74,6 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 - Checkbox "Lanjutkan otomatis unduhan tertunda" di dialog Pengaturan.
 
 ## [2.2.5] - sebelumnya
+
 - Perbaikan bug various (lihat riwayat commit), Catppuccin GUI, session
   persist, cookie per-domain, resolver universal yt-dlp + fallback aria2.

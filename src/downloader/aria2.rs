@@ -1,9 +1,7 @@
 use super::types::*;
 use crate::config::Config;
 use regex::Regex;
-use std::io::{BufRead, BufReader};
-use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio::sync::{mpsc, Mutex};
@@ -98,11 +96,8 @@ pub async fn download(
 
     tracing::info!("Downloading: {}", info.lock().await.filename);
 
-    // Spawn aria2c
-    let _result = tokio::task::spawn_blocking(move || {
-        run_aria2c(cmd, info.clone(), tx.clone())
-    })
-    .await;
+    // Spawn aria2c — v2.3.1 (M1): async penuh, tanpa spawn_blocking
+    run_aria2c(cmd, info.clone(), tx.clone()).await;
 
     // Cleanup input file
     if let Some(path) = input_file {
@@ -199,22 +194,32 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
     (cmd, Some(input_path.to_string_lossy().to_string()))
 }
 
-fn run_aria2c(
+/// v2.3.1 (M1): tokio::process penuh — pola lama (std::process di dalam
+/// `spawn_blocking` + `Handle::current().block_on` per baris output) rapuh dan
+/// punya tiga bug nyata:
+/// 1. pause/cancel hanya dicek saat baris output baru tiba — aria2c yang stall
+///    (tanpa output) membuat tombol user tidak berdampak sampai ada baris lagi;
+/// 2. `child.wait()` tanpa batas — child yang tidak merespons SIGTERM (pause)
+///     membekukan thread blocking selamanya;
+/// 3. thread khusus stderr yang bisa bocor saat panic.
+/// Sekarang: `ChildLines` (baca cancellation-safe), ticker 500ms untuk cek
+/// status walau child diam, wait PAUSA terbatas 30 dtk dengan eskalasi SIGKILL,
+/// dan `kill_on_drop` sebagai jaring pengaman bila future seluruhnya di-drop.
+async fn run_aria2c(
     cmd: Vec<String>,
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
 ) {
-
     // process_group(0): child jadi leader group → SIGTERM/SIGKILL via killpg
     // menjangkau seluruh keturunannya (K4).
-    let child = Command::new(&cmd[0])
+    let mut child = match tokio::process::Command::new(&cmd[0])
         .args(&cmd[1..])
         .process_group(0)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn();
-
-    let mut child = match child {
+        .kill_on_drop(true)
+        .spawn()
+    {
         Ok(c) => c,
         Err(e) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
@@ -222,75 +227,66 @@ fn run_aria2c(
             } else {
                 format!("aria2c: {}", e)
             };
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let mut i = info.lock().await;
-                i.status = DownloadStatus::Error;
-                i.error_msg = msg;
-                let _ = tx.send(DownloadEvent::Error(i.clone()));
-            });
+            let mut i = info.lock().await;
+            i.status = DownloadStatus::Error;
+            i.error_msg = msg;
+            let _ = tx.send(DownloadEvent::Error(i.clone()));
             return;
         }
     };
 
-    // Simpan PID supaya bisa di-kill saat app ditutup (anti orphan)
-    {
-        let rt = tokio::runtime::Handle::current();
-        let pid = child.id();
-        rt.block_on(async { info.lock().await.pid = Some(pid); });
-    }
+    // Simpan PID supaya bisa di-kill saat app ditutup (anti orphan).
+    // tokio: id() -> Option, None bila proses sudah selesai. Semua pemakaian
+    // pid di bawah dijaga Option — killpg(0) akan mengenai GRUP FAST-DM SENDIRI.
+    let pid = child.id();
+    info.lock().await.pid = pid;
 
     let stdout = child.stdout.take().unwrap();
-
-    // Baca stderr di thread terpisah — kalau tidak, buffer pipe (64KB) bisa
-    // penuh oleh log error/warning dan aria2c berhenti menulis → deadlock.
     let stderr = child.stderr.take().unwrap();
-    let stderr_buf = Arc::new(std::sync::Mutex::new(String::new()));
-    let stderr_buf_clone = stderr_buf.clone();
-    let stderr_thread = std::thread::Builder::new()
-        .name("aria2-stderr".into())
-        .spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines().flatten() {
-                let mut buf = stderr_buf_clone.lock().unwrap();
-                buf.push_str(&line);
-                buf.push('\n');
-                // Batasi 16 KB (pertahankan yang terbaru) — log error bisa
-                // sangat panjang untuk download yang bermasalah
-                if buf.len() > 16 * 1024 {
-                    let cut = buf.len() - 8 * 1024;
-                    let drop = buf[..cut]
-                        .find(|c: char| c == '\n')
-                        .map(|i| i + 1)
-                        .unwrap_or(cut);
-                    buf.drain(..drop);
-                }
+
+    // stderr disedot task terpisah — kalau tidak, buffer pipe (64KB) bisa
+    // penuh oleh log error/warning dan aria2c berhenti menulis → deadlock.
+    // Task mengembalikan seluruh buffer; tidak perlu Mutex karena pemakainya
+    // hanya jalur ini (join sebelum membaca isinya).
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = super::ChildLines::new(stderr);
+        let mut buf = String::new();
+        while let Some(line) = lines.next_line().await {
+            buf.push_str(&line);
+            buf.push('\n');
+            // Batasi 16 KB (pertahankan yang terbaru) — log error bisa
+            // sangat panjang untuk download yang bermasalah
+            if buf.len() > 16 * 1024 {
+                let cut = buf.len() - 8 * 1024;
+                let drop = buf[..cut].find('\n').map(|i| i + 1).unwrap_or(cut);
+                buf.drain(..drop);
             }
-        })
-        .ok();
-
-    let reader = BufReader::new(stdout);
-    let mut last_update = Instant::now();
-
-    for line in reader.lines().flatten() {
-        // Check cancel/pause
-        let rt = tokio::runtime::Handle::current();
-        let status = rt.block_on(async { info.lock().await.status });
-
-        if matches!(status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-            // B8: Paused → SIGTERM sudah dikirim pause_download(); TUNGGU aria2c
-            // menulis control file .aria2 (supaya bisa di-resume), jangan SIGKILL.
-            // Cancelled → paksa kill, via group (K4) lalu child.kill() sebagai
-            // fallback bila group sudah tidak ada.
-            if status == DownloadStatus::Cancelled {
-                super::kill_child_group_hard(child.id());
-                let _ = child.kill();
-            }
-            // Reap the child so it does not linger as a zombie process
-            let _ = child.wait();
-            rt.block_on(async { info.lock().await.pid = None; });
-            return;
         }
+        buf
+    });
+
+    let mut lines = super::ChildLines::new(stdout);
+    let mut last_update = Instant::now();
+    // v2.3.1 (M1): cek status juga saat child tidak mengeluarkan output.
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
+    let mut aborted = None;
+
+    loop {
+        let line = tokio::select! {
+            biased;
+            l = lines.next_line() => match l {
+                Some(s) => s,
+                None => break, // stdout tertutup — aria2c akan selesai
+            },
+            _ = ticker.tick() => {
+                let status = info.lock().await.status;
+                if matches!(status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
+                    aborted = Some(status);
+                    break;
+                }
+                continue;
+            }
+        };
 
         // Parse progress (dukung format raw & human-readable)
         if let Some(m) = RE_PROGRESS.captures(&line) {
@@ -315,60 +311,84 @@ fn run_aria2c(
 
             // Throttle updates to 5fps
             if last_update.elapsed().as_millis() >= 200 {
-                rt.block_on(async {
-                    let mut i = info.lock().await;
-                    i.downloaded = downloaded;
-                    i.total_size = total;
-                    i.progress = progress;
-                    i.speed = speed;
-                    i.connections = connections;
-                    i.eta = eta;
-                    // Bersihkan error lama saat download berjalan lagi (mis. setelah Retry)
-                    i.error_msg.clear();
-                    i.status_detail.clear();
-                    let _ = tx.send(DownloadEvent::Progress(i.clone()));
-                });
+                let mut i = info.lock().await;
+                i.downloaded = downloaded;
+                i.total_size = total;
+                i.progress = progress;
+                i.speed = speed;
+                i.connections = connections;
+                i.eta = eta;
+                // Bersihkan error lama saat download berjalan lagi (mis. setelah Retry)
+                i.error_msg.clear();
+                i.status_detail.clear();
+                let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                drop(i);
                 last_update = Instant::now();
             }
         }
     }
 
-    // Tunggu pembaca stderr selesai (berarti proses sudah menutup stderr)
-    if let Some(thread) = stderr_thread {
-        let _ = thread.join();
+    if let Some(status) = aborted {
+        // B8: Paused → SIGTERM sudah dikirim pause_download(); TUNGGU aria2c
+        // menulis control file .aria2 (supaya bisa di-resume), jangan SIGKILL —
+        // tapi sekarang TERBATAS 30 dtk (M1), lalu eskalasi SIGKILL ke group
+        // bila aria2c macet. Cancelled → langsung SIGKILL group (K4) + kill()
+        // langsung sebagai fallback dan reap anti-zombie.
+        if status == DownloadStatus::Paused {
+            if tokio::time::timeout(std::time::Duration::from_secs(30), child.wait())
+                .await
+                .is_err()
+            {
+                if let Some(pid) = pid {
+                    super::kill_child_group_hard(pid);
+                }
+            }
+        } else if let Some(pid) = pid {
+            super::kill_child_group_hard(pid);
+        }
+        let _ = child.kill().await; // SIGKILL child langsung + reap (no-op jika sudah mati)
+        info.lock().await.pid = None;
+        stderr_task.abort();
+        return;
     }
 
-    let exit_code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+    // stdout EOF → proses akan selesai. Tunggu stderr selesai (pipe tertutup),
+    // lalu exit code. (kill_on_drop tetap jadi jaring pengaman jalur panic.)
+    let err_detail = stderr_task.await.unwrap_or_default();
+    let exit_code = child
+        .wait()
+        .await
+        .map(|s| s.code().unwrap_or(-1))
+        .unwrap_or(-1);
 
-    let rt = tokio::runtime::Handle::current();
-    rt.block_on(async {
-        let mut i = info.lock().await;
-        i.pid = None;
+    let mut i = info.lock().await;
+    i.pid = None;
 
-        if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-            return;
-        }
+    if matches!(
+        i.status,
+        DownloadStatus::Cancelled | DownloadStatus::Paused
+    ) {
+        return;
+    }
 
-        if exit_code == 0 {
-            i.status = DownloadStatus::Completed;
-            i.progress = 100.0;
-            i.speed = 0;
-            i.status_detail.clear();
-            let _ = tx.send(DownloadEvent::Completed(i.clone()));
+    if exit_code == 0 {
+        i.status = DownloadStatus::Completed;
+        i.progress = 100.0;
+        i.speed = 0;
+        i.status_detail.clear();
+        let _ = tx.send(DownloadEvent::Completed(i.clone()));
+    } else {
+        let detail = if err_detail.trim().is_empty() {
+            String::new()
         } else {
-            let err_detail = stderr_buf.lock().unwrap().clone();
-            let detail = if err_detail.trim().is_empty() {
-                String::new()
-            } else {
-                format!("\n{}", err_detail.trim())
-            };
-            i.status = DownloadStatus::Error;
-            i.error_msg = format!("aria2c exit code: {}{}", exit_code, detail);
-            i.status_detail.clear();
-            i.speed = 0;
-            let _ = tx.send(DownloadEvent::Error(i.clone()));
-        }
-    });
+            format!("\n{}", err_detail.trim())
+        };
+        i.status = DownloadStatus::Error;
+        i.error_msg = format!("aria2c exit code: {}{}", exit_code, detail);
+        i.status_detail.clear();
+        i.speed = 0;
+        let _ = tx.send(DownloadEvent::Error(i.clone()));
+    }
 }
 
 /// Cek ruang disk tersedia untuk direktori tujuan. Gagal cek → izinkan (jangan blokir).

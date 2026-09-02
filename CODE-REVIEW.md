@@ -27,7 +27,7 @@
 | L3 drift packaging | ✅ Fixed | file basi dihapus; versi Cargo.toml==manifest.json==2.3.0 |
 | L4 FIFO tak deterministik | ✅ Fixed | `created` milidetik + kunci pembanding `id` |
 | L7 timeout sendToNative | ✅ Fixed | 25 s + pesan |
-| M1 tokio::process refactor | ⏭️ Not started | refactor besar, butuh compiler run — masuk roadmap Sprint 2 |
+| M1 tokio::process refactor | ✅ v2.3.1 | `tokio::process` + `ChildLines` + ticker 500ms + wait paus bounded 30s + kill_on_drop; panic `rt.block_on` di `universal.rs` ikut dibasmi |
 | M4 dialog nested loop | ⏭️ Not started | ubah ke async pattern — berisiko tanpa test GUI |
 | L2 AGENTS.md usang | ✅ Fixed | ditulis ulang v0.2.0 sesuai arsitektur nyata |
 | L10 CI tanpa clippy/audit | ⚠️ Partial | komentar basi dibersihkan; step clippy/deny belum (butuh keputusan policy) |

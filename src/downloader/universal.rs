@@ -68,15 +68,13 @@ pub async fn download(
     };
 
     if !available {
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async {
-            let mut i = info.lock().await;
-            i.status = DownloadStatus::Error;
-            i.error_msg =
-                "yt-dlp tidak terinstall — jalankan: sudo apt install yt-dlp".to_string();
-            i.speed = 0;
-            let _ = tx.send(DownloadEvent::Error(i.clone()));
-        });
+        // v2.3.1 (M1): dulu `Handle::current().block_on` dari konteks async —
+        // panic di runtime Tokio; kini await langsung.
+        let mut i = info.lock().await;
+        i.status = DownloadStatus::Error;
+        i.error_msg = "yt-dlp tidak terinstall — jalankan: sudo apt install yt-dlp".to_string();
+        i.speed = 0;
+        let _ = tx.send(DownloadEvent::Error(i.clone()));
         return Outcome::MissingTool;
     }
 
@@ -108,13 +106,7 @@ pub async fn download(
     }
     cmd.push(url);
 
-    let info_run = info.clone();
-    let tx_run = tx.clone();
-    let ok = tokio::task::spawn_blocking(move || {
-        run_ytdlp(cmd, info_run, tx_run)
-    })
-    .await
-    .unwrap_or(false);
+    let ok = run_ytdlp(cmd, info.clone(), tx.clone()).await;
 
     if ok {
         return Outcome::Completed;
@@ -123,18 +115,19 @@ pub async fn download(
     // yt-dlp gagal → reset status supaya aria2 boleh mencoba sebagai fallback.
     // (run_ytdlp sudah mengirim event Error, tapi aria2 akan mengirim
     //  Progress/Downloading berikutnya sehingga UI tidak terjebak di Error.)
-    let rt = tokio::runtime::Handle::current();
-    rt.block_on(async {
+    // v2.3.1 (M1): dulu blok ini memakai `Handle::current().block_on` dari
+    // dalam konteks async — panic di runtime; kini await langsung.
+    {
         let mut i = info.lock().await;
         if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-            return;
+            return Outcome::Failed;
         }
         i.status = DownloadStatus::Downloading;
         i.speed = 0;
         i.error_msg.clear();
         i.status_detail.clear();
         let _ = tx.send(DownloadEvent::Progress(i.clone()));
-    });
+    }
 
     Outcome::Failed
 }

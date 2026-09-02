@@ -1,9 +1,7 @@
 use super::types::*;
 use crate::config::Config;
 use regex::Regex;
-use std::io::{BufRead, BufReader};
-use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio::sync::{mpsc, Mutex};
@@ -261,23 +259,29 @@ pub async fn download(
 
     cmd.push(url);
 
-    let info_clone = info.clone();
-    let tx_clone = tx.clone();
-
-    tokio::task::spawn_blocking(move || {
-        run_ytdlp(cmd, info_clone, tx_clone);
-    })
-    .await
-    .ok();
+    // v2.3.1 (M1): async penuh — run_ytdlp kini memakai tokio::process
+    run_ytdlp(cmd, info.clone(), tx.clone()).await;
 }
 
-pub(crate) fn run_ytdlp(
+/// v2.3.1 (M1): async penuh via tokio::process — lihat komentar
+/// `aria2::run_aria2c` untuk alasan lengkap (ticker cek status, wait paus
+/// terbatas + eskalasi SIGKILL, kill_on_drop, ChildLines anti-kehilangan-byte).
+/// `false` = tidak selesai normal (cancel/pause/error) — dipakai universal.rs
+/// untuk memutuskan fallback aria2.
+pub(crate) async fn run_ytdlp(
     cmd: Vec<String>,
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
 ) -> bool {
     // process_group(0) → killpg menjangkau ffmpeg anak-anaknya saat pause/cancel (K4).
-    let mut child = match Command::new(&cmd[0]).args(&cmd[1..]).process_group(0).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+    let mut child = match tokio::process::Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .process_group(0)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+    {
         Ok(c) => c,
         Err(e) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
@@ -285,71 +289,61 @@ pub(crate) fn run_ytdlp(
             } else {
                 format!("yt-dlp: {}", e)
             };
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let mut i = info.lock().await;
-                i.status = DownloadStatus::Error;
-                i.error_msg = msg;
-                let _ = tx.send(DownloadEvent::Error(i.clone()));
-            });
+            let mut i = info.lock().await;
+            i.status = DownloadStatus::Error;
+            i.error_msg = msg;
+            let _ = tx.send(DownloadEvent::Error(i.clone()));
             return false;
         }
     };
 
-    // Simpan PID supaya bisa di-kill saat app ditutup (anti orphan)
-    {
-        let rt = tokio::runtime::Handle::current();
-        let pid = child.id();
-        rt.block_on(async { info.lock().await.pid = Some(pid); });
-    }
+    // Simpan PID supaya bisa di-kill saat app ditutup (anti orphan).
+    // id() -> Option; kill di bawah dijaga — JANGAN pernah killpg(0).
+    let pid = child.id();
+    info.lock().await.pid = pid;
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
 
-    // Baca stderr di thread terpisah agar tidak deadlock
-    let stderr_buf = Arc::new(std::sync::Mutex::new(String::new()));
-    let stderr_buf_clone = stderr_buf.clone();
-    let stderr_thread = std::thread::Builder::new()
-        .name("ytdlp-stderr".into())
-        .spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines().flatten() {
-                let mut buf = stderr_buf_clone.lock().unwrap();
-                buf.push_str(&line);
-                buf.push('\n');
-                // Batasi 16 KB (pertahankan yang terbaru) — situs bermasalah
-                // bisa membanjiri stderr tanpa batas
-                if buf.len() > 16 * 1024 {
-                    let cut = buf.len() - 8 * 1024;
-                    let drop = buf[..cut]
-                        .find(|c: char| c == '\n')
-                        .map(|i| i + 1)
-                        .unwrap_or(cut);
-                    buf.drain(..drop);
-                }
+    // Baca stderr di task terpisah agar pipe 64KB tidak membuat yt-dlp macet.
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = super::ChildLines::new(stderr);
+        let mut buf = String::new();
+        while let Some(line) = lines.next_line().await {
+            buf.push_str(&line);
+            buf.push('\n');
+            // Batasi 16 KB (pertahankan yang terbaru) — situs bermasalah
+            // bisa membanjiri stderr tanpa batas
+            if buf.len() > 16 * 1024 {
+                let cut = buf.len() - 8 * 1024;
+                let drop = buf[..cut].find('\n').map(|i| i + 1).unwrap_or(cut);
+                buf.drain(..drop);
             }
-        })
-        .ok();
-
-    let reader = BufReader::new(stdout);
-    let mut last_update = Instant::now();
-
-    for line in reader.lines().flatten() {
-        let rt = tokio::runtime::Handle::current();
-        let status = rt.block_on(async { info.lock().await.status });
-
-        if matches!(status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-            // B8: Paused → SIGTERM sudah dikirim pause_download(); tunggu proses
-            // berhenti rapi (file .part tetap bisa di-resume). Cancelled → kill
-            // seluruh group (ffmpeg ikut mati, K4) + fallback child.kill().
-            if status == DownloadStatus::Cancelled {
-                super::kill_child_group_hard(child.id());
-                let _ = child.kill();
-            }
-            let _ = child.wait();
-            rt.block_on(async { info.lock().await.pid = None; });
-            return false;
         }
+        buf
+    });
+
+    let mut lines = super::ChildLines::new(stdout);
+    let mut last_update = Instant::now();
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
+    let mut aborted = None;
+
+    loop {
+        let line = tokio::select! {
+            biased;
+            l = lines.next_line() => match l {
+                Some(s) => s,
+                None => break,
+            },
+            _ = ticker.tick() => {
+                let status = info.lock().await.status;
+                if matches!(status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
+                    aborted = Some(status);
+                    break;
+                }
+                continue;
+            }
+        };
 
         if let Some(m) = RE_YTDLP_DEST.captures(&line) {
             let filename = std::path::Path::new(m.get(1).unwrap().as_str())
@@ -357,24 +351,20 @@ pub(crate) fn run_ytdlp(
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
-
-            rt.block_on(async {
-                info.lock().await.filename = filename;
-            });
+            info.lock().await.filename = filename;
         }
 
         if RE_YTDLP_MERGE.is_match(&line) {
-            rt.block_on(async {
-                let mut i = info.lock().await;
-                i.progress = 99.0;
-                // M10: info merge → status_detail (bukan error_msg merah)
-                i.status_detail = "Menggabungkan video + audio…".into();
-                let _ = tx.send(DownloadEvent::Progress(i.clone()));
-            });
+            let mut i = info.lock().await;
+            i.progress = 99.0;
+            // M10: info merge → status_detail (bukan error_msg merah)
+            i.status_detail = "Menggabungkan video + audio…".into();
+            let _ = tx.send(DownloadEvent::Progress(i.clone()));
             continue;
         }
 
-        let progress_match = RE_YTDLP_PROGRESS.captures(&line)
+        let progress_match = RE_YTDLP_PROGRESS
+            .captures(&line)
             .or_else(|| RE_YTDLP_PROGRESS2.captures(&line));
 
         if let Some(m) = progress_match {
@@ -386,61 +376,86 @@ pub(crate) fn run_ytdlp(
                 let total = m.get(2).map(|s| parse_speed(s.as_str())).unwrap_or(0);
                 let eta = m.get(4).map(|s| parse_eta_hms(s.as_str())).unwrap_or(0);
 
-                rt.block_on(async {
-                    let mut i = info.lock().await;
-                    i.progress = pct;
-                    i.speed = speed;
-                    if total > 0 {
-                        i.total_size = total;
-                        i.downloaded = (pct / 100.0 * total as f64) as u64;
-                    }
-                    i.eta = eta;
-                    i.error_msg.clear();
-                    i.status_detail.clear();
-                    let _ = tx.send(DownloadEvent::Progress(i.clone()));
-                });
+                let mut i = info.lock().await;
+                i.progress = pct;
+                i.speed = speed;
+                if total > 0 {
+                    i.total_size = total;
+                    i.downloaded = (pct / 100.0 * total as f64) as u64;
+                }
+                i.eta = eta;
+                i.error_msg.clear();
+                i.status_detail.clear();
+                let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                drop(i);
                 last_update = Instant::now();
             }
         }
     }
 
-    if let Some(thread) = stderr_thread {
-        let _ = thread.join();
+    if let Some(status) = aborted {
+        // B8: Paused → SIGTERM sudah dikirim pause_download(); tunggu proses
+        // berhenti rapi (file .part tetap bisa di-resume) TERBATAS 30 dtk (M1),
+        // lalu eskalasi SIGKILL ke group bila yt-dlp/ffmpeg macet. Cancelled →
+        // kill seluruh group (ffmpeg ikut mati, K4).
+        if status == DownloadStatus::Paused {
+            if tokio::time::timeout(std::time::Duration::from_secs(30), child.wait())
+                .await
+                .is_err()
+            {
+                if let Some(pid) = pid {
+                    super::kill_child_group_hard(pid);
+                }
+            }
+        } else if let Some(pid) = pid {
+            super::kill_child_group_hard(pid);
+        }
+        let _ = child.kill().await; // SIGKILL langsung + reap
+        info.lock().await.pid = None;
+        stderr_task.abort();
+        return false;
     }
 
-    let exit_code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
-    let err_detail = stderr_buf.lock().unwrap().clone();
+    let err_detail = stderr_task.await.unwrap_or_default();
+    let exit_code = child
+        .wait()
+        .await
+        .map(|s| s.code().unwrap_or(-1))
+        .unwrap_or(-1);
 
-    let rt = tokio::runtime::Handle::current();
-    let ok = rt.block_on(async {
-        let mut i = info.lock().await;
-        i.pid = None;
-        if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-            return false;
+    let mut i = info.lock().await;
+    i.pid = None;
+    if matches!(
+        i.status,
+        DownloadStatus::Cancelled | DownloadStatus::Paused
+    ) {
+        return false;
+    }
+
+    if exit_code == 0 {
+        i.status = DownloadStatus::Completed;
+        i.progress = 100.0;
+        i.speed = 0;
+        if i.total_size > 0 {
+            i.downloaded = i.total_size;
         }
-
-        if exit_code == 0 {
-            i.status = DownloadStatus::Completed;
-            i.progress = 100.0;
-            i.speed = 0;
-            if i.total_size > 0 {
-                i.downloaded = i.total_size;
-            }
-            i.error_msg.clear();
-            i.status_detail.clear();
-            let _ = tx.send(DownloadEvent::Completed(i.clone()));
-            true
+        i.error_msg.clear();
+        i.status_detail.clear();
+        let _ = tx.send(DownloadEvent::Completed(i.clone()));
+        true
+    } else {
+        i.status = DownloadStatus::Error;
+        let detail = if err_detail.is_empty() {
+            String::new()
         } else {
-            i.status = DownloadStatus::Error;
-            let detail = if err_detail.is_empty() { String::new() } else { format!("\n{}", err_detail.trim()) };
-            i.error_msg = format!("yt-dlp exit code: {}{}", exit_code, detail);
-            i.status_detail.clear();
-            i.speed = 0;
-            let _ = tx.send(DownloadEvent::Error(i.clone()));
-            false
-        }
-    });
-    ok
+            format!("\n{}", err_detail.trim())
+        };
+        i.error_msg = format!("yt-dlp exit code: {}{}", exit_code, detail);
+        i.status_detail.clear();
+        i.speed = 0;
+        let _ = tx.send(DownloadEvent::Error(i.clone()));
+        false
+    }
 }
 
 /// Parse ETA yt-dlp ("MM:SS" atau "HH:MM:SS") → detik
