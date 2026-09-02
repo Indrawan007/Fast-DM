@@ -626,10 +626,15 @@ pub fn build_window(
         let btn_feedback_src = settings_btn_h.clone();
         let clip_flag = clip_enabled.clone();
         let clip_ban = clip_banner.clone();
+        // v2.8.0 (D8.1): side-effect file (autostart) hanya saat nilainya
+        // BERUBAH dan hanya setelah engine benar-benar menerima config.
+        let prev_autostart = cur.autostart;
         show_settings_dialog(win_settings.upcast_ref(), &cur, move |cfg| {
             // v2.4.0 (D1): toggle clipboard baru berlaku setelah settings
             // BENAR-BENAR tersimpan (engine bisa menolaknya, mis. proxy invalid).
             let want_clip = cfg.clipboard_monitor;
+            let want_autostart = cfg.autostart;
+            let autostart_changed = want_autostart != prev_autostart;
             let handle = rt2.spawn(async move { eng2.update_config(cfg).await });
             let btn_feedback = btn_feedback_src.clone();
             glib::spawn_future_local(async move {
@@ -639,6 +644,11 @@ pub fn build_window(
                         clip_flag.set(want_clip);
                         if !want_clip {
                             clip_ban.set_visible(false);
+                        }
+                        if autostart_changed {
+                            if let Err(e) = crate::config::Config::apply_autostart(want_autostart) {
+                                tracing::warn!("Autostart: {}", e);
+                            }
                         }
                     }
                     Ok(Err(e)) => {
@@ -954,6 +964,20 @@ pub fn build_window(
             return glib::Propagation::Proceed;
         }
 
+        // v2.8.0 (D8.1): minimize-to-close (opt-in, default OFF) — jendela
+        // disembunyikan, engine tetap jalan. Buka lagi: jalankan ulang
+        // `fast-dm` — single-instance (app.rs) mem-forward activate ke proses
+        // pertama dan memanggil present(). Config dibaca SAAT klik tutup
+        // supaya perubahan di Pengaturan langsung berlaku tanpa restart.
+        {
+            let eng_cfg = engine_close.clone();
+            let cfg_now = rt_close.block_on(async move { eng_cfg.get_config().await });
+            if should_minimize_on_close(cfg_now.minimize_to_close, active) {
+                win_close.hide();
+                return glib::Propagation::Stop;
+            }
+        }
+
         let dlg = gtk4::Dialog::with_buttons(
             Some("Konfirmasi"),
             Some(&win_close),
@@ -1123,6 +1147,17 @@ where
     clip_chk.set_active(cur.clipboard_monitor);
     content.append(&clip_chk);
 
+    // ── v2.8.0 (D8): close-behavior + autostart ──
+    let minimize_chk = gtk4::CheckButton::with_label(
+        "Tetap jalankan di latar saat jendela ditutup (buka lagi: jalankan ulang Fast DM)",
+    );
+    minimize_chk.set_active(cur.minimize_to_close);
+    content.append(&minimize_chk);
+
+    let autostart_chk = gtk4::CheckButton::with_label("Jalankan Fast DM otomatis saat login");
+    autostart_chk.set_active(cur.autostart);
+    content.append(&autostart_chk);
+
     // Buttons
     let btn_box = GtkBox::new(Orientation::Horizontal, 8);
     btn_box.set_halign(gtk4::Align::End);
@@ -1174,7 +1209,7 @@ where
     // loop yang bisa menggantung, jadi guard close_request pola lama hilang).
     let cfg_base = cur.clone();
     let on_ok = std::rc::Rc::new(std::cell::RefCell::new(Some(on_ok)));
-    let (fe, cs, cc, se, vt, ar, px, cb) = (
+    let (fe, cs, cc, se, vt, ar, px, cb, mz, au) = (
         folder_entry.clone(),
         conn_spin.clone(),
         conc_spin.clone(),
@@ -1183,6 +1218,8 @@ where
         auto_resume_chk.clone(),
         proxy_entry.clone(),
         clip_chk.clone(),
+        minimize_chk.clone(),
+        autostart_chk.clone(),
     );
     dialog.connect_response(move |d, resp| {
         if resp == gtk4::ResponseType::Ok {
@@ -1203,6 +1240,9 @@ where
             // v2.4.0 (D3/D1)
             cfg.proxy_url = px.text().trim().to_string();
             cfg.clipboard_monitor = cb.is_active();
+            // v2.8.0 (D8.1)
+            cfg.minimize_to_close = mz.is_active();
+            cfg.autostart = au.is_active();
             if let Some(f) = on_ok.borrow_mut().take() {
                 f(cfg);
             }
@@ -1213,6 +1253,13 @@ where
 }
 
 // ── v2.5.0 (D2): helper input URL — dipakai tombol "Unduh" & "Simpan Sebagai…" ──
+
+/// v2.8.0 (D8.1): keputusan tunggal close-request — minimize hanya bila
+/// fiturnya ON DAN ada unduhan hidup (aktif/antri). Nol aktif → tutup biasa
+/// (tak ada gunanya app hidup tanpa apa pun berjalan).
+pub(crate) fn should_minimize_on_close(minimize: bool, active: usize) -> bool {
+    minimize && active > 0
+}
 
 /// Normalisasi input user: tanpa skema → asumsikan https (perilaku lama on_add).
 pub(crate) fn normalize_url_input(raw: &str) -> String {
@@ -1251,6 +1298,13 @@ pub(crate) fn wants_quality_dialog(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minimize_only_when_on_and_active() {
+        assert!(should_minimize_on_close(true, 1));
+        assert!(!should_minimize_on_close(false, 5)); // off → dialog lama
+        assert!(!should_minimize_on_close(true, 0)); // tak ada yang dikerjakan
+    }
 
     #[test]
     fn normalize_url_passes_magnet_through() {

@@ -3,6 +3,26 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.8.0] - 2026-09-03
+
+### Added — D8.1: minimize-to-close & autostart (tanpa dependensi baru)
+- **`minimize_to_close`** (default OFF, opt-in di Pengaturan): menutup jendela
+  saat masih ada unduhan aktif/antri → jendela disembunyikan, engine tetap
+  jalan; dialog "Hentikan & Tutup" lama tidak muncul. Membuka lagi cukup
+  menjalankan ulang `fast-dm` — mekanisme single-instance (app.rs) meneruskan
+  activate ke proses pertama dan memanggil `present()`. Config dibaca saat
+  tombol tutup ditekan → perubahan pengaturan langsung berlaku tanpa restart.
+  Tanpa unduhan aktif, tutup = keluar (perilaku lama).
+- **`autostart`**: checkbox "Jalankan Fast DM otomatis saat login" — menulis/
+  menghapus `~/.config/autostart/fast-dm.desktop` (Exec = current_exe,
+  dikutip bila mengandung spasi). Side-effect file hanya saat nilainya
+  BERUBAH dan hanya setelah engine menerima config ( pola D1).
+- Helper murni `should_minimize_on_close` + `desktop_entry_for` +
+  `apply_autostart_in` (uji terisolasi di temp dir) — +4 unit test.
+- Tray icon sungguhan (StatusNotifierItem) sengaja DITANGGUH: butuh dependensi
+  C/D-Bus yang tidak terverifikasi di loop build ini; nilai utama D8 (download
+  tidak mati saat jendela tertutup) sudah tercapai.
+
 ## [2.7.0] - 2026-09-03
 
 ### Added — B2.1: daemon RPC aria2 + unduh magnet/torrent

@@ -34,6 +34,7 @@
 | D2 save-as dialog | ✅ v2.5.0 | tombol "Simpan Sebagai…" → FileDialog save_file (nama dari URL, folder awal = Download); dialog kualitas tetap menyusul; helper on_add diekstrak & diunit-test |
 | D6 format nyata yt-dlp | ✅ v2.6.0 | `fetch_formats` (yt-dlp -J, cap 20s) → section dinamis di dialog; id nyata → passthrough `--format <id>/best`; gagal → fallback preset |
 | B2.1 magnet via RPC | ✅ v2.7.0 | `aria2_rpc.rs`: daemon self-spawn (loopback+secret 600), addUri/tellStatus/forcePause, changeGlobalOption limit live; http per-proses masih jalur lama (B2.2 = migrasi penuh) |
+| D8.1 close-behavior+autostart | ✅ v2.8.0 | minimize-to-close opt-in (re-show via single-instance present()), XDG autostart write/remove; tray SNI ditangguh (dep berisiko) |
 | M11 skema tak divalidasi | ✅ Fixed || L2 AGENTS.md usang | ✅ Fixed | ditulis ulang v0.2.0 sesuai arsitektur nyata |
 | L10 CI tanpa clippy/audit | ⚠️ Partial | komentar basi dibersihkan; step clippy/deny belum (butuh keputusan policy) |
 | D-x (fitur), B-x (arsitektur RPC) | 📋 Roadmap | lihat §5 dokumen ini |

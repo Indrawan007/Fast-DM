@@ -38,6 +38,16 @@ pub struct Config {
     /// sudah dipakai aria2/daemon lain di mesin.
     #[serde(default = "default_rpc_port")]
     pub rpc_port: u16,
+    /// v2.8.0 (D8): tutup jendela saat ada unduhan aktif → app tetap hidup
+    /// di latar (window disembunyikan). Buka kembali = jalankan ulang
+    /// `fast-dm` (single-instance akan menampilkannya lagi). Default OFF —
+    /// perilaku lama (dialog konfirmasi lalu quit) tidak berubah.
+    #[serde(default)]
+    pub minimize_to_close: bool,
+    /// v2.8.0 (D8): tulis/hapus ~/.config/autostart/fast-dm.desktop saat
+    /// user menggeser toggle di Pengaturan (bukan tiap save).
+    #[serde(default)]
+    pub autostart: bool,
 }
 
 fn default_rpc_port() -> u16 {
@@ -74,6 +84,8 @@ impl Default for Config {
             proxy_url: String::new(),
             clipboard_monitor: false,
             rpc_port: 6800,
+            minimize_to_close: false,
+            autostart: false,
         }
     }
 }
@@ -113,6 +125,47 @@ impl Config {
             }
         }
         fresh
+    }
+
+    /// Isi file .desktop XDG autostart. Path dgn spasi → dikutip
+    /// (spesifikasi desktop-entry mengizinkan quoting pada Exec).
+    pub(crate) fn desktop_entry_for(exe: &Path) -> String {
+        let raw = exe.to_string_lossy();
+        let exec = if raw.contains(' ') {
+            format!("\"{}\"", raw)
+        } else {
+            raw.to_string()
+        };
+        format!(
+            "[Desktop Entry]\nType=Application\nName=Fast DM\nComment=Fast Download Manager\nExec={}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+            exec
+        )
+    }
+
+    /// Tulis (enable) / hapus (disable) entry autostart di `dir`.
+    /// Inti terpisah dari path asli agar bisa diuji tanpa ~/.config.
+    pub(crate) fn apply_autostart_in(dir: &Path, exe: &Path, enable: bool) -> Result<(), String> {
+        let f = dir.join("fast-dm.desktop");
+        if enable {
+            fs::create_dir_all(dir).map_err(|e| format!("mkdir autostart: {e}"))?;
+            fs::write(&f, Self::desktop_entry_for(exe)).map_err(|e| format!("tulis .desktop: {e}"))?;
+            Ok(())
+        } else {
+            match fs::remove_file(&f) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(format!("hapus .desktop: {e}")),
+            }
+        }
+    }
+
+    /// Sisi-efek nyata: ~/.config/autostart. Failures dilaporkan pemanggil.
+    pub fn apply_autostart(enable: bool) -> Result<(), String> {
+        let dir = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("autostart");
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fast-dm"));
+        Self::apply_autostart_in(&dir, &exe, enable)
     }
 
     /// XDG_RUNTIME_DIR hanya diterima bila benar-benar aman: absolute,
@@ -491,6 +544,39 @@ mod tests {
     }
 
     // ── is_valid_proxy_url (D3) ──
+
+    #[test]
+    fn desktop_entry_quoting_and_shape() {
+        let e = Config::desktop_entry_for(Path::new("/usr/bin/fast-dm"));
+        assert!(e.contains("Exec=/usr/bin/fast-dm\n"));
+        assert!(e.starts_with("[Desktop Entry]"));
+        let e2 = Config::desktop_entry_for(Path::new("/home/a b/Fast-DM/target/debug/fast-dm"));
+        assert!(e2.contains("Exec=\"/home/a b/Fast-DM/target/debug/fast-dm\"\n"));
+    }
+
+    #[test]
+    fn apply_autostart_toggle_writes_and_removes() {
+        let dir = std::env::temp_dir().join(format!("fast-dm-autostart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let exe = Path::new("/usr/bin/fast-dm");
+        Config::apply_autostart_in(&dir, exe, true).unwrap();
+        let f = dir.join("fast-dm.desktop");
+        assert!(f.exists());
+        // idempotent — tulis ulang tidak error
+        Config::apply_autostart_in(&dir, exe, true).unwrap();
+        Config::apply_autostart_in(&dir, exe, false).unwrap();
+        assert!(!f.exists());
+        // disable saat tidak ada file = no-op sukses
+        Config::apply_autostart_in(&dir, exe, false).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn d8_flags_default_off() {
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert!(!cfg.minimize_to_close);
+        assert!(!cfg.autostart);
+    }
 
     #[test]
     fn rpc_port_defaults_and_legacy_config_loads() {
