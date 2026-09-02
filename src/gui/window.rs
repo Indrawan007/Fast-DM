@@ -1189,10 +1189,7 @@ where
 /// Normalisasi input user: tanpa skema → asumsikan https (perilaku lama on_add).
 pub(crate) fn normalize_url_input(raw: &str) -> String {
     let url = raw.trim().to_string();
-    if url.starts_with("http://")
-        || url.starts_with("https://")
-        || url.starts_with("ftp://")
-    {
+    if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("ftp://") {
         url
     } else {
         format!("https://{}", url)
@@ -1232,14 +1229,18 @@ mod tests {
     #[test]
     fn wants_quality_skips_direct_files() {
         assert!(!wants_quality_dialog("https://cdn.example.com/movie.mp4"));
-        assert!(!wants_quality_dialog("https://example.com/tool.zip?x=1#frag"));
+        assert!(!wants_quality_dialog(
+            "https://example.com/tool.zip?x=1#frag"
+        ));
     }
 
     #[test]
     fn wants_quality_allows_pages_streams_youtube() {
         assert!(wants_quality_dialog("https://vimeo.com/12345")); // tanpa ekstensi
         assert!(wants_quality_dialog("https://site.com/live/master.m3u8"));
-        assert!(wants_quality_dialog("https://www.youtube.com/watch?v=abcdefghijk"));
+        assert!(wants_quality_dialog(
+            "https://www.youtube.com/watch?v=abcdefghijk"
+        ));
         assert!(wants_quality_dialog("https://example.com/page.php"));
     }
 }
