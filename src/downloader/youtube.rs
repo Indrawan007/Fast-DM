@@ -42,7 +42,7 @@ pub fn is_youtube_url(url: &str) -> bool {
     // tidak boleh ikut.
     let path = u.path().to_string();
     let has_v = u.query_pairs().any(|(k, v)| k == "v" && !v.is_empty());
-    let seg = |p: &str, i: usize| p.split('/').nth(i).map_or(false, |x| !x.is_empty());
+    let seg = |p: &str, i: usize| p.split('/').nth(i).is_some_and(|x| !x.is_empty());
 
     match host.as_str() {
         "youtu.be" => seg(&path, 1),
@@ -353,8 +353,8 @@ pub(crate) fn parse_formats_json(s: &str) -> Vec<FormatOption> {
         if ext == "mhtml" {
             continue; // bukan media — sampah dari "-J"
         }
-        let has_v = !fmt.vcodec.as_deref().map_or(false, |c| c == "none" || c.is_empty());
-        let has_a = !fmt.acodec.as_deref().map_or(false, |c| c == "none" || c.is_empty());
+        let has_v = !fmt.vcodec.as_deref().is_some_and(|c| c == "none" || c.is_empty());
+        let has_a = !fmt.acodec.as_deref().is_some_and(|c| c == "none" || c.is_empty());
         let kind = match (has_v, has_a) {
             (true, true) => "video+audio",
             (true, false) => "video",

@@ -162,8 +162,8 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         // default true → tabrakan menjadi "file (1).ext". allow-overwrite
         // harus berlawanan: kalau overwrite=true, aria2 menimpa SEBELUM
         // sempat auto-rename.
-        format!("--allow-overwrite={}", !config.auto_file_renaming).into(),
-        format!("--auto-file-renaming={}", config.auto_file_renaming).into(),
+        format!("--allow-overwrite={}", !config.auto_file_renaming),
+        format!("--auto-file-renaming={}", config.auto_file_renaming),
     ];
 
     // Header kustom dari browser extension (mis. Referer) — strip \r\n anti injection.

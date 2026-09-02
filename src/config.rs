@@ -115,15 +115,14 @@ impl Config {
             }
         }
         let fresh = uuid::Uuid::new_v4().simple().to_string()[..16].to_string();
-        if fs::create_dir_all(dir).is_ok() {
-            if fs::write(&p, &fresh).is_ok() {
+        if fs::create_dir_all(dir).is_ok()
+            && fs::write(&p, &fresh).is_ok() {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
                     let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
                 }
             }
-        }
         fresh
     }
 
@@ -240,7 +239,7 @@ impl Config {
             let is_cookie = path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map_or(false, |n| n.starts_with("cookies_") && n.ends_with(".txt"));
+                .is_some_and(|n| n.starts_with("cookies_") && n.ends_with(".txt"));
             if !is_cookie {
                 continue;
             }
@@ -249,7 +248,7 @@ impl Config {
                 .ok()
                 .and_then(|md| md.modified().ok())
                 .and_then(|m| m.elapsed().ok())
-                .map_or(false, |age| age > max_age);
+                .is_some_and(|age| age > max_age);
             if stale && fs::remove_file(&path).is_ok() {
                 removed += 1;
             }
@@ -363,7 +362,7 @@ pub fn is_valid_proxy_url(s: &str) -> bool {
             matches!(
                 u.scheme(),
                 "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
-            ) && u.host_str().map_or(false, |h| !h.is_empty())
+            ) && u.host_str().is_some_and(|h| !h.is_empty())
         }
         Err(_) => false,
     }

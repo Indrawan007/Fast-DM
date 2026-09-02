@@ -30,11 +30,16 @@ jobs:
             libgtk-4-dev \
             aria2 \
             xvfb  # untuk GUI smoke test (jika ditambah nanti)
+      - name: Clippy (advisory dulu — see note)
+        # Kalau `cargo clippy --all-targets -- -D warnings` sudah hijau di
+        # mesin dev, HAPUS continue-on-error untuk menjadikannya gate blocking.
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Cache cargo registry & build artifacts
         uses: Swatinem/rust-cache@v2
@@ -49,6 +54,14 @@ jobs:
         # Kalau Anda ingin advisory dulu, ganti `--check` → `cargo fmt`
         # (auto-format) atau hapus step ini.
         run: cargo fmt --all -- --check
+
+      - name: Clippy (advisory dulu — see note)
+        # v2.8.1 (CI clippy): advisory agar CI tidak merah sebelum codebase
+        # bersih. Kalau `cargo clippy --all-targets -- -D warnings` sudah
+        # hijau di mesin dev, HAPUS baris `continue-on-error` ini untuk
+        # menjadikannya gate blocking.
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Run all tests (unit + integration)
         # P0 fix: 97 unit test + integration test di tests/find_cookies.rs.

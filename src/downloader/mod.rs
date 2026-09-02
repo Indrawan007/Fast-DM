@@ -151,7 +151,7 @@ impl DownloadEngine {
         headers: HashMap<String, String>,
         quality: Option<String>,
     ) -> String {
-        let id = format!("dl_{}", Uuid::new_v4().to_string()[..8].to_string());
+        let id = format!("dl_{}", &Uuid::new_v4().to_string()[..8]);
         let save = match save_dir {
             Some(d) => d.to_string(),
             None => self.config.read().await.download_dir.clone(),
@@ -161,7 +161,7 @@ impl DownloadEngine {
         let _ = std::fs::create_dir_all(&save);
 
         let fname = filename
-            .map(|f| sanitize_filename(f))
+            .map(sanitize_filename)
             .unwrap_or_else(|| extract_filename_from_url(url));
 
         // Deduplikasi: download live (url+dir+file sama) → kembalikan yang sudah ada.
@@ -569,7 +569,7 @@ async fn promote_next(
                 DownloadStatus::Queued => {
                     queued += 1;
                     let key = (i.created, i.id.clone());
-                    if oldest.as_ref().map_or(true, |(k, _)| key < *k) {
+                    if oldest.as_ref().is_none_or(|(k, _)| key < *k) {
                         oldest = Some((key, info.clone()));
                     }
                 }
@@ -695,7 +695,7 @@ fn cleanup_orphan_aria2_inputs() {
             let ours = path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map_or(false, |n| n.starts_with("aria2-") && n.ends_with(".txt"));
+                .is_some_and(|n| n.starts_with("aria2-") && n.ends_with(".txt"));
             if ours {
                 let _ = std::fs::remove_file(&path);
             }

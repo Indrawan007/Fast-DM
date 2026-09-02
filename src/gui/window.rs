@@ -1083,7 +1083,7 @@ where
             move |res| {
                 if let Ok(file) = res {
                     if let Some(path) = file.path() {
-                        entry.set_text(&path.to_string_lossy().to_string());
+                        entry.set_text(path.to_string_lossy().as_ref());
                     }
                 }
             },
