@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Fast Download Manager",
-  "version": "2.8.0",
+  "version": "2.8.1",
   "description": "Intercept downloads and send to Fast DM for maximum speed",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApdj71DkdEpTkSpIvr11z1ojBnNRg3xmWEAk0VMwqeNjXWeldDBVqJYMP4a6Qaq5ORuFgmEx8eC7v9yuFoFiChudWU4WcbtlF8+9tjHrPrkMvQDX28N1bBx6y4/vopzxtU2elKIeQ8MI+NwIMkeVLlxC9Xzhnjxqwk9upu5hoRbB6N5OxdgsNexCoBtFQzMdtcBhfXwwMAd2T7vrOABMAuVltMZrsZshpilXF6zYfLHJJ1N8g/CpijUzYL8xTwzukAhjSbC1tOAJRW6RTQAtYgCsikl8vUS+0MsMwFyCW55/uGDcrnmaw/bYG/utazairEBqRrr+1ezvhNzagD+cf7QIDAQAB",
   "permissions": [

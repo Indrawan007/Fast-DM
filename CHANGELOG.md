@@ -3,6 +3,22 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.8.1] - 2026-09-03
+
+### Changed — kebersihan kode + gerbang lint CI (roadmap "CI clippy")
+- `cargo clippy --fix` menyapu lint mekanis (map_or ×10, collapsible-if ×4,
+  useless_conversion, redundant_closure, dsb.).
+- Manual: alias tipe `SharedInfo`/`DownloadMap` (type_complexity, 7
+  signature), `#[derive(Default)]` FastDmApp, helper clipboard dipindah ke
+  sebelum `mod tests` (items_after_test), clone dihapus dari `DownloadStatus`
+  (Copy), test daemon_args → struct-update literal.
+- Dok: pemisah baris kosong antara list dan paragraf menyusul (doc-list
+  indentation).
+- CI (`ci.yml`, diterapkan manual — sandbox tanpa izin workflows): komponen
+  clippy + step `cargo clippy --all-targets -- -D warnings` advisory
+  (continue-on-error). Flip menjadi gate blocking = hapus 1 baris tsb.
+- Nol perubahan perilaku; jumlah test tetap 134.
+
 ## [2.8.0] - 2026-09-03
 
 ### Added — D8.1: minimize-to-close & autostart (tanpa dependensi baru)
