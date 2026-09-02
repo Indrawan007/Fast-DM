@@ -38,8 +38,8 @@ pub fn run() {
         // Read 4-byte length
         let mut len_buf = [0u8; 4];
         match stdin.read_exact(&mut len_buf) {
-            Ok(_) => {},
-            Err(_) => break,  // EOF atau error → exit
+            Ok(_) => {}
+            Err(_) => break, // EOF atau error → exit
         }
 
         let msg_len = u32::from_le_bytes(len_buf) as usize;
@@ -70,9 +70,15 @@ pub fn run() {
         };
 
         let len = (resp_bytes.len() as u32).to_le_bytes();
-        if stdout.write_all(&len).is_err() { break; }
-        if stdout.write_all(&resp_bytes).is_err() { break; }
-        if stdout.flush().is_err() { break; }
+        if stdout.write_all(&len).is_err() {
+            break;
+        }
+        if stdout.write_all(&resp_bytes).is_err() {
+            break;
+        }
+        if stdout.flush().is_err() {
+            break;
+        }
     }
 }
 
@@ -87,13 +93,15 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
                         error: None,
                     },
                     Err(e) => NativeResponse {
-                        success: false, message: None,
+                        success: false,
+                        message: None,
                         error: Some(e.to_string()),
                     },
                 }
             } else {
                 NativeResponse {
-                    success: false, message: None,
+                    success: false,
+                    message: None,
                     error: Some("No extension_id".into()),
                 }
             }
@@ -117,7 +125,7 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
                     // native messaging.
 
                     let _ = std::process::Command::new(&gui_path)
-                        .process_group(0)  // New process group
+                        .process_group(0) // New process group
                         .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
@@ -143,12 +151,14 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
 
                     if ready {
                         forward_to_gui(&socket_path, &msg).unwrap_or(NativeResponse {
-                            success: false, message: None,
+                            success: false,
+                            message: None,
                             error: Some("Cannot reach GUI".into()),
                         })
                     } else {
                         NativeResponse {
-                            success: false, message: None,
+                            success: false,
+                            message: None,
                             error: Some(format!(
                                 "Cannot reach GUI: Fast DM tidak bisa dijalankan ({})",
                                 e
@@ -180,17 +190,23 @@ fn resolve_gui_path() -> String {
     "/opt/fast-dm/fast-dm".to_string()
 }
 
-fn forward_to_gui(socket_path: &std::path::Path, msg: &NativeMessage) -> Result<NativeResponse, String> {
+fn forward_to_gui(
+    socket_path: &std::path::Path,
+    msg: &NativeMessage,
+) -> Result<NativeResponse, String> {
     use std::io::BufRead;
     use std::os::unix::net::UnixStream;
 
-    let mut stream = UnixStream::connect(socket_path)
-        .map_err(|e| e.to_string())?;
+    let mut stream = UnixStream::connect(socket_path).map_err(|e| e.to_string())?;
 
     // Timeout supaya native host tidak hang selamanya jika GUI macet
     let timeout = Some(std::time::Duration::from_secs(5));
-    stream.set_read_timeout(timeout).map_err(|e| e.to_string())?;
-    stream.set_write_timeout(timeout).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(timeout)
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(timeout)
+        .map_err(|e| e.to_string())?;
 
     let json = serde_json::to_string(&serde_json::json!({
         "action": msg.action,
@@ -202,9 +218,12 @@ fn forward_to_gui(socket_path: &std::path::Path, msg: &NativeMessage) -> Result<
         "headers": msg.headers,
         "cookies": msg.cookies,
         "domain": msg.domain,
-    })).unwrap();
+    }))
+    .unwrap();
 
-    stream.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(json.as_bytes())
+        .map_err(|e| e.to_string())?;
     stream.write_all(b"\n").map_err(|e| e.to_string())?;
     stream.flush().map_err(|e| e.to_string())?;
 
@@ -214,15 +233,26 @@ fn forward_to_gui(socket_path: &std::path::Path, msg: &NativeMessage) -> Result<
     reader.read_line(&mut line).map_err(|e| e.to_string())?;
 
     if line.is_empty() {
-        return Ok(NativeResponse { success: true, message: None, error: None });
+        return Ok(NativeResponse {
+            success: true,
+            message: None,
+            error: None,
+        });
     }
 
     let resp: serde_json::Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-    let success = resp.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
+    let success = resp
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
     Ok(NativeResponse {
         success,
-        message: resp.get("message").and_then(|v| v.as_str().map(|s| s.to_string())),
-        error: resp.get("error").and_then(|v| v.as_str().map(|s| s.to_string())),
+        message: resp
+            .get("message")
+            .and_then(|v| v.as_str().map(|s| s.to_string())),
+        error: resp
+            .get("error")
+            .and_then(|v| v.as_str().map(|s| s.to_string())),
     })
 }

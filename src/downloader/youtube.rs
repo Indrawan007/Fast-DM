@@ -6,10 +6,15 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio::sync::{mpsc, Mutex};
 
-static RE_YTDLP_PROGRESS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[download\]\s+(\d+\.?\d*)%\s+of\s+~?\s*(\S+)\s+at\s+(\S+)\s+ETA\s+(\S+)").unwrap());
-static RE_YTDLP_PROGRESS2: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[download\]\s+(\d+\.?\d*)%").unwrap());
-static RE_YTDLP_DEST: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[download\]\s+Destination:\s+(.+)").unwrap());
-static RE_YTDLP_MERGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[Merger\]|\[ffmpeg\]|Merging").unwrap());
+static RE_YTDLP_PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[download\]\s+(\d+\.?\d*)%\s+of\s+~?\s*(\S+)\s+at\s+(\S+)\s+ETA\s+(\S+)").unwrap()
+});
+static RE_YTDLP_PROGRESS2: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[download\]\s+(\d+\.?\d*)%").unwrap());
+static RE_YTDLP_DEST: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[download\]\s+Destination:\s+(.+)").unwrap());
+static RE_YTDLP_MERGE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[Merger\]|\[ffmpeg\]|Merging").unwrap());
 static RE_SPEED_PARSE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([\d.]+)\s*(\S+)").unwrap());
 
 /// v2.3.0 (M6): deteksi host-based menggantikan regex lama yang menuntut
@@ -59,8 +64,7 @@ pub fn is_youtube_url(url: &str) -> bool {
 /// ter-install.
 /// Di-cache per-sesi: mendeteksi browser (spawn xdg-settings + stat folder)
 /// tidak perlu diulang untuk setiap download.
-static BROWSER: LazyLock<Option<&'static str>> =
-    LazyLock::new(detect_browser_inner);
+static BROWSER: LazyLock<Option<&'static str>> = LazyLock::new(detect_browser_inner);
 
 fn detect_browser() -> Option<&'static str> {
     *BROWSER
@@ -69,18 +73,18 @@ fn detect_browser() -> Option<&'static str> {
 fn detect_browser_inner() -> Option<&'static str> {
     let home = dirs::home_dir()?;
     let candidates = [
-        ("chrome",   ".config/google-chrome"),
+        ("chrome", ".config/google-chrome"),
         ("chromium", ".config/chromium"),
-        ("edge",     ".config/microsoft-edge"),
-        ("firefox",  ".mozilla/firefox"),
-        ("brave",    ".config/BraveSoftware/Brave-Browser"),
-        ("opera",    ".config/opera"),
-        ("vivaldi",  ".config/vivaldi"),
+        ("edge", ".config/microsoft-edge"),
+        ("firefox", ".mozilla/firefox"),
+        ("brave", ".config/BraveSoftware/Brave-Browser"),
+        ("opera", ".config/opera"),
+        ("vivaldi", ".config/vivaldi"),
         // Thorium menggunakan format Chromium
         ("chromium", ".config/thorium"),
     ];
 
-    if let Ok(out) = std::process::Command::new("xdg-settings")     // B17
+    if let Ok(out) = std::process::Command::new("xdg-settings") // B17
         .args(["get", "default-web-browser"])
         .output()
     {
@@ -96,7 +100,6 @@ fn detect_browser_inner() -> Option<&'static str> {
         }
     }
 
-
     for (name, path) in &candidates {
         if home.join(path).is_dir() {
             return Some(*name);
@@ -107,14 +110,30 @@ fn detect_browser_inner() -> Option<&'static str> {
 
 /// Nama file .desktop browser default → nama browser yt-dlp
 fn desktop_to_browser(desktop: &str) -> Option<&'static str> {
-    if desktop.contains("google-chrome") { return Some("chrome"); }
-    if desktop.contains("microsoft-edge") { return Some("edge"); }
-    if desktop.contains("thorium") { return Some("chromium"); }
-    if desktop.contains("chromium") { return Some("chromium"); }
-    if desktop.contains("firefox") { return Some("firefox"); }
-    if desktop.contains("brave") { return Some("brave"); }
-    if desktop.contains("opera") { return Some("opera"); }
-    if desktop.contains("vivaldi") { return Some("vivaldi"); }
+    if desktop.contains("google-chrome") {
+        return Some("chrome");
+    }
+    if desktop.contains("microsoft-edge") {
+        return Some("edge");
+    }
+    if desktop.contains("thorium") {
+        return Some("chromium");
+    }
+    if desktop.contains("chromium") {
+        return Some("chromium");
+    }
+    if desktop.contains("firefox") {
+        return Some("firefox");
+    }
+    if desktop.contains("brave") {
+        return Some("brave");
+    }
+    if desktop.contains("opera") {
+        return Some("opera");
+    }
+    if desktop.contains("vivaldi") {
+        return Some("vivaldi");
+    }
     None
 }
 
@@ -182,19 +201,27 @@ pub(crate) fn quality_args(quality: Option<&str>) -> Vec<String> {
             let h = &q[..q.len() - 1];
             vec![
                 "--format".into(),
-                format!("bestvideo[height<={}]+bestaudio/best[height<={}]/best", h, h),
+                format!(
+                    "bestvideo[height<={}]+bestaudio/best[height<={}]/best",
+                    h, h
+                ),
             ]
         }
         Some("audio_best") => vec![
-            "--format".into(), "bestaudio/best".into(),
+            "--format".into(),
+            "bestaudio/best".into(),
             "--extract-audio".into(),
-            "--audio-format".into(), "m4a".into(),
+            "--audio-format".into(),
+            "m4a".into(),
         ],
         Some("audio_mp3") => vec![
-            "--format".into(), "bestaudio/best".into(),
+            "--format".into(),
+            "bestaudio/best".into(),
             "--extract-audio".into(),
-            "--audio-format".into(), "mp3".into(),
-            "--audio-quality".into(), "0".into(),
+            "--audio-format".into(),
+            "mp3".into(),
+            "--audio-quality".into(),
+            "0".into(),
         ],
         _ => vec![
             "--format".into(),
@@ -238,9 +265,12 @@ pub async fn download(
         "--no-colors".into(),
         "--no-overwrites".into(),
         "--continue".into(),
-        "--socket-timeout".into(), "15".into(),
-        "--retries".into(), "5".into(),
-        "--merge-output-format".into(), "mp4".into(),
+        "--socket-timeout".into(),
+        "15".into(),
+        "--retries".into(),
+        "5".into(),
+        "--merge-output-format".into(),
+        "mp4".into(),
         "--embed-thumbnail".into(),
         "--embed-metadata".into(),
     ]);
@@ -425,10 +455,7 @@ pub(crate) async fn run_ytdlp(
 
     let mut i = info.lock().await;
     i.pid = None;
-    if matches!(
-        i.status,
-        DownloadStatus::Cancelled | DownloadStatus::Paused
-    ) {
+    if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
         return false;
     }
 
@@ -460,10 +487,7 @@ pub(crate) async fn run_ytdlp(
 
 /// Parse ETA yt-dlp ("MM:SS" atau "HH:MM:SS") → detik
 fn parse_eta_hms(s: &str) -> u64 {
-    let nums: Vec<u64> = s
-        .split(':')
-        .filter_map(|p| p.trim().parse().ok())
-        .collect();
+    let nums: Vec<u64> = s.split(':').filter_map(|p| p.trim().parse().ok()).collect();
     match nums.len() {
         3 => nums[0] * 3600 + nums[1] * 60 + nums[2],
         2 => nums[0] * 60 + nums[1],
@@ -476,13 +500,25 @@ fn parse_speed(s: &str) -> u64 {
     if let Some(m) = RE_SPEED_PARSE.captures(s) {
         let val: f64 = m[1].parse().unwrap_or(0.0);
         let unit = m[2].to_lowercase();
-        if unit.contains("gib") { return (val * 1073741824.0) as u64; }
-        if unit.contains("mib") { return (val * 1048576.0) as u64; }
-        if unit.contains("kib") { return (val * 1024.0) as u64; }
-       // Format lama/alternatif: "2.5M/s", "500K/s", "1.2G/s"
-        if unit.starts_with('g') { return (val * 1073741824.0) as u64; }
-        if unit.starts_with('m') { return (val * 1048576.0) as u64; }
-        if unit.starts_with('k') { return (val * 1024.0) as u64; }
+        if unit.contains("gib") {
+            return (val * 1073741824.0) as u64;
+        }
+        if unit.contains("mib") {
+            return (val * 1048576.0) as u64;
+        }
+        if unit.contains("kib") {
+            return (val * 1024.0) as u64;
+        }
+        // Format lama/alternatif: "2.5M/s", "500K/s", "1.2G/s"
+        if unit.starts_with('g') {
+            return (val * 1073741824.0) as u64;
+        }
+        if unit.starts_with('m') {
+            return (val * 1048576.0) as u64;
+        }
+        if unit.starts_with('k') {
+            return (val * 1024.0) as u64;
+        }
         return val as u64;
     }
     0
@@ -598,10 +634,7 @@ mod tests {
     #[test]
     fn output_template_with_explicit_filename() {
         // File dengan ekstensi → pakai sebagai out, escape %
-        assert_eq!(
-            output_template("/tmp", "video.mp4"),
-            "/tmp/video.mp4"
-        );
+        assert_eq!(output_template("/tmp", "video.mp4"), "/tmp/video.mp4");
     }
 
     #[test]
@@ -691,10 +724,7 @@ mod tests {
         assert_eq!(desktop_to_browser("brave-browser.desktop"), Some("brave"));
         assert_eq!(desktop_to_browser("opera.desktop"), Some("opera"));
         assert_eq!(desktop_to_browser("vivaldi.desktop"), Some("vivaldi"));
-        assert_eq!(
-            desktop_to_browser("microsoft-edge.desktop"),
-            Some("edge")
-        );
+        assert_eq!(desktop_to_browser("microsoft-edge.desktop"), Some("edge"));
     }
 
     #[test]

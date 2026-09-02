@@ -1,7 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GtkBox, Button, CheckButton, Dialog, Label,
-    Orientation, ResponseType, ScrolledWindow, Window,
+    Box as GtkBox, Button, CheckButton, Dialog, Label, Orientation, ResponseType, ScrolledWindow,
+    Window,
 };
 
 #[allow(dead_code)]
@@ -13,15 +13,51 @@ pub struct QualityOption {
 
 #[allow(dead_code)]
 pub const QUALITIES: &[QualityOption] = &[
-    QualityOption { id: "best_mp4", label: "Best Quality (MP4)",  desc: "Highest resolution" },
-    QualityOption { id: "2160p",    label: "4K Ultra HD",         desc: "3840x2160" },
-    QualityOption { id: "1440p",    label: "2K QHD",              desc: "2560x1440" },
-    QualityOption { id: "1080p",    label: "1080p Full HD",       desc: "1920x1080" },
-    QualityOption { id: "720p",     label: "720p HD",             desc: "1280x720" },
-    QualityOption { id: "480p",     label: "480p SD",             desc: "854x480" },
-    QualityOption { id: "360p",     label: "360p Low",            desc: "640x360" },
-    QualityOption { id: "audio_best", label: "Audio M4A",         desc: "Best quality" },
-    QualityOption { id: "audio_mp3",  label: "Audio MP3",         desc: "320kbps" },
+    QualityOption {
+        id: "best_mp4",
+        label: "Best Quality (MP4)",
+        desc: "Highest resolution",
+    },
+    QualityOption {
+        id: "2160p",
+        label: "4K Ultra HD",
+        desc: "3840x2160",
+    },
+    QualityOption {
+        id: "1440p",
+        label: "2K QHD",
+        desc: "2560x1440",
+    },
+    QualityOption {
+        id: "1080p",
+        label: "1080p Full HD",
+        desc: "1920x1080",
+    },
+    QualityOption {
+        id: "720p",
+        label: "720p HD",
+        desc: "1280x720",
+    },
+    QualityOption {
+        id: "480p",
+        label: "480p SD",
+        desc: "854x480",
+    },
+    QualityOption {
+        id: "360p",
+        label: "360p Low",
+        desc: "640x360",
+    },
+    QualityOption {
+        id: "audio_best",
+        label: "Audio M4A",
+        desc: "Best quality",
+    },
+    QualityOption {
+        id: "audio_mp3",
+        label: "Audio MP3",
+        desc: "320kbps",
+    },
 ];
 
 #[allow(dead_code)]

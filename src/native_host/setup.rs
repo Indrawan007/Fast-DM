@@ -148,7 +148,11 @@ pub fn register_extension_id(ext_id: &str) -> Result<usize, Box<dyn std::error::
     let json_str = serde_json::to_string_pretty(&host_json)?;
     let updated = write_manifests(&json_str);
 
-    tracing::info!("Extension ID registered: {} ({} manifests)", ext_id, updated);
+    tracing::info!(
+        "Extension ID registered: {} ({} manifests)",
+        ext_id,
+        updated
+    );
     Ok(updated)
 }
 
@@ -173,9 +177,9 @@ pub fn resolve_native_path() -> String {
             let in_target = parent
                 .file_name()
                 .map_or(false, |p| p == "debug" || p == "release")
-                && parent
-                    .parent()
-                    .map_or(false, |p| p.file_name() == Some(std::ffi::OsStr::new("target")));
+                && parent.parent().map_or(false, |p| {
+                    p.file_name() == Some(std::ffi::OsStr::new("target"))
+                });
             if in_target {
                 let _ = fs::write(
                     &candidate,
@@ -217,7 +221,7 @@ fn get_all_nmh_dirs() -> Vec<PathBuf> {
         "yandex-browser",
         "sidekick",
         "helium",
-        "net.imput.helium",  // Helium Flatpak
+        "net.imput.helium", // Helium Flatpak
     ];
 
     for browser in &browsers {

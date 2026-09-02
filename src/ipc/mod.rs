@@ -53,10 +53,7 @@ fn cleanup_legacy_socket() {
 /// Permission socket 0600 sudah membatasi, tapi bila parent dir pernah salah
 /// mode (mis. hasil versi lama / home di-share), peer-cred tetap menutup celah.
 fn peer_uid_ok(stream: &tokio::net::UnixStream) -> bool {
-    match nix::sys::socket::getsockopt(
-        stream,
-        nix::sys::socket::sockopt::PeerCredentials,
-    ) {
+    match nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials) {
         // Ucred::uid() mengembalikan uid_t (u32), bukan Uid — bandingkan raw.
         Ok(cred) => cred.uid() == nix::unistd::getuid().as_raw(),
         Err(_) => false,
@@ -148,10 +145,14 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
         "download" => {
             let url = match msg.url {
                 Some(u) if !u.is_empty() => u,
-                _ => return IpcResponse {
-                    success: false, id: None,
-                    error: Some("No URL".into()), message: None,
-                },
+                _ => {
+                    return IpcResponse {
+                        success: false,
+                        id: None,
+                        error: Some("No URL".into()),
+                        message: None,
+                    }
+                }
             };
 
             // Tulis cookies.txt SEBELUM download start (yt-dlp membacanya saat spawn)
@@ -162,7 +163,14 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
             }
 
             let id = engine
-                .add_download(&url, msg.filename.as_deref(), None, true, msg.headers, msg.quality)
+                .add_download(
+                    &url,
+                    msg.filename.as_deref(),
+                    None,
+                    true,
+                    msg.headers,
+                    msg.quality,
+                )
                 .await;
 
             IpcResponse {
@@ -174,7 +182,9 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
         }
 
         "ping" => IpcResponse {
-            success: true, id: None, error: None,
+            success: true,
+            id: None,
+            error: None,
             message: Some("running".into()),
         },
 
@@ -182,38 +192,56 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
             if let Some(id) = msg.id {
                 engine.pause_download(&id).await;
             }
-            IpcResponse { success: true, id: None, error: None, message: None }
+            IpcResponse {
+                success: true,
+                id: None,
+                error: None,
+                message: None,
+            }
         }
 
         "resume" => {
             if let Some(id) = msg.id {
                 engine.resume_download(&id).await;
             }
-            IpcResponse { success: true, id: None, error: None, message: None }
+            IpcResponse {
+                success: true,
+                id: None,
+                error: None,
+                message: None,
+            }
         }
 
         "cancel" => {
             if let Some(id) = msg.id {
                 engine.cancel_download(&id).await;
             }
-            IpcResponse { success: true, id: None, error: None, message: None }
+            IpcResponse {
+                success: true,
+                id: None,
+                error: None,
+                message: None,
+            }
         }
 
         "list" => {
             let downloads = engine.get_all_downloads().await;
-            let list: Vec<serde_json::Value> = downloads.iter().map(|d| {
-                serde_json::json!({
-                    "id": d.id,
-                    "url": d.url,
-                    "filename": d.filename,
-                    "status": d.status.to_string(),
-                    "progress": d.progress,
-                    "speed": d.speed,
-                    "total_size": d.total_size,
-                    "downloaded": d.downloaded,
-                    "error_msg": d.error_msg,
+            let list: Vec<serde_json::Value> = downloads
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "id": d.id,
+                        "url": d.url,
+                        "filename": d.filename,
+                        "status": d.status.to_string(),
+                        "progress": d.progress,
+                        "speed": d.speed,
+                        "total_size": d.total_size,
+                        "downloaded": d.downloaded,
+                        "error_msg": d.error_msg,
+                    })
                 })
-            }).collect();
+                .collect();
 
             IpcResponse {
                 success: true,
@@ -227,24 +255,31 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
             if let Some(ext_id) = msg.extension_id {
                 match crate::native_host::setup::register_extension_id(&ext_id) {
                     Ok(count) => IpcResponse {
-                        success: true, id: None, error: None,
+                        success: true,
+                        id: None,
+                        error: None,
                         message: Some(format!("Registered {} manifests", count)),
                     },
                     Err(e) => IpcResponse {
-                        success: false, id: None,
-                        error: Some(e.to_string()), message: None,
+                        success: false,
+                        id: None,
+                        error: Some(e.to_string()),
+                        message: None,
                     },
                 }
             } else {
                 IpcResponse {
-                    success: false, id: None,
-                    error: Some("No extension_id".into()), message: None,
+                    success: false,
+                    id: None,
+                    error: Some("No extension_id".into()),
+                    message: None,
                 }
             }
         }
 
         _ => IpcResponse {
-            success: false, id: None,
+            success: false,
+            id: None,
             error: Some(format!("Unknown action: {}", msg.action)),
             message: None,
         },

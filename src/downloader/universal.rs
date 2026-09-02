@@ -89,13 +89,16 @@ pub async fn download(
         "--no-colors".into(),
         "--no-overwrites".into(),
         "--continue".into(),
-        "--socket-timeout".into(), "15".into(),
-        "--retries".into(), "5".into(),
-        "--merge-output-format".into(), "mp4".into(),
+        "--socket-timeout".into(),
+        "15".into(),
+        "--retries".into(),
+        "5".into(),
+        "--merge-output-format".into(),
+        "mp4".into(),
     ]);
 
     // Cookies (dari cookies.txt / browser) + Referer & header kustom extension
-   cmd.extend(cookie_args(&url));
+    cmd.extend(cookie_args(&url));
     for (k, v) in &headers {
         let k = k.replace(['\r', '\n'], "");
         let v = v.replace(['\r', '\n'], "");

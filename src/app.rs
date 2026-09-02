@@ -1,11 +1,11 @@
-use crate::downloader::{DownloadEngine, types::DownloadEvent};
+use crate::downloader::{types::DownloadEvent, DownloadEngine};
 use crate::gui;
 use crate::ipc;
 
 use gtk4::prelude::*;
 use gtk4::Application;
-use tokio::sync::mpsc;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 // ID unik yang tidak akan collide dengan app lain
 const APP_ID: &str = "io.github.fastdm.FastDownloadManager";
@@ -48,9 +48,7 @@ impl FastDmApp {
             let rt = init.rt;
             let rt_handle = init.rt_handle.clone();
 
-            let engine = Arc::new(
-                rt.block_on(async { DownloadEngine::new(event_tx) })
-            );
+            let engine = Arc::new(rt.block_on(async { DownloadEngine::new(event_tx) }));
 
             let engine_ipc = engine.clone();
             let rt_handle_ipc = rt_handle.clone();
@@ -101,10 +99,7 @@ impl AppInit {
                 .thread_name("fastdm-worker")
                 .build()
                 .map_err(|e| {
-                    format!(
-                        "Gagal membuat Tokio runtime (ulimit thread rendah?): {}",
-                        e
-                    )
+                    format!("Gagal membuat Tokio runtime (ulimit thread rendah?): {}", e)
                 })?,
         ));
         Ok(Self {
@@ -134,5 +129,3 @@ mod tests {
         let _ = f;
     }
 }
-
-

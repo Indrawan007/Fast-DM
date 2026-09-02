@@ -51,8 +51,7 @@ fn make_tempdir() -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let dir = std::env::temp_dir()
-        .join(format!("fast-dm-test-{}-{}-{}", pid, counter, nano));
+    let dir = std::env::temp_dir().join(format!("fast-dm-test-{}-{}-{}", pid, counter, nano));
     fs::create_dir_all(&dir).expect("create tempdir");
     dir
 }
@@ -99,9 +98,7 @@ struct EnvGuard {
 
 impl EnvGuard {
     fn new(tmp: &Path) -> Self {
-        let lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()); // recover dari poison
+        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()); // recover dari poison
         let previous = std::env::var_os("XDG_CONFIG_HOME");
         redirect_config_to(tmp);
         Self {
@@ -232,9 +229,7 @@ fn returns_none_when_no_cookie_anywhere() {
     let tmp = make_tempdir();
     let _env = EnvGuard::new(&tmp);
 
-    let found = Config::find_cookies_file(
-        "totally-nonexistent-domain-xxx-unique-9999.invalid",
-    );
+    let found = Config::find_cookies_file("totally-nonexistent-domain-xxx-unique-9999.invalid");
     assert!(found.is_none());
 
     cleanup_tempdir(&tmp);
@@ -285,11 +280,7 @@ fn case_insensitive_normalization() {
     write_cookie_file(&lower);
 
     let found = Config::find_cookies_file("EXAMPLE.COM");
-    assert_eq!(
-        found,
-        Some(lower.clone()),
-        "lookup harus case-insensitive"
-    );
+    assert_eq!(found, Some(lower.clone()), "lookup harus case-insensitive");
 
     cleanup_tempdir(&tmp);
 }

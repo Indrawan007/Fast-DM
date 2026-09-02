@@ -5,14 +5,13 @@ use crate::gui::css;
 use crate::gui::download_row::DownloadRow;
 use crate::gui::youtube_dialog;
 
-use gtk4::prelude::*;
-use gtk4::gdk::{ContentFormats, DragAction};
-use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, Button, CssProvider,
-    DropTarget, Entry, EventControllerKey, Label, ListBox, Orientation,
-    PolicyType, ScrolledWindow, SelectionMode,
-};
 use glib;
+use gtk4::gdk::{ContentFormats, DragAction};
+use gtk4::prelude::*;
+use gtk4::{
+    Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, DropTarget, Entry,
+    EventControllerKey, Label, ListBox, Orientation, PolicyType, ScrolledWindow, SelectionMode,
+};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -27,7 +26,6 @@ pub fn build_window(
     gui_tx: mpsc::UnboundedSender<DownloadEvent>,
     rt: tokio::runtime::Handle,
 ) {
-
     // Load CSS — scoped ke window saja
     let provider = CssProvider::new();
     provider.load_from_string(css::THEME_CSS);
@@ -54,7 +52,7 @@ pub fn build_window(
     title.add_css_class("header-title");
 
     // B5: subtitle berisi info berguna → versi aplikasi
-     // (dinamis dari Cargo.toml — tidak lagi hardcoded sehingga tidak
+    // (dinamis dari Cargo.toml — tidak lagi hardcoded sehingga tidak
     // pernah basi saat versi naik)
     let subtitle = Label::new(Some(&format!("v{}", env!("CARGO_PKG_VERSION"))));
     subtitle.add_css_class("header-subtitle");
@@ -158,8 +156,7 @@ pub fn build_window(
     window.set_child(Some(&root));
 
     // ── State ──
-    let rows: Rc<RefCell<HashMap<String, DownloadRow>>> =
-        Rc::new(RefCell::new(HashMap::new()));
+    let rows: Rc<RefCell<HashMap<String, DownloadRow>>> = Rc::new(RefCell::new(HashMap::new()));
 
     // Track download status for clear done
     let download_statuses: Rc<RefCell<HashMap<String, DownloadStatus>>> =
@@ -206,19 +203,13 @@ pub fn build_window(
             const PAGE_OR_STREAM_EXTS: &[&str] = &[
                 ".php", ".html", ".htm", ".asp", ".aspx", ".jsp", ".m3u8", ".mpd",
             ];
-            let no_ext =
-                path_lower.is_empty() || path_lower == "/" || !path_lower.contains('.');
+            let no_ext = path_lower.is_empty() || path_lower == "/" || !path_lower.contains('.');
             let page_or_stream =
                 PAGE_OR_STREAM_EXTS.iter().any(|e| path_lower.ends_with(e)) || no_ext;
             crate::downloader::youtube::is_youtube_url(&url) || page_or_stream
         };
         let quality = if wants_quality {
-            youtube_dialog::show_quality_dialog(
-                win_add.upcast_ref(),
-                "Pilih kualitas",
-                &url,
-                "",
-            )
+            youtube_dialog::show_quality_dialog(win_add.upcast_ref(), "Pilih kualitas", &url, "")
         } else {
             None
         };
@@ -227,9 +218,12 @@ pub fn build_window(
         let rt = rt_add.clone();
 
         glib::spawn_future_local(async move {
-            let _ = rt.spawn(async move {
-                eng.add_download(&url, None, None, true, Default::default(), quality).await
-            }).await;
+            let _ = rt
+                .spawn(async move {
+                    eng.add_download(&url, None, None, true, Default::default(), quality)
+                        .await
+                })
+                .await;
         });
     };
 
@@ -302,12 +296,12 @@ pub fn build_window(
 
     clear_btn.connect_clicked(move |_| {
         let statuses = statuses_clear.borrow();
-        let to_remove: Vec<String> = statuses.iter()
+        let to_remove: Vec<String> = statuses
+            .iter()
             .filter(|(_, status)| {
-                matches!(status,
-                    DownloadStatus::Completed |
-                    DownloadStatus::Cancelled |
-                    DownloadStatus::Error
+                matches!(
+                    status,
+                    DownloadStatus::Completed | DownloadStatus::Cancelled | DownloadStatus::Error
                 )
             })
             .map(|(id, _)| id.clone())
@@ -327,9 +321,11 @@ pub fn build_window(
             let id_for_engine = id.clone();
             let rt = rt_clear.clone();
             glib::spawn_future_local(async move {
-                let _ = rt.spawn(async move {
-                    eng.clear_download(&id_for_engine).await;
-                }).await;
+                let _ = rt
+                    .spawn(async move {
+                        eng.clear_download(&id_for_engine).await;
+                    })
+                    .await;
             });
         }
 
@@ -362,7 +358,11 @@ pub fn build_window(
             }
             // state=false → masih ada yang aktif (aksi berikutnya = Jeda)
             state.set(do_pause);
-            btn.set_label(if do_pause { "Lanjut Semua" } else { "Jeda Semua" });
+            btn.set_label(if do_pause {
+                "Lanjut Semua"
+            } else {
+                "Jeda Semua"
+            });
         });
     });
 
@@ -382,9 +382,7 @@ pub fn build_window(
 
         // Simpan ke disk + apply live; tampilkan feedback (termasuk kalau validasi gagal)
         let eng2 = engine_settings.clone();
-        let handle = rt_settings.spawn(async move {
-            eng2.update_config(cfg).await
-        });
+        let handle = rt_settings.spawn(async move { eng2.update_config(cfg).await });
         let btn_feedback = settings_btn_h.clone();
         glib::spawn_future_local(async move {
             match handle.await {
@@ -427,9 +425,9 @@ pub fn build_window(
             };
 
             // Track status
-            statuses_ev.borrow_mut().insert(
-                info.id.clone(), info.status
-            );
+            statuses_ev
+                .borrow_mut()
+                .insert(info.id.clone(), info.status);
 
             // Notifikasi desktop saat selesai / gagal
             match &event {
@@ -468,9 +466,7 @@ pub fn build_window(
                     let id = id_p.clone();
                     let rt = rt_p.clone();
                     glib::spawn_future_local(async move {
-                        let _ = rt.spawn(async move {
-                            eng.pause_download(&id).await
-                        }).await;
+                        let _ = rt.spawn(async move { eng.pause_download(&id).await }).await;
                     });
                 });
 
@@ -483,9 +479,9 @@ pub fn build_window(
                     let id = id_r.clone();
                     let rt = rt_r.clone();
                     glib::spawn_future_local(async move {
-                        let _ = rt.spawn(async move {
-                            eng.resume_download(&id).await
-                        }).await;
+                        let _ = rt
+                            .spawn(async move { eng.resume_download(&id).await })
+                            .await;
                     });
                 });
 
@@ -498,9 +494,9 @@ pub fn build_window(
                     let id = id_c.clone();
                     let rt = rt_c.clone();
                     glib::spawn_future_local(async move {
-                        let _ = rt.spawn(async move {
-                            eng.cancel_download(&id).await
-                        }).await;
+                        let _ = rt
+                            .spawn(async move { eng.cancel_download(&id).await })
+                            .await;
                     });
                 });
 
@@ -513,9 +509,9 @@ pub fn build_window(
                     let id = id_t.clone();
                     let rt = rt_t.clone();
                     glib::spawn_future_local(async move {
-                        let _ = rt.spawn(async move {
-                            eng.resume_download(&id).await
-                        }).await;
+                        let _ = rt
+                            .spawn(async move { eng.resume_download(&id).await })
+                            .await;
                     });
                 });
 
@@ -547,9 +543,11 @@ pub fn build_window(
                     let id = id_rm.clone();
                     let rt = rt_rm.clone();
                     glib::spawn_future_local(async move {
-                        let _ = rt.spawn(async move {
-                            eng.clear_download(&id).await;
-                        }).await;
+                        let _ = rt
+                            .spawn(async move {
+                                eng.clear_download(&id).await;
+                            })
+                            .await;
                     });
 
                     // Remove status
@@ -581,19 +579,21 @@ pub fn build_window(
                 let pa_state_l = pa_state.clone();
 
                 glib::spawn_future_local(async move {
-                    if let Ok(all) = rt.spawn(async move {
-                        eng.get_all_downloads().await
-                    }).await {
+                    if let Ok(all) = rt.spawn(async move { eng.get_all_downloads().await }).await {
                         // "Aktif" = mengunduh ATAU memproses (resolving) —
                         // konsisten dengan logika slot engine (keduanya
                         // menempati slot download bersamaan).
-                        let active: Vec<_> = all.iter()
-                            .filter(|d| matches!(
-                                d.status,
-                                DownloadStatus::Downloading | DownloadStatus::Resolving
-                            ))
+                        let active: Vec<_> = all
+                            .iter()
+                            .filter(|d| {
+                                matches!(
+                                    d.status,
+                                    DownloadStatus::Downloading | DownloadStatus::Resolving
+                                )
+                            })
                             .collect();
-                        let queued = all.iter()
+                        let queued = all
+                            .iter()
                             .filter(|d| matches!(d.status, DownloadStatus::Queued))
                             .count();
                         let total_speed: u64 = active.iter().map(|d| d.speed).sum();
@@ -608,10 +608,15 @@ pub fn build_window(
                         st.set_text(&format!("Total {}", all.len()));
 
                         // Sinkron tombol Jeda/Lanjut Semua dengan state NYATA (C3)
-                        let has_active = all.iter().any(|d| matches!(d.status,
-                            DownloadStatus::Downloading | DownloadStatus::Resolving));
-                        let has_pausable = all.iter().any(|d| matches!(d.status,
-                            DownloadStatus::Paused | DownloadStatus::Error));
+                        let has_active = all.iter().any(|d| {
+                            matches!(
+                                d.status,
+                                DownloadStatus::Downloading | DownloadStatus::Resolving
+                            )
+                        });
+                        let has_pausable = all.iter().any(|d| {
+                            matches!(d.status, DownloadStatus::Paused | DownloadStatus::Error)
+                        });
                         if has_active {
                             pa_state_l.set(false);
                             pa_btn_l.set_label("Jeda Semua");
@@ -678,11 +683,16 @@ pub fn build_window(
 
         let eng = engine_close.clone();
         let all = rt_close.block_on(async move { eng.get_all_downloads().await });
-        let active: usize = all.iter()
-            .filter(|d| matches!(d.status,
-                DownloadStatus::Downloading
-                    | DownloadStatus::Resolving
-                    | DownloadStatus::Queued))
+        let active: usize = all
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.status,
+                    DownloadStatus::Downloading
+                        | DownloadStatus::Resolving
+                        | DownloadStatus::Queued
+                )
+            })
             .count();
 
         if active == 0 {
@@ -780,13 +790,17 @@ fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
             .accept_label("Pilih")
             .build();
         let entry = folder_entry_b.clone();
-        chooser.select_folder(Some(&parent_chooser), gtk4::gio::Cancellable::NONE, move |res| {
-            if let Ok(file) = res {
-                if let Some(path) = file.path() {
-                    entry.set_text(&path.to_string_lossy().to_string());
+        chooser.select_folder(
+            Some(&parent_chooser),
+            gtk4::gio::Cancellable::NONE,
+            move |res| {
+                if let Ok(file) = res {
+                    if let Some(path) = file.path() {
+                        entry.set_text(&path.to_string_lossy().to_string());
+                    }
                 }
-            }
-        });
+            },
+        );
     });
 
     folder_row.append(&folder_entry);
@@ -824,9 +838,8 @@ fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
     content.append(&verify_tls_chk);
 
     // v2.3.0 (K5): toggle auto-resume hasil restore sesi
-    let auto_resume_chk = gtk4::CheckButton::with_label(
-        "Lanjutkan otomatis unduhan tertunda saat aplikasi dibuka",
-    );
+    let auto_resume_chk =
+        gtk4::CheckButton::with_label("Lanjutkan otomatis unduhan tertunda saat aplikasi dibuka");
     auto_resume_chk.set_active(cur.auto_resume);
     content.append(&auto_resume_chk);
 

@@ -119,7 +119,10 @@ impl Config {
     /// Cookie yang ditulis extension punya TTL 24 jam — yang menua tak akan
     /// pernah dipakai lagi (yt-dlp menolak > 2 jam), jadi buang saja.
     pub fn gc_stale_cookies() -> usize {
-        Self::gc_cookie_files_in(&Self::config_dir(), std::time::Duration::from_secs(7 * 24 * 3600))
+        Self::gc_cookie_files_in(
+            &Self::config_dir(),
+            std::time::Duration::from_secs(7 * 24 * 3600),
+        )
     }
 
     fn gc_cookie_files_in(dir: &Path, max_age: std::time::Duration) -> usize {
@@ -155,7 +158,7 @@ impl Config {
     /// B7: file cookie per-domain (cookies_<host>.txt). Per-domain supaya dua
     /// download bersamaan dari situs berbeda tidak saling menimpa cookies.
     pub fn cookies_file_for(domain: &str) -> PathBuf {
-Self::cookies_file_for_host(&Self::normalize_host(domain))
+        Self::cookies_file_for_host(&Self::normalize_host(domain))
     }
 
     /// Cari file cookie untuk host — coba host persis dulu, lalu naik ke
@@ -355,8 +358,7 @@ mod tests {
             f.write_all(b"# Netscape HTTP Cookie File\n").unwrap();
         }
         // Mundur mtime file "old" ke jaman UNIX_EPOCH+1000s (pasti > 1 jam)
-        let ft = std::fs::FileTimes::new()
-            .set_modified(UNIX_EPOCH + Duration::from_secs(1_000));
+        let ft = std::fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1_000));
         fs::File::options()
             .write(true)
             .open(&old)
@@ -388,11 +390,10 @@ mod tests {
         // JSON kosong (atau hanya sebagian field) harus fallback ke default
         // via #[serde(default)] di struct Config
         let partial = r#"{"download_dir": "/custom"}"#;
-        let c: Config = serde_json::from_str(partial)
-            .expect("field opsional harus fallback ke default");
+        let c: Config =
+            serde_json::from_str(partial).expect("field opsional harus fallback ke default");
         assert_eq!(c.download_dir, "/custom");
         // Field lain dari default impl
         assert!(c.max_connections > 0);
     }
 }
-
