@@ -75,6 +75,15 @@ pub fn build_window(
     let add_btn = Button::with_label("Unduh");
     add_btn.add_css_class("btn-download");
 
+    // v2.5.0 (D2): dialog "Simpan Sebagai…" ala IDM — tentukan folder & nama
+    // file sebelum unduhan mulai.
+    let save_as_btn = Button::with_label("Simpan Sebagai…");
+    save_as_btn.add_css_class("btn-clear");
+    save_as_btn.set_tooltip_text(Some(
+        "Pilih folder & nama file sebelum mengunduh — untuk URL video, dialog \
+         kualitas tetap menyusul",
+    ));
+
     let pause_all_btn = Button::with_label("Jeda Semua");
     pause_all_btn.add_css_class("btn-clear");
     pause_all_btn.set_tooltip_text(Some("Jeda semua unduhan aktif / lanjutkan semua"));
@@ -88,6 +97,7 @@ pub fn build_window(
 
     toolbar.append(&url_entry);
     toolbar.append(&add_btn);
+    toolbar.append(&save_as_btn);
     toolbar.append(&pause_all_btn);
     toolbar.append(&clear_btn);
     toolbar.append(&settings_btn);
@@ -200,44 +210,23 @@ pub fn build_window(
     let win_add = window.clone();
 
     let on_add = move || {
-        let url = entry_add.text().to_string().trim().to_string();
-        if url.is_empty() {
+        let raw = entry_add.text().to_string();
+        if raw.trim().is_empty() {
             return;
         }
 
-        let url = if !url.starts_with("http://")
-            && !url.starts_with("https://")
-            && !url.starts_with("ftp://")
-        {
-            format!("https://{}", url)
-        } else {
-            url
-        };
+        // v2.5.0 (D2): normalisasi & keputusan dialog kualitas di-ekstrak ke
+        // fungsi modul — dipakai bersama dengan tombol "Simpan Sebagai…".
+        let url = normalize_url_input(&raw);
 
         entry_add.set_text("");
 
         // YouTube + halaman video lain: minta pilihan kualitas langsung dari GUI
         // (IDM-like). File langsung (mp4/zip/dll) dilewati — tidak perlu dialog.
-        // (IDM-like). B20: hanya untuk URL yang memang lewat jalur yt-dlp —
-        // YouTube, manifest HLS/DASH (.m3u8/.mpd), wrapper halaman
-        // (.php/.html/...), atau URL tanpa ekstensi sama sekali.
-        // File langsung (mp4/zip/dll — jalur aria2) dilewati.
-        let wants_quality = {
-            // BUG FIX: cek ekstensi harus terhadap PATH URL saja, bukan string
-            // URL utuh — host selalu mengandung titik (contoh.com), sehingga
-            // kondisi "URL tanpa ekstensi" lama hampir tidak pernah terpenuhi.
-            let path_lower = url::Url::parse(&url)
-                .ok()
-                .map(|u| u.path().to_ascii_lowercase())
-                .unwrap_or_default();
-            const PAGE_OR_STREAM_EXTS: &[&str] = &[
-                ".php", ".html", ".htm", ".asp", ".aspx", ".jsp", ".m3u8", ".mpd",
-            ];
-            let no_ext = path_lower.is_empty() || path_lower == "/" || !path_lower.contains('.');
-            let page_or_stream =
-                PAGE_OR_STREAM_EXTS.iter().any(|e| path_lower.ends_with(e)) || no_ext;
-            crate::downloader::youtube::is_youtube_url(&url) || page_or_stream
-        };
+        // (B20: hanya URL yang memang lewat jalur yt-dlp — YouTube, manifest
+        // HLS/DASH, wrapper halaman, atau URL tanpa ekstensi. Logika persis di
+        // wants_quality_dialog.)
+        let wants_quality = wants_quality_dialog(&url);
         let eng = engine_add.clone();
         let rt = rt_add.clone();
 
@@ -352,6 +341,105 @@ pub fn build_window(
             lbl_t.set_text(&format!("📋 URL terdeteksi di clipboard: {}", txt));
             ban_t.set_visible(true);
             glib::ControlFlow::Continue
+        });
+    }
+
+    // ── v2.5.0 (D2): Simpan Sebagai… — folder + nama file dulu, baru unduh ──
+    {
+        let win_ref = window.clone();
+        let engine_ref = engine.clone();
+        let rt_ref = rt.clone();
+        let entry_sa = url_entry.clone();
+        save_as_btn.connect_clicked(move |_| {
+            let raw = entry_sa.text().to_string();
+            if raw.trim().is_empty() {
+                // Paritas dengan tombol Unduh: kosong → tidak ada aksi
+                return;
+            }
+            let url = normalize_url_input(&raw);
+            let suggested = crate::downloader::extract_filename_from_url(&url);
+            // Folder awal = download_dir dari config (block_on aman di main
+            // thread — pola sama seperti handler settings/clipboard).
+            let eng0 = engine_ref.clone();
+            let cfg = rt_ref.block_on(async move { eng0.get_config().await });
+            let start_dir = cfg.download_dir.clone();
+
+            let dlg = gtk4::FileDialog::builder()
+                .title("Simpan sebagai…")
+                .accept_label("Simpan")
+                .initial_name(suggested.as_str())
+                .initial_folder(&gtk4::gio::File::for_path(&start_dir))
+                .modal(true)
+                .build();
+
+            // win_parent untuk argumen &-borrow; win_cb untuk dialog kualitas
+            // di DALAM callback — satu variabel tidak bisa dipakai keduanya
+            // (borrow + move pada expression yang sama).
+            let win_parent = win_ref.clone();
+            let win_cb = win_ref.clone();
+            let engine_cb = engine_ref.clone();
+            let rt_cb = rt_ref.clone();
+            let entry_cb = entry_sa.clone();
+            let url = url.clone();
+            dlg.save_file(
+                Some(&win_parent),
+                gtk4::gio::Cancellable::NONE,
+                move |res| {
+                    let Ok(file) = res else { return }; // batal → tidak ada aksi
+                    let Some(path) = file.path() else { return };
+                    let Some(fname) = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_string())
+                    else {
+                        return;
+                    };
+                    let dir = path
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or(start_dir);
+                    entry_cb.set_text(""); // UI bersih seperti alur Unduh normal
+
+                    // v2.3.2 lesson (E0382/'static): callback dialog disimpan
+                    // sampai respons user — maka closure `start` wajib MEMILIKI
+                    // datanya sendiri (bukan meminjam url/fname/dir lokal).
+                    let eng = engine_cb.clone();
+                    let rt = rt_cb.clone();
+                    let url_for_start = url.clone();
+                    let start = move |quality: Option<String>| {
+                        let eng = eng.clone();
+                        let rt = rt.clone();
+                        let url = url_for_start.clone();
+                        glib::spawn_future_local(async move {
+                            let _ = rt
+                                .spawn(async move {
+                                    eng.add_download(
+                                        &url,
+                                        Some(&fname),
+                                        Some(&dir),
+                                        true,
+                                        Default::default(),
+                                        quality,
+                                    )
+                                    .await
+                                })
+                                .await;
+                        });
+                    };
+
+                    if wants_quality_dialog(&url) {
+                        youtube_dialog::show_quality_dialog(
+                            win_cb.upcast_ref(),
+                            "Pilih kualitas",
+                            &url,
+                            "",
+                            move |q| start(Some(q)),
+                        );
+                    } else {
+                        start(None);
+                    }
+                },
+            );
         });
     }
 
@@ -1092,6 +1180,66 @@ where
         d.close();
     });
     dialog.show();
+}
+
+// ── v2.5.0 (D2): helper input URL — dipakai tombol "Unduh" & "Simpan Sebagai…" ──
+
+/// Normalisasi input user: tanpa skema → asumsikan https (perilaku lama on_add).
+pub(crate) fn normalize_url_input(raw: &str) -> String {
+    let url = raw.trim().to_string();
+    if url.starts_with("http://")
+        || url.starts_with("https://")
+        || url.starts_with("ftp://")
+    {
+        url
+    } else {
+        format!("https://{}", url)
+    }
+}
+
+/// Apakah URL ini melewati jalur yt-dlp yang butuh dialog kualitas (B20)?
+/// Ekstensi dicek terhadap PATH saja — host selalu mengandung titik, sehingga
+/// cek ke string utuh membuat kondisi "tanpa ekstensi" hampir tak terpenuhi.
+pub(crate) fn wants_quality_dialog(url: &str) -> bool {
+    let path_lower = url::Url::parse(url)
+        .ok()
+        .map(|u| u.path().to_ascii_lowercase())
+        .unwrap_or_default();
+    const PAGE_OR_STREAM_EXTS: &[&str] = &[
+        ".php", ".html", ".htm", ".asp", ".aspx", ".jsp", ".m3u8", ".mpd",
+    ];
+    let no_ext = path_lower.is_empty() || path_lower == "/" || !path_lower.contains('.');
+    let page_or_stream = PAGE_OR_STREAM_EXTS.iter().any(|e| path_lower.ends_with(e)) || no_ext;
+    crate::downloader::youtube::is_youtube_url(url) || page_or_stream
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_url_adds_https_when_scheme_missing() {
+        assert_eq!(
+            normalize_url_input("example.com/a.zip"),
+            "https://example.com/a.zip"
+        );
+        assert_eq!(normalize_url_input("  http://x/y  "), "http://x/y");
+        assert_eq!(normalize_url_input("ftp://h/f"), "ftp://h/f");
+    }
+
+    #[test]
+    fn wants_quality_skips_direct_files() {
+        assert!(!wants_quality_dialog("https://cdn.example.com/movie.mp4"));
+        assert!(!wants_quality_dialog("https://example.com/tool.zip?x=1#frag"));
+    }
+
+    #[test]
+    fn wants_quality_allows_pages_streams_youtube() {
+        assert!(wants_quality_dialog("https://vimeo.com/12345")); // tanpa ekstensi
+        assert!(wants_quality_dialog("https://site.com/live/master.m3u8"));
+        assert!(wants_quality_dialog("https://www.youtube.com/watch?v=abcdefghijk"));
+        assert!(wants_quality_dialog("https://example.com/page.php"));
+    }
 }
 
 // ── v2.4.0 (D1): helper clipboard CLI (tanpa dependensi baru) ────────────

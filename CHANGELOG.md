@@ -3,6 +3,20 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.5.0] - 2026-09-02
+
+### Added — D2: dialog "Simpan Sebagai…" (IDM-style)
+- Tombol baru di toolbar: membuka `gtk4::FileDialog::save_file` dengan nama
+  terduga dari URL + folder awal = Download dari Pengaturan; unduhan dimulai
+  ke path pilihan user (engine tetap men-sanitasi nama & membuat folder).
+- Untuk URL video (YouTube/HLS/halaman), dialog kualitas TETAP menyusul setelah
+  file dipilih — satu alur, tanpa duplikasi logika.
+- Refactor: normalisasi URL & keputusan "perlu dialog kualitas?" (B20)
+  diekstrak ke `normalize_url_input` / `wants_quality_dialog` — dipakai bersama
+  tombol Unduh, clipboard banner, dan Simpan Sebagai; +3 unit test.
+- Batal pada dialog file = tidak ada aksi (konsumen UI tidak lagi kebingungan
+  "URL kosong" seperti jalur Unduh manual).
+
 ## [2.4.0] - 2026-09-02
 
 ### Added — fitur D1 & D3 (roadmap CODE-REVIEW.md)
