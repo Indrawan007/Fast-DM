@@ -23,6 +23,17 @@ pub struct Config {
     /// saat aplikasi dibuka. Matikan bila lebih suka memutuskan manual.
     #[serde(default = "default_true")]
     pub auto_resume: bool,
+    /// v2.4.0 (D3): proxy untuk SEMUA engine (aria2 `--all-proxy`,
+    /// yt-dlp `--proxy`). Format: http://host:port, https://…, socks5://…,
+    /// termasuk kredensial di URL (http://user:pass@127.0.0.1:3128).
+    /// String kosong = tanpa proxy. `#[serde(default)]` → config.json lama
+    /// tetap bisa dibaca.
+    #[serde(default)]
+    pub proxy_url: String,
+    /// v2.4.0 (D1): deteksi URL unduhan dari clipboard ala IDM — butuh
+    /// `wl-clipboard` (Wayland) atau `xclip` (X11). Default OFF (opt-in).
+    #[serde(default)]
+    pub clipboard_monitor: bool,
 }
 
 fn default_true() -> bool {
@@ -52,6 +63,8 @@ impl Default for Config {
             auto_file_renaming: true,
             verify_tls: true,
             auto_resume: true,
+            proxy_url: String::new(),
+            clipboard_monitor: false,
         }
     }
 }
@@ -244,6 +257,26 @@ impl Config {
     }
 }
 
+/// v2.4.0 (D3): validasi proxy sebelum disimpan — nilai ngawur bikin aria2
+/// exit / yt-dlp diam-diam tetap langsung (membingungkan). Yang diterima:
+/// skema http/https/socks4/socks4a/socks5/socks5h dengan host non-kosong.
+/// (Port opsional — socks server bisa pakai default 1080.)
+pub fn is_valid_proxy_url(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    match url::Url::parse(s) {
+        Ok(u) => {
+            matches!(
+                u.scheme(),
+                "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
+            ) && u.host_str().map_or(false, |h| !h.is_empty())
+        }
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +428,48 @@ mod tests {
         assert_eq!(c.download_dir, "/custom");
         // Field lain dari default impl
         assert!(c.max_connections > 0);
+    }
+
+    // ── v2.4.0 (D1/D3): default & kompatibilitas field baru ──
+
+    #[test]
+    fn defaults_off_and_empty_for_new_fields() {
+        let c = Config::default();
+        assert_eq!(c.proxy_url, "");
+        assert!(!c.clipboard_monitor);
+    }
+
+    #[test]
+    fn old_config_without_new_fields_loads() {
+        // config.json dari v≤2.3.x TANPA proxy_url/clipboard_monitor —
+        // #[serde(default)] harus menyelamatkan; tanpa itu load gagal dan
+        // user kehilangan seluruh pengaturan saat upgrade.
+        let json = r#"{"download_dir":"/tmp/d","max_connections":8,"max_concurrent":2,"max_overall_speed":"1M","retry_count":3,"retry_wait":2,"timeout":10,"disk_cache_size":"32M","file_allocation":"none","auto_file_renaming":false,"verify_tls":false}"#;
+        let c: Config = serde_json::from_str(json).expect("config lama harus tetap terbaca");
+        assert_eq!(c.proxy_url, "");
+        assert!(!c.clipboard_monitor);
+        assert!(!c.verify_tls);
+    }
+
+    // ── is_valid_proxy_url (D3) ──
+
+    #[test]
+    fn proxy_url_valid_forms() {
+        assert!(is_valid_proxy_url("http://127.0.0.1:8080"));
+        assert!(is_valid_proxy_url("https://proxy.example.com:3128"));
+        assert!(is_valid_proxy_url("socks5://10.0.0.1:1080"));
+        assert!(is_valid_proxy_url("socks5h://user:pass@host:1080"));
+        assert!(is_valid_proxy_url("http://[::1]:8888"));
+        assert!(is_valid_proxy_url("  http://host:3128  "));
+    }
+
+    #[test]
+    fn proxy_url_invalid_forms() {
+        assert!(!is_valid_proxy_url(""));
+        assert!(!is_valid_proxy_url("   "));
+        assert!(!is_valid_proxy_url("127.0.0.1:8080")); // tanpa skema
+        assert!(!is_valid_proxy_url("ftp://proxy:21"));
+        assert!(!is_valid_proxy_url("http://")); // host kosong
+        assert!(!is_valid_proxy_url("not a url"));
     }
 }

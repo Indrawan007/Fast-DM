@@ -124,6 +124,15 @@ impl DownloadEngine {
         if cfg.max_overall_speed != "0" && !is_valid_speed_limit(&cfg.max_overall_speed) {
             return Err("Speed limit tidak valid (contoh: 0, 512K, 2M)".into());
         }
+        // v2.4.0 (D3): proxy divalidasi sebelum disimpan — nilai ngawur bikin
+        // aria2 exit / yt-dlp diam-diam tetap koneksi langsung (membingungkan).
+        if !cfg.proxy_url.trim().is_empty() && !crate::config::is_valid_proxy_url(&cfg.proxy_url)
+        {
+            return Err(
+                "Proxy tidak valid — contoh: http://127.0.0.1:8080, socks5://host:1080"
+                    .to_string(),
+            );
+        }
         cfg.save().map_err(|e| e.to_string())?;
         *self.config.write().await = cfg;
         Ok(())

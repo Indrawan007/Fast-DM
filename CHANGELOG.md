@@ -3,6 +3,24 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.4.0] - 2026-09-02
+
+### Added — fitur D1 & D3 (roadmap CODE-REVIEW.md)
+- **D3 Dukungan proxy global** — satu kolom di Pengaturan (`proxy_url`)
+  diterapkan ke SEMUA engine: aria2c via `--all-proxy=`, yt-dlp (jalur YouTube
+  dan resolver universal) via `--proxy`. Mendukung `http://`, `https://`,
+  `socks4/4a/5/5h` termasuk kredensial di URL (`http://user:pass@host:port`).
+  Nilai invalid ditolak saat Simpan (validasi skema+host) dengan pesan jelas.
+- **D1 Deteksi URL dari clipboard ala IDM** — toggle "Deteksi URL unduhan dari
+  clipboard" (default OFF, opt-in). Saat aktif, URL `http(s)` yang disalin di
+  clipboard memunculkan banner di bawah toolbar dengan tombol **Unduh** (langsung
+  masuk alur tambah-download normal — termasuk dialog kualitas YouTube) dan ✕
+  untuk menutup. Implementasi polling CLI (`wl-paste` di Wayland, `xclip` di
+  X11) — tanpa dependensi crate baru; dedup konten & cap 2 KB anti-spam;
+  bila tool tidak terpasang, polling berhenti sendiri tanpa mengganggu.
+- Config: `proxy_url` + `clipboard_monitor` dengan `#[serde(default)]` —
+  `config.json` lama tetap terbaca utuh saat upgrade (regression test).
+
 ## [2.3.2] - 2026-09-02
 
 ### Changed — M4: dialog GUI jadi event-driven (tanpa nested main loop)

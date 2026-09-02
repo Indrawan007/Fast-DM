@@ -233,7 +233,7 @@ pub(crate) fn quality_args(quality: Option<&str>) -> Vec<String> {
 pub async fn download(
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
-    _config: &Config,
+    config: &Config,
 ) {
     // Guard: user bisa pause/cancel di jeda sebelum child process lahir
     // (pid belum ada, jadi kill_child_pid tidak berdampak apa-apa). Tanpa guard,
@@ -276,6 +276,11 @@ pub async fn download(
     ]);
 
     cmd.extend(cookie_args(&url));
+
+    // v2.4.0 (D3): proxy dari Pengaturan — yt-dlp & ffmpeg turunannya ikut.
+    if !config.proxy_url.trim().is_empty() {
+        cmd.extend(["--proxy".into(), config.proxy_url.trim().to_string()]);
+    }
 
     // Header kustom dari browser extension (mis. Referer)
     for (k, v) in &headers {

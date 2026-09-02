@@ -192,6 +192,13 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         }
     }
 
+    // v2.4.0 (D3): proxy untuk semua protokol (http/https/ftp). Kredensial
+    // dikandung langsung di URL (http://user:pass@host:port) — tidak perlu
+    // --all-proxy-user/--all-proxy-password terpisah.
+    if !config.proxy_url.trim().is_empty() {
+        cmd.push(format!("--all-proxy={}", config.proxy_url.trim()));
+    }
+
     (cmd, Some(input_path.to_string_lossy().to_string()))
 }
 

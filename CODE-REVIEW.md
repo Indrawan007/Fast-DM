@@ -29,7 +29,9 @@
 | L7 timeout sendToNative | ✅ Fixed | 25 s + pesan |
 | M1 tokio::process refactor | ✅ v2.3.1 | `tokio::process` + `ChildLines` + ticker 500ms + wait paus bounded 30s + kill_on_drop; panic `rt.block_on` di `universal.rs` ikut dibasmi |
 | M4 dialog nested loop | ✅ v2.3.2 | settings & quality dialog kini callback event-driven; bug "Batal tetap unduh" ikut hilang |
-| L2 AGENTS.md usang | ✅ Fixed | ditulis ulang v0.2.0 sesuai arsitektur nyata |
+| D3 proxy global | ✅ v2.4.0 | `Config::proxy_url` → `--all-proxy` (aria2) & `--proxy` (yt-dlp + resolver universal); tervalidasi saat Simpan |
+| D1 clipboard monitor | ✅ v2.4.0 | opt-in via Pengaturan; polling CLI `wl-paste`/`xclip` (tanpa dep crate baru), dedup konten, auto-stop bila tool absen |
+| M11 skema tak divalidasi | ✅ Fixed || L2 AGENTS.md usang | ✅ Fixed | ditulis ulang v0.2.0 sesuai arsitektur nyata |
 | L10 CI tanpa clippy/audit | ⚠️ Partial | komentar basi dibersihkan; step clippy/deny belum (butuh keputusan policy) |
 | D-x (fitur), B-x (arsitektur RPC) | 📋 Roadmap | lihat §5 dokumen ini |
 
@@ -449,7 +451,7 @@ Extension (SW) ──sendNativeMessage──> fast-dm --native ──1 baris JSO
 |---|---|
 | 1 (keamanan + kebenaran) | A1 socket+peercred, A2 killpg, A3 ekstensi list, A9 hapus build.sh, LICENSE, README/AGENTS fix, A4 auto-resume |
 | 2 (performa) | B1 tokio::process, B3 churn GUI & sniffer, B5 limit adaptif, A5/A6/A7/M10 polish |
-| 3 (fitur) | D1 clipboard, D2 save-as, D3 proxy, D6 format nyata yt-dlp |
+| 3 (fitur) | ✅ D1 clipboard + ✅ D3 proxy (v2.4.0) — sisa: D2 save-as, D6 format nyata yt-dlp |
 | 4 (arsitektur) | B2 aria2 RPC mode (feature-flag), E2 integration tests engine, D8 tray |
 
 ---

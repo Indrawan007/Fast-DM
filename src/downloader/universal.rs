@@ -24,7 +24,7 @@ pub enum Outcome {
 pub async fn download(
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
-    _config: &Config,
+    config: &Config,
 ) -> Outcome {
     // Guard: user bisa cancel/pause di jeda sebelum child proses lahir
     // (pid belum ada → kill_child_pid tidak berdampak). Tanpa guard, status
@@ -99,6 +99,11 @@ pub async fn download(
 
     // Cookies (dari cookies.txt / browser) + Referer & header kustom extension
     cmd.extend(cookie_args(&url));
+
+    // v2.4.0 (D3): proxy juga untuk jalur resolver universal
+    if !config.proxy_url.trim().is_empty() {
+        cmd.extend(["--proxy".into(), config.proxy_url.trim().to_string()]);
+    }
     for (k, v) in &headers {
         let k = k.replace(['\r', '\n'], "");
         let v = v.replace(['\r', '\n'], "");

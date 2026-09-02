@@ -93,6 +93,36 @@ pub fn build_window(
     toolbar.append(&settings_btn);
     root.append(&toolbar);
 
+    // ── v2.4.0 (D1): banner URL clipboard (ala IDM) ──────────────────────
+    // Clipboard memuat URL http(s) → tampilkan bar di bawah toolbar dengan
+    // opsi "Unduh"; "✕" menutup. Default OFF — diaktifkan lewat Pengaturan;
+    // butuh wl-clipboard (Wayland) atau xclip (X11).
+    let clip_banner = GtkBox::new(Orientation::Horizontal, 8);
+    clip_banner.add_css_class("clipboard-banner");
+    clip_banner.set_margin_start(12);
+    clip_banner.set_margin_end(12);
+    clip_banner.set_margin_top(6);
+    clip_banner.set_visible(false);
+
+    let clip_lbl = Label::new(None);
+    clip_lbl.set_hexpand(true);
+    clip_lbl.set_halign(gtk4::Align::Start);
+    clip_lbl.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+    let clip_dl_btn = Button::with_label("Unduh");
+    clip_dl_btn.add_css_class("btn-download");
+    let clip_x_btn = Button::with_label("✕");
+    clip_x_btn.add_css_class("btn-clear");
+    clip_banner.append(&clip_lbl);
+    clip_banner.append(&clip_dl_btn);
+    clip_banner.append(&clip_x_btn);
+    root.append(&clip_banner);
+
+    let clip_pending: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let clip_enabled: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+    let clip_last: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    // None = belum diprobe; Some(x) = hasil probe (x: Option<&'static str>)
+    let clip_tool: Rc<RefCell<Option<Option<&'static str>>>> = Rc::new(RefCell::new(None));
+
     // ── List ──
     let scroll = ScrolledWindow::new();
     scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
@@ -250,6 +280,83 @@ pub fn build_window(
     let on_add_clone = on_add.clone();
     url_entry.connect_activate(move |_| on_add_clone());
 
+    // ── v2.4.0 (D1): wiring clipboard + polling ──
+    {
+        let banner = clip_banner.clone();
+        let pend = clip_pending.clone();
+        let entry = url_entry.clone();
+        let on_add_clip = on_add.clone();
+        clip_dl_btn.connect_clicked(move |_| {
+            if let Some(u) = pend.borrow_mut().take() {
+                entry.set_text(&u);
+                banner.set_visible(false);
+                // Alur sama persis dengan input manual: on_add membaca Entry.
+                on_add_clip();
+            }
+        });
+
+        let banner_x = clip_banner.clone();
+        let pend_x = clip_pending.clone();
+        clip_x_btn.connect_clicked(move |_| {
+            *pend_x.borrow_mut() = None;
+            banner_x.set_visible(false);
+        });
+
+        // Nilai awal = config tersimpan (block_on aman di main thread —
+        // pola sama seperti handler settings).
+        {
+            let eng = engine.clone();
+            let cfg0 = rt.block_on(async move { eng.get_config().await });
+            clip_enabled.set(cfg0.clipboard_monitor);
+        }
+
+        // Polling (bukan listener): tanpa dependensi baru. Jeda 2.5 dtk;
+        // saat toggle OFF biayanya cuma cek boolean.
+        let en = clip_enabled.clone();
+        let lbl_t = clip_lbl.clone();
+        let ban_t = clip_banner.clone();
+        let pend_t = clip_pending.clone();
+        let last_t = clip_last.clone();
+        let tool_t = clip_tool.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(2500), move || {
+            if !en.get() {
+                if ban_t.is_visible() {
+                    ban_t.set_visible(false);
+                }
+                return glib::ControlFlow::Continue(());
+            }
+            let tool: Option<&'static str> = {
+                let mut tr = tool_t.borrow_mut();
+                let v = tr.get_or_insert_with(clipboard_probe);
+                *v
+            };
+            let Some(tool) = tool else {
+                // tak ada wl-paste/xclip → stop polling (jangan buang timer)
+                return glib::ControlFlow::Break;
+            };
+            let Some(txt) = clipboard_text(tool) else {
+                return glib::ControlFlow::Continue(());
+            };
+            // Dedup: konten sama (termasuk non-URL) tidak diulang-ulang.
+            if txt.is_empty() || txt == *last_t.borrow() {
+                return glib::ControlFlow::Continue(());
+            }
+            *last_t.borrow_mut() = txt.clone();
+            if txt.len() > 2048
+                || !(txt.starts_with("http://") || txt.starts_with("https://"))
+            {
+                if ban_t.is_visible() {
+                    ban_t.set_visible(false);
+                }
+                return glib::ControlFlow::Continue(());
+            }
+            *pend_t.borrow_mut() = Some(txt.clone());
+            lbl_t.set_text(&format!("📋 URL terdeteksi di clipboard: {}", txt));
+            ban_t.set_visible(true);
+            glib::ControlFlow::Continue(())
+        });
+    }
+
     // ── C2: drag & drop URL (dari browser/file manager) ke window ──
     let drop_target = DropTarget::builder()
         .actions(DragAction::COPY)
@@ -401,12 +508,23 @@ pub fn build_window(
         let eng2 = engine_settings.clone();
         let rt2 = rt_settings.clone();
         let btn_feedback_src = settings_btn_h.clone();
+        let clip_flag = clip_enabled.clone();
+        let clip_ban = clip_banner.clone();
         show_settings_dialog(win_settings.upcast_ref(), &cur, move |cfg| {
+            // v2.4.0 (D1): toggle clipboard baru berlaku setelah settings
+            // BENAR-BENAR tersimpan (engine bisa menolaknya, mis. proxy invalid).
+            let want_clip = cfg.clipboard_monitor;
             let handle = rt2.spawn(async move { eng2.update_config(cfg).await });
             let btn_feedback = btn_feedback_src.clone();
             glib::spawn_future_local(async move {
                 match handle.await {
-                    Ok(Ok(())) => btn_feedback.set_label("✓ Tersimpan"),
+                    Ok(Ok(())) => {
+                        btn_feedback.set_label("✓ Tersimpan");
+                        clip_flag.set(want_clip);
+                        if !want_clip {
+                            clip_ban.set_visible(false);
+                        }
+                    }
                     Ok(Err(e)) => {
                         tracing::warn!("Settings rejected: {}", e);
                         btn_feedback.set_label("✕ Gagal Simpan");
@@ -872,6 +990,23 @@ where
     auto_resume_chk.set_active(cur.auto_resume);
     content.append(&auto_resume_chk);
 
+    // ── v2.4.0 (D3): proxy untuk semua engine (aria2 --all-proxy ·
+    // yt-dlp --proxy). Kredensial boleh di dalam URL proxy.
+    let proxy_entry = Entry::new();
+    proxy_entry.set_text(&cur.proxy_url);
+    proxy_entry.set_placeholder_text(Some(
+        "http://127.0.0.1:8080 · socks5://host:1080 — kosong = tanpa proxy",
+    ));
+    proxy_entry.set_hexpand(true);
+    content.append(&settings_row("Proxy", &proxy_entry));
+
+    // v2.4.0 (D1): toggle deteksi clipboard
+    let clip_chk = gtk4::CheckButton::with_label(
+        "Deteksi URL unduhan dari clipboard (butuh xclip / wl-clipboard)",
+    );
+    clip_chk.set_active(cur.clipboard_monitor);
+    content.append(&clip_chk);
+
     // Buttons
     let btn_box = GtkBox::new(Orientation::Horizontal, 8);
     btn_box.set_halign(gtk4::Align::End);
@@ -923,13 +1058,15 @@ where
     // loop yang bisa menggantung, jadi guard close_request pola lama hilang).
     let cfg_base = cur.clone();
     let on_ok = std::rc::Rc::new(std::cell::RefCell::new(Some(on_ok)));
-    let (fe, cs, cc, se, vt, ar) = (
+    let (fe, cs, cc, se, vt, ar, px, cb) = (
         folder_entry.clone(),
         conn_spin.clone(),
         conc_spin.clone(),
         speed_entry.clone(),
         verify_tls_chk.clone(),
         auto_resume_chk.clone(),
+        proxy_entry.clone(),
+        clip_chk.clone(),
     );
     dialog.connect_response(move |d, resp| {
         if resp == gtk4::ResponseType::Ok {
@@ -947,6 +1084,9 @@ where
             }
             cfg.verify_tls = vt.is_active();
             cfg.auto_resume = ar.is_active();
+            // v2.4.0 (D3/D1)
+            cfg.proxy_url = px.text().trim().to_string();
+            cfg.clipboard_monitor = cb.is_active();
             if let Some(f) = on_ok.borrow_mut().take() {
                 f(cfg);
             }
@@ -954,4 +1094,45 @@ where
         d.close();
     });
     dialog.show();
+}
+
+// ── v2.4.0 (D1): helper clipboard CLI (tanpa dependensi baru) ────────────
+
+/// Preferensi sesuai sesi: Wayland → wl-paste, X11 → xclip. "Tersedia" =
+/// perintah BISA dijalankan (spawn tidak NotFound); status exit diabaikan
+/// (clipboard kosong pun tetap berarti tool ada).
+fn clipboard_probe() -> Option<&'static str> {
+    let order: &[&'static str] = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        &["wl-paste", "xclip"]
+    } else {
+        &["xclip", "wl-paste"]
+    };
+    for bin in order {
+        let args: &[&str] = if *bin == "wl-paste" {
+            &["--version"]
+        } else {
+            &["-version"]
+        };
+        match std::process::Command::new(*bin).args(args).output() {
+            Ok(_) => return Some(bin),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => continue,
+        }
+    }
+    None
+}
+
+/// Teks clipboard (None = gagal baca / tidak ada pemilik seleksi).
+fn clipboard_text(tool: &'static str) -> Option<String> {
+    let out = match tool {
+        "wl-paste" => std::process::Command::new("wl-paste")
+            .args(["--no-newline"])
+            .output(),
+        _ => std::process::Command::new("xclip")
+            .args(["-o", "-selection", "clipboard"])
+            .output(),
+    };
+    out.ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }

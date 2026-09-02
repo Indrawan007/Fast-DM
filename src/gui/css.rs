@@ -307,4 +307,13 @@ pub const THEME_CSS: &str = r#"
 .fast-dm-window button:disabled {
     opacity: 0.35;
 }
+/* v2.4.0 (D1): banner deteksi URL dari clipboard */
+.fast-dm-window .clipboard-banner {
+    background-color: #1b2340;
+    border: 1px solid #89b4fa;
+    border-radius: 8px;
+    padding: 6px 10px;
+    color: #cdd6f4;
+}
+
 "#;
