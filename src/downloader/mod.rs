@@ -475,7 +475,35 @@ fn kill_child_pid(pid: Option<u32>) {
 }
 
 static RE_INVALID_CHARS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"[<>:"/\\|?*\x00-\x1f]"#).unwrap());
+    LazyLock::new(|| static_regex!("invalid_filename_chars", r#"[<>:"/\\|?*\x00-\x1f]"#));
+
+/// Build a `LazyLock<Regex>` dengan pesan panic yang menjelaskan regex mana
+/// yang gagal compile. Lebih mudah di-debug daripada `.unwrap()` polos.
+///
+/// Penggunaan:
+/// ```ignore
+/// static RE_FOO: LazyLock<Regex> =
+///     LazyLock::new(|| static_regex!("foo_parser", r"\d+"));
+/// ```
+///
+/// Kalau regex invalid (mis. bug copy-paste), panic message:
+/// ```
+/// regex 'foo_parser' invalid: <error message dari regex crate>
+/// ```
+/// — bandingkan dengan `.unwrap()` polos yang cuma bilang "called
+/// `Result::unwrap()` on an `Err` value: Regex(...)".
+#[macro_export]
+macro_rules! static_regex {
+    ($name:literal, $pattern:expr $(,)?) => {
+        match Regex::new($pattern) {
+            Ok(r) => r,
+            Err(e) => panic!(
+                "regex {:?} invalid (pattern={:?}): {}",
+                $name, $pattern, e
+            ),
+        }
+    };
+}
 
 fn session_file() -> std::path::PathBuf {
     Config::config_dir().join("session.json")
@@ -577,3 +605,203 @@ pub fn extract_filename_from_url(url: &str) -> String {
 
     format!("download_{}", chrono::Utc::now().timestamp())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── is_direct_file_url ──
+
+    #[test]
+    fn is_direct_file_url_various_extensions() {
+        // Ekstensi yang harus terdeteksi (langsung ke aria2)
+        let direct_valid = [
+            "https://x.com/v.mp4",
+            "https://x.com/a.ZIP",     // case-insensitive
+            "https://x.com/file.tar.gz", // multi-ext (.gz terdaftar)
+            "https://x.com/p.pdf",
+            "https://x.com/img.JPG",
+        ];
+        for url in direct_valid {
+            assert!(is_direct_file_url(url), "{} harus dianggap direct file", url);
+        }
+    }
+
+    #[test]
+    fn is_direct_file_url_strips_query_and_fragment() {
+        // Fragment setelah ekstensi tidak boleh mengganggu deteksi
+        assert!(is_direct_file_url("https://x.com/file.mp4#t=10"));
+        assert!(is_direct_file_url("https://x.com/file.mp4?download=1"));
+        assert!(is_direct_file_url("https://x.com/file.mp4?token=abc#t=0"));
+    }
+
+    #[test]
+    fn is_direct_file_url_excludes_streaming() {
+        // m3u8/mpd HARUS ke yt-dlp (perlu merge HLS/DASH)
+        assert!(!is_direct_file_url("https://x.com/playlist.m3u8"));
+        assert!(!is_direct_file_url("https://x.com/manifest.mpd"));
+    }
+
+    #[test]
+    fn is_direct_file_url_non_file() {
+        // Halaman video, API, halaman HTML
+        assert!(!is_direct_file_url("https://x.com/watch?v=abc"));
+        assert!(!is_direct_file_url("https://x.com/api/resource"));
+        assert!(!is_direct_file_url("https://youtube.com/watch?v=xxx"));
+        assert!(!is_direct_file_url("https://x.com/"));
+    }
+
+    // ── is_valid_speed_limit ──
+
+    #[test]
+    fn is_valid_speed_limit_valid() {
+        assert!(is_valid_speed_limit("0"));
+        assert!(is_valid_speed_limit("512"));
+        assert!(is_valid_speed_limit("512K"));
+        assert!(is_valid_speed_limit("2M"));
+        assert!(is_valid_speed_limit("10G"));
+        assert!(is_valid_speed_limit("2m")); // lowercase ok
+    }
+
+    #[test]
+    fn is_valid_speed_limit_invalid() {
+        assert!(!is_valid_speed_limit(""));
+        assert!(!is_valid_speed_limit("   "));
+        assert!(!is_valid_speed_limit("K")); // tanpa angka
+        assert!(!is_valid_speed_limit("512X")); // unit salah
+        assert!(!is_valid_speed_limit("-1"));
+        assert!(!is_valid_speed_limit("abc"));
+    }
+
+    // ── sanitize_filename ──
+
+    #[test]
+    fn sanitize_filename_basic() {
+        assert_eq!(sanitize_filename("video.mp4"), "video.mp4");
+        assert_eq!(sanitize_filename("my-file_v2.zip"), "my-file_v2.zip");
+    }
+
+    #[test]
+    fn sanitize_filename_strips_invalid_chars() {
+        // Karakter terlarang diganti underscore.
+        // CATATAN: sanitize_filename() juga strip query (?...) dan fragment (#...)
+        // di awal — jadi kita pakai input TANPA '?' / '#' untuk isolasi test ini.
+        // (Lihat sanitize_filename_strips_query_and_fragment untuk '?'/'#' behavior.)
+        assert_eq!(
+            sanitize_filename("a<b>c:d\"e/f\\g|h@i*.txt"),
+            "a_b_c_d_e_f_g_h@i_.txt"
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_strips_query_and_fragment() {
+        // "?token=xxx" dan "#frag" tidak boleh ikut
+        assert_eq!(sanitize_filename("file.mp4?token=abc"), "file.mp4");
+        assert_eq!(sanitize_filename("file.mp4#frag"), "file.mp4");
+    }
+
+    #[test]
+    fn sanitize_filename_trims_dots_and_spaces() {
+        // File tersembunyi (diawali/diakhiri '.') di-trim
+        assert_eq!(sanitize_filename("...file..."), "file");
+        assert_eq!(sanitize_filename("   file   "), "file");
+    }
+
+    #[test]
+    fn sanitize_filename_empty_fallback() {
+        // Kalau setelah cleaning kosong → fallback "download_<timestamp>"
+        // (semua char invalid + tidak punya '.') atau filename non-empty
+        // hasil replace (semua jadi '_')
+        let s = sanitize_filename("..."); // semua dot → trim habis → empty
+        assert!(s.starts_with("download_"), "expected fallback, got {:?}", s);
+    }
+
+    #[test]
+    fn sanitize_filename_unicode_safe() {
+        // Truncate di char boundary — karakter multi-byte tidak boleh dipotong
+        // di tengah (raw byte slice akan panic)
+        let long_unicode = "🦀".repeat(500); // 4 byte × 500 = 2000 byte, ~500 chars
+        let s = sanitize_filename(&long_unicode);
+        assert!(s.len() <= 200, "truncate harus ≤200 byte, got {}", s.len());
+        // Semua char harus utuh (tidak ada panik di tengah)
+        assert!(s.chars().all(|c| c == '🦀'));
+    }
+
+    #[test]
+    fn sanitize_filename_control_chars() {
+        // Control char (0x00-0x1f) harus di-replace
+        let with_ctrl = "file\x00\x01\x1fname.txt";
+        let s = sanitize_filename(with_ctrl);
+        assert!(!s.contains('\x00'));
+        assert!(!s.contains('\x01'));
+    }
+
+    // ── extract_filename_from_url ──
+
+    #[test]
+    fn extract_filename_basic() {
+        assert_eq!(
+            extract_filename_from_url("https://example.com/path/video.mp4"),
+            "video.mp4"
+        );
+    }
+
+    #[test]
+    fn extract_filename_with_query() {
+        // Query di URL harus diabaikan
+        assert_eq!(
+            extract_filename_from_url("https://example.com/file.zip?token=abc&expire=123"),
+            "file.zip"
+        );
+    }
+
+    #[test]
+    fn extract_filename_url_encoded() {
+        // %20 di-decode jadi spasi (satu karakter). Spasi BUKAN karakter
+        // invalid di regex sanitize_filename ([<>:"/\\|?*\x00-\x1f]) —
+        // sengaja dibiarkan karena:
+        //   - Linux filesystem mendukung spasi di filename
+        //   - yt-dlp & aria2 handle nama file ber-spasi dengan baik
+        //   - strip spasi akan kehilangan info (mis. "My Video.mp4"
+        //     jadi "My_Video.mp4" — kelihatan aneh di file manager)
+        // Lihat sanitize_filename_strips_invalid_chars untuk karakter
+        // yang benar-benar di-replace.
+        assert_eq!(
+            extract_filename_from_url("https://example.com/my%20file.zip"),
+            "my file.zip"
+        );
+    }
+
+    #[test]
+    fn extract_filename_no_extension_fallback() {
+        // URL tanpa nama file / tanpa ekstensi → fallback "download_<ts>"
+        let s = extract_filename_from_url("https://example.com/");
+        assert!(s.starts_with("download_"), "expected fallback, got {:?}", s);
+    }
+
+    #[test]
+    fn extract_filename_invalid_url_fallback() {
+        // Bukan URL valid → fallback
+        let s = extract_filename_from_url("not a url at all");
+        assert!(s.starts_with("download_"));
+    }
+
+    #[test]
+    fn extract_filename_root_path_fallback() {
+        // Path = "/" → basename kosong → fallback
+        let s = extract_filename_from_url("https://example.com");
+        assert!(s.starts_with("download_"));
+    }
+
+    #[test]
+    fn extract_filename_traversal_protected() {
+        // "../etc/passwd" — basename "passwd" dipakai setelah sanitization
+        // (../ di-strip oleh Path::file_name, jadi aman)
+        let s = extract_filename_from_url("https://example.com/../etc/passwd");
+        // Bisa "passwd" (no ext → fallback) atau "download_xxx"
+        // Yang penting: TIDAK boleh mengandung ".." atau "/"
+        assert!(!s.contains('/'), "filename tidak boleh ada '/': {:?}", s);
+        assert!(!s.contains(".."), "filename tidak boleh ada '..': {:?}", s);
+    }
+}
+

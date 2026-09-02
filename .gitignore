@@ -1,8 +1,22 @@
+# Build artifacts
 build/
 dist/
-ekstension/
 target/
-build.sh
-README.md
+*.deb
+*.AppImage
+*.zip
+
+# Development
+*.swp
+*.swo
+.DS_Store
+.vscode/
+.idea/
+
+# Secrets — JANGAN pernah commit
 extension_key.pem
+*.pem
 extension/*.crx
+
+# Generated files (built artifacts atau output tooling)
+ekstension/

@@ -84,9 +84,13 @@ Self::cookies_file_for_host(&Self::normalize_host(domain))
         None
     }
 
-    /// "WWW.Example.COM" → "example.com"
+    /// "WWW.Example.COM" → "example.com" (lowercase + strip "www." case-insensitive)
     fn normalize_host(domain: &str) -> String {
-        domain.trim().trim_start_matches("www.").to_ascii_lowercase()
+        // Lowercase dulu, BARU strip "www." — kalau tidak, trim_start_matches
+        // case-sensitive akan skip "WWW." (Bug B1, ditemukan saat menambah
+        // unit test — sebelumnya integration test tidak cover uppercase).
+        let s = domain.trim().to_ascii_lowercase();
+        s.trim_start_matches("www.").to_string()
     }
 
     fn cookies_file_for_host(host: &str) -> PathBuf {
@@ -141,3 +145,104 @@ Self::cookies_file_for_host(&Self::normalize_host(domain))
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── normalize_host (tested via public cookies_file_for) ──
+
+    #[test]
+    fn normalize_strips_www_and_lowercases() {
+        let p = Config::cookies_file_for("WWW.Example.COM");
+        let name = p.file_name().unwrap().to_str().unwrap();
+        // Bentuk: "cookies_example.com.txt" (bukan WWW.example.com)
+        assert_eq!(name, "cookies_example.com.txt");
+    }
+
+    #[test]
+    fn normalize_trims_whitespace() {
+        let p = Config::cookies_file_for("  example.com  ");
+        assert!(p.to_str().unwrap().ends_with("cookies_example.com.txt"));
+    }
+
+    // ── cookies_file_for sanitization ──
+
+    #[test]
+    fn cookies_file_sanitizes_unsafe_chars() {
+        // Karakter non-alfanumerik (selain . -) diganti underscore
+        let p = Config::cookies_file_for("evil host/name.txt");
+        let name = p.file_name().unwrap().to_str().unwrap();
+        // "evil host/name.txt" → "evil_host_name.txt"
+        // (chars ' ', '/' → '_', '.txt' tetap)
+        assert!(
+            name.starts_with("cookies_evil_host_name.txt"),
+            "got: {:?}",
+            name
+        );
+        // Tidak boleh ada karakter terlarang
+        assert!(!name.contains(' '));
+        assert!(!name.contains('/'));
+    }
+
+    // ── find_cookies_file: parent-domain lookup ──
+    //
+    // CATATAN: Config::config_dir() baca `dirs::config_dir()` (XDG_CONFIG_HOME
+    // atau ~/.config) yang statis per-proses. Unit test di sini tidak
+    // menyentuh filesystem (akan mengotori config user). Test riil ada di
+    // integration test `tests/find_cookies.rs` yang override XDG_CONFIG_HOME
+    // + pakai std::env::temp_dir() (stdlib-only, tanpa dependency).
+
+    #[test]
+    fn find_cookies_file_none_when_not_found() {
+        // Domain yang PASTI tidak punya file cookie di config_dir manapun
+        // (suffix unik agar tidak bentrok dengan test/installation lain).
+        let found = Config::find_cookies_file("nonexistent-domain-zzzz-unique-12345.test");
+        assert!(found.is_none(), "domain fiktif harus return None");
+    }
+
+    /// Smoke test: walk-up logic seharusnya berhenti di single-label host
+    /// (mis. "localhost" tidak punya parent, harus return None tanpa loop).
+    #[test]
+    fn find_cookies_file_single_label_returns_none() {
+        let found = Config::find_cookies_file("localhost");
+        // Single-label tidak punya '.' → loop keluar → None
+        assert!(found.is_none());
+    }
+
+    // ── Config default ──
+
+    #[test]
+    fn config_default_has_safe_values() {
+        let c = Config::default();
+        // Jangan panic di env tanpa HOME
+        assert!(!c.download_dir.is_empty());
+        assert!(c.max_connections > 0 && c.max_connections <= 32);
+        assert!(c.max_concurrent > 0 && c.max_concurrent <= 10);
+        assert!(c.timeout > 0);
+        assert!(c.verify_tls); // default aman
+    }
+
+    #[test]
+    fn config_serde_roundtrip() {
+        let original = Config::default();
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.download_dir, original.download_dir);
+        assert_eq!(restored.max_connections, original.max_connections);
+        assert_eq!(restored.verify_tls, original.verify_tls);
+    }
+
+    #[test]
+    fn config_serde_with_missing_fields_uses_default() {
+        // JSON kosong (atau hanya sebagian field) harus fallback ke default
+        // via #[serde(default)] di struct Config
+        let partial = r#"{"download_dir": "/custom"}"#;
+        let c: Config = serde_json::from_str(partial)
+            .expect("field opsional harus fallback ke default");
+        assert_eq!(c.download_dir, "/custom");
+        // Field lain dari default impl
+        assert!(c.max_connections > 0);
+    }
+}
+

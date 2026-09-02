@@ -1,6 +1,6 @@
 use super::types::*;
 use crate::config::Config;
-use regex::Regex;
+use crate::static_regex;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, LazyLock};
@@ -12,19 +12,41 @@ use tokio::sync::{mpsc, Mutex};
 //   --human-readable=false -> [#2089b0 1048576/34896138(3%) CN:1 DL:524288 ETA:0s]
 // Regex harus menerima KEDUA format; sebelumnya hanya "123B/456B" yang tidak pernah
 // muncul sama sekali, sehingga progress/speed/ETA tidak pernah ter-update.
-static RE_PROGRESS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"([\d.]+[KMGT]?i?B?)/([\d.]+[KMGT]?i?B?)\((\d+)%\)"#).unwrap());
-static RE_SPEED: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"DL:([\d.]+[KMGT]?i?B?/?s?)"#).unwrap());
-static RE_CN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"CN:(\d+)").unwrap());
-static RE_ETA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"ETA:(\S+)").unwrap());
-static RE_H: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)h").unwrap());
-static RE_M: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)m").unwrap());
-static RE_S: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)s").unwrap());
-static RE_CONTENT_RANGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"/(\d+)").unwrap());
-static RE_CD_RFC5987: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"filename\*\s*=\s*(?:[Uu][Tt][Ff]-8)?'[^']*'(.+?)(?:\s*;|$)").unwrap());
-static RE_CD_QUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"filename\s*=\s*"([^"]+)""#).unwrap());
-static RE_CD_UNQUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"filename\s*=\s*([^\s;]+)").unwrap());
+//
+// Catatan: `static_regex!("name", pattern)` akan panic dengan pesan
+// yang menunjukkan regex mana yang invalid (lebih baik dari `.unwrap()`).
+static RE_PROGRESS: LazyLock<regex::Regex> = LazyLock::new(|| {
+    static_regex!(
+        "aria2_progress",
+        r#"([\d.]+[KMGT]?i?B?)/([\d.]+[KMGT]?i?B?)\((\d+)%\)"#
+    )
+});
+static RE_SPEED: LazyLock<regex::Regex> =
+    LazyLock::new(|| static_regex!("aria2_speed", r#"DL:([\d.]+[KMGT]?i?B?/?s?)"#));
+static RE_CN: LazyLock<regex::Regex> =
+    LazyLock::new(|| static_regex!("aria2_connections", r"CN:(\d+)"));
+static RE_ETA: LazyLock<regex::Regex> =
+    LazyLock::new(|| static_regex!("aria2_eta", r"ETA:(\S+)"));
+static RE_H: LazyLock<regex::Regex> =
+    LazyLock::new(|| static_regex!("aria2_eta_h", r"(\d+)h"));
+static RE_M: LazyLock<regex::Regex> =
+    LazyLock::new(|| static_regex!("aria2_eta_m", r"(\d+)m"));
+static RE_S: LazyLock<regex::Regex> =
+    LazyLock::new(|| static_regex!("aria2_eta_s", r"(\d+)s"));
+static RE_CONTENT_RANGE: LazyLock<regex::Regex> =
+    LazyLock::new(|| static_regex!("http_content_range", r"/(\d+)"));
+static RE_CD_RFC5987: LazyLock<regex::Regex> = LazyLock::new(|| {
+    static_regex!(
+        "content_disposition_rfc5987",
+        r"filename\*\s*=\s*(?:[Uu][Tt][Ff]-8)?'[^']*'(.+?)(?:\s*;|$)"
+    )
+});
+static RE_CD_QUOTED: LazyLock<regex::Regex> = LazyLock::new(|| {
+    static_regex!("content_disposition_quoted", r#"filename\s*=\s*"([^"]+)"#)
+});
+static RE_CD_UNQUOTED: LazyLock<regex::Regex> = LazyLock::new(|| {
+    static_regex!("content_disposition_unquoted", r"filename\s*=\s*([^\s;]+)")
+});
 
 const CHROME_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -728,3 +750,272 @@ fn parse_content_disposition(cd: &str) -> Option<String> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_aria2_size ──
+
+    #[test]
+    fn parse_aria2_size_raw_bytes() {
+        // Mode non-human: angka mentah
+        assert_eq!(parse_aria2_size("1048576"), 1048576);
+        assert_eq!(parse_aria2_size("0"), 0);
+    }
+
+    #[test]
+    fn parse_aria2_size_human_kib() {
+        // KiB = 1024, MiB = 1024², dst
+        assert_eq!(parse_aria2_size("1KiB"), 1024);
+        assert_eq!(parse_aria2_size("1.5KiB"), 1536);
+        assert_eq!(parse_aria2_size("400.0KiB"), 409_600);
+    }
+
+    #[test]
+    fn parse_aria2_size_human_mib_gib() {
+        // 33.2 × 1024 × 1024 ≈ 34_812_723
+        assert_eq!(parse_aria2_size("33.2MiB"), 34_812_723);
+        // 1.4 × 1024 × 1024 ≈ 1_468_006
+        assert_eq!(parse_aria2_size("1.4MiB"), 1_468_006);
+        assert_eq!(parse_aria2_size("2GiB"), 2_147_483_648);
+    }
+
+    #[test]
+    fn parse_aria2_size_short_unit() {
+        // aria2 kadang output "300K", "1M" (tanpa "iB")
+        assert_eq!(parse_aria2_size("512K"), 512 * 1024);
+        assert_eq!(parse_aria2_size("2M"), 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_aria2_size_with_trailing_slash() {
+        // Kecepatan ditulis "DL:300KiB/s" → parser hanya ambil bagian numeric
+        // (regex DL: dipisah). Test parser saja:
+        assert_eq!(parse_aria2_size("300KiB"), 307_200);
+    }
+
+    #[test]
+    fn parse_aria2_size_invalid() {
+        // String kosong / tanpa angka → 0 (bukan panic)
+        assert_eq!(parse_aria2_size(""), 0);
+        assert_eq!(parse_aria2_size("abc"), 0);
+        assert_eq!(parse_aria2_size("."), 0);
+    }
+
+    // ── parse_eta ──
+
+    #[test]
+    fn parse_eta_seconds() {
+        assert_eq!(parse_eta("30s"), 30);
+        assert_eq!(parse_eta("5s"), 5);
+    }
+
+    #[test]
+    fn parse_eta_minutes_seconds() {
+        assert_eq!(parse_eta("4m51s"), 4 * 60 + 51);
+        assert_eq!(parse_eta("10m"), 600);
+    }
+
+    #[test]
+    fn parse_eta_hours_minutes_seconds() {
+        assert_eq!(parse_eta("1h2m3s"), 3600 + 120 + 3);
+        assert_eq!(parse_eta("2h"), 7200);
+    }
+
+    #[test]
+    fn parse_eta_empty_or_zero() {
+        assert_eq!(parse_eta("0s"), 0);
+        assert_eq!(parse_eta(""), 0);
+    }
+
+    // ── parse_speed_setting ──
+
+    #[test]
+    fn parse_speed_setting_zero() {
+        assert_eq!(parse_speed_setting("0"), 0);
+        assert_eq!(parse_speed_setting("  0  "), 0); // trim
+    }
+
+    #[test]
+    fn parse_speed_setting_units() {
+        // K = 1024 (konvensi aria2)
+        assert_eq!(parse_speed_setting("512K"), 512 * 1024);
+        assert_eq!(parse_speed_setting("2M"), 2 * 1024 * 1024);
+        assert_eq!(parse_speed_setting("10G"), 10 * 1024u64.pow(3));
+    }
+
+    #[test]
+    fn parse_speed_setting_case_insensitive() {
+        assert_eq!(parse_speed_setting("2k"), 2 * 1024);
+        assert_eq!(parse_speed_setting("2m"), 2 * 1024 * 1024);
+    }
+
+    // ── per_process_speed_limit ──
+
+    fn cfg(speed: &str, concurrent: u8) -> Config {
+        Config {
+            download_dir: "/tmp".into(),
+            max_connections: 8,
+            max_concurrent: concurrent,
+            max_overall_speed: speed.into(),
+            retry_count: 3,
+            retry_wait: 2,
+            timeout: 30,
+            disk_cache_size: "16M".into(),
+            file_allocation: "none".into(),
+            auto_file_renaming: true,
+            verify_tls: true,
+        }
+    }
+
+    #[test]
+    fn per_process_speed_limit_unlimited() {
+        // "0" = tanpa batas → return "0"
+        assert_eq!(per_process_speed_limit(&cfg("0", 3)), "0");
+    }
+
+    #[test]
+    fn per_process_speed_limit_divided_by_concurrent() {
+        // 1M / 2 concurrent = 512K per process
+        assert_eq!(per_process_speed_limit(&cfg("1M", 2)), "512K");
+    }
+
+    #[test]
+    fn per_process_speed_limit_floor_at_1k() {
+        // Limit kecil / banyak concurrent → minimum 1K
+        assert_eq!(per_process_speed_limit(&cfg("1K", 10)), "1K");
+    }
+
+    // ── is_generic_filename ──
+
+    #[test]
+    fn is_generic_filename_true_cases() {
+        let generic = [
+            "", "download", "index.html", "file.zip", "video.mp4",
+            "get.bin", "default.jpg", "123.mp4", "download_12345.mp4",
+            "main.bin",
+        ];
+        for name in generic {
+            assert!(
+                is_generic_filename(name),
+                "{} harus dianggap generic",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn is_generic_filename_false_cases() {
+        let specific = [
+            "my-video.mp4", "linuxmint-21-cinnamon-64bit.iso",
+            "github-cli_2.40.0_linux_amd64.deb", "report-2024.pdf",
+        ];
+        for name in specific {
+            assert!(
+                !is_generic_filename(name),
+                "{} harus dianggap specific",
+                name
+            );
+        }
+    }
+
+    // ── content_type_to_ext ──
+
+    #[test]
+    fn content_type_to_ext_video() {
+        assert_eq!(content_type_to_ext("video/mp4"), Some(".mp4"));
+        assert_eq!(content_type_to_ext("video/webm"), Some(".webm"));
+        assert_eq!(content_type_to_ext("video/quicktime"), Some(".mov"));
+    }
+
+    #[test]
+    fn content_type_to_ext_audio() {
+        assert_eq!(content_type_to_ext("audio/mpeg"), Some(".mp3"));
+        assert_eq!(content_type_to_ext("audio/mp4"), Some(".m4a"));
+    }
+
+    #[test]
+    fn content_type_to_ext_archive() {
+        assert_eq!(content_type_to_ext("application/zip"), Some(".zip"));
+        assert_eq!(content_type_to_ext("application/x-rar-compressed"), Some(".rar"));
+        assert_eq!(content_type_to_ext("application/x-7z-compressed"), Some(".7z"));
+    }
+
+    #[test]
+    fn content_type_to_ext_image() {
+        assert_eq!(content_type_to_ext("image/jpeg"), Some(".jpg"));
+        assert_eq!(content_type_to_ext("image/png"), Some(".png"));
+    }
+
+    #[test]
+    fn content_type_to_ext_strips_charset() {
+        // Content-Type bisa ada charset: "text/html; charset=utf-8"
+        // (walau text/html harus ditolak duluan, parser-nya strip ";")
+        assert_eq!(content_type_to_ext("video/mp4; charset=binary"), Some(".mp4"));
+    }
+
+    #[test]
+    fn content_type_to_ext_unknown() {
+        assert_eq!(content_type_to_ext("application/octet-stream"), None);
+        assert_eq!(content_type_to_ext("text/html"), None);
+    }
+
+    // ── parse_content_disposition ──
+
+    #[test]
+    fn parse_content_disposition_rfc5987() {
+        // RFC 5987: filename*=UTF-8''<urlencoded>
+        let cd = "attachment; filename=\"fallback.zip\"; filename*=UTF-8''nama%20file.zip";
+        assert_eq!(parse_content_disposition(cd), Some("nama file.zip".to_string()));
+    }
+
+    #[test]
+    fn parse_content_disposition_quoted() {
+        let cd = "attachment; filename=\"my report.pdf\"";
+        assert_eq!(parse_content_disposition(cd), Some("my report.pdf".to_string()));
+    }
+
+    #[test]
+    fn parse_content_disposition_unquoted() {
+        let cd = "attachment; filename=file.zip";
+        assert_eq!(parse_content_disposition(cd), Some("file.zip".to_string()));
+    }
+
+    #[test]
+    fn parse_content_disposition_none() {
+        // Tanpa filename sama sekali
+        assert_eq!(parse_content_disposition("attachment"), None);
+        assert_eq!(parse_content_disposition(""), None);
+    }
+
+    #[test]
+    fn parse_content_disposition_rfc5987_lowercase() {
+        // utf-8 (lowercase) juga harus cocok
+        let cd = "filename*=utf-8''my%20video.mp4";
+        assert_eq!(parse_content_disposition(cd), Some("my video.mp4".to_string()));
+    }
+
+    // ── Regex RE_PROGRESS (regresi: format dual) ──
+
+    #[test]
+    fn re_progress_matches_human_readable() {
+        // Format: [#2089b0 400.0KiB/33.2MiB(1%) CN:1 DL:115.7KiB ETA:4m51s]
+        let line = "[#2089b0 400.0KiB/33.2MiB(1%) CN:1 DL:115.7KiB ETA:4m51s]";
+        let m = RE_PROGRESS.captures(line).expect("harus match human format");
+        assert_eq!(&m[1], "400.0KiB");
+        assert_eq!(&m[2], "33.2MiB");
+        assert_eq!(&m[3], "1");
+    }
+
+    #[test]
+    fn re_progress_matches_raw_bytes() {
+        // Format: [#2089b0 1048576/34896138(3%) CN:1 DL:524288 ETA:0s]
+        let line = "[#2089b0 1048576/34896138(3%) CN:1 DL:524288 ETA:0s]";
+        let m = RE_PROGRESS.captures(line).expect("harus match raw format");
+        assert_eq!(&m[1], "1048576");
+        assert_eq!(&m[2], "34896138");
+        assert_eq!(&m[3], "3");
+    }
+}
+
