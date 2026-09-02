@@ -142,7 +142,14 @@ pub fn show_quality_dialog<F>(
 
     for q in QUALITIES {
         let is_default = first_btn.is_none();
-        let (radio, row) = quality_row(&selected, first_btn.as_ref(), q.id, q.label, q.desc, is_default);
+        let (radio, row) = quality_row(
+            &selected,
+            first_btn.as_ref(),
+            q.id,
+            q.label,
+            q.desc,
+            is_default,
+        );
         if is_default {
             first_btn = Some(radio.clone());
         }

@@ -268,12 +268,11 @@ pub fn build_window(
                         .await
                         .unwrap_or_default();
                     let url2 = url_q.clone();
-                    rt_q
-                        .spawn(async move {
-                            crate::downloader::youtube::fetch_formats(&url2, &cfg).await
-                        })
-                        .await
-                        .unwrap_or_default()
+                    rt_q.spawn(async move {
+                        crate::downloader::youtube::fetch_formats(&url2, &cfg).await
+                    })
+                    .await
+                    .unwrap_or_default()
                 };
                 youtube_dialog::show_quality_dialog(
                     win_q.upcast_ref(),
