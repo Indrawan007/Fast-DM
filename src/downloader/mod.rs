@@ -82,6 +82,7 @@ impl DownloadEngine {
     /// - hanya item hasil restore sesi (user yang pause manual TIDAK diutak-atik),
     /// - hanya selama status masih Paused (kalau user sudah menekan apa pun, batalkan),
     /// - slot & antrean tetap diatur start_download (max_concurrent tidak jebol).
+    ///
     /// Dapat dimatikan via Settings → auto_resume.
     pub async fn resume_restored(&self) {
         if !self.get_config().await.auto_resume {
