@@ -1,7 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GtkBox, Button, CheckButton, Dialog, Label,
-    Orientation, ResponseType, ScrolledWindow, Window,
+    Box as GtkBox, Button, CheckButton, Dialog, Label, Orientation, ResponseType, ScrolledWindow,
+    Window,
 };
 
 #[allow(dead_code)]
@@ -13,24 +13,72 @@ pub struct QualityOption {
 
 #[allow(dead_code)]
 pub const QUALITIES: &[QualityOption] = &[
-    QualityOption { id: "best_mp4", label: "Best Quality (MP4)",  desc: "Highest resolution" },
-    QualityOption { id: "2160p",    label: "4K Ultra HD",         desc: "3840x2160" },
-    QualityOption { id: "1440p",    label: "2K QHD",              desc: "2560x1440" },
-    QualityOption { id: "1080p",    label: "1080p Full HD",       desc: "1920x1080" },
-    QualityOption { id: "720p",     label: "720p HD",             desc: "1280x720" },
-    QualityOption { id: "480p",     label: "480p SD",             desc: "854x480" },
-    QualityOption { id: "360p",     label: "360p Low",            desc: "640x360" },
-    QualityOption { id: "audio_best", label: "Audio M4A",         desc: "Best quality" },
-    QualityOption { id: "audio_mp3",  label: "Audio MP3",         desc: "320kbps" },
+    QualityOption {
+        id: "best_mp4",
+        label: "Best Quality (MP4)",
+        desc: "Highest resolution",
+    },
+    QualityOption {
+        id: "2160p",
+        label: "4K Ultra HD",
+        desc: "3840x2160",
+    },
+    QualityOption {
+        id: "1440p",
+        label: "2K QHD",
+        desc: "2560x1440",
+    },
+    QualityOption {
+        id: "1080p",
+        label: "1080p Full HD",
+        desc: "1920x1080",
+    },
+    QualityOption {
+        id: "720p",
+        label: "720p HD",
+        desc: "1280x720",
+    },
+    QualityOption {
+        id: "480p",
+        label: "480p SD",
+        desc: "854x480",
+    },
+    QualityOption {
+        id: "360p",
+        label: "360p Low",
+        desc: "640x360",
+    },
+    QualityOption {
+        id: "audio_best",
+        label: "Audio M4A",
+        desc: "Best quality",
+    },
+    QualityOption {
+        id: "audio_mp3",
+        label: "Audio MP3",
+        desc: "320kbps",
+    },
 ];
 
+/// Dialog pemilihan kualitas ala IDM.
+///
+/// v2.3.2 (M4): pola callback event-driven — `on_ok(String)` dipanggil dari
+/// sinyal `response` saat user menekan "Unduh"; "Batal"/tutup = tidak ada
+/// aksi. Pola lama (`-> Option<String>` + `while dialog.is_visible() {
+/// main_context.iteration(true) }`) adalah NESTED main loop: berisiko
+/// reentrancy, dan punya bug nyata — dialog di-Cancel tetap melanjutkan
+/// download (return None dianggap "tanpa kualitas"), kini dibatalkan benar.
 #[allow(dead_code)]
-pub fn show_quality_dialog(
+pub fn show_quality_dialog<F>(
     parent: &Window,
     title: &str,
     uploader: &str,
     duration_str: &str,
-) -> Option<String> {
+    formats: Vec<crate::downloader::youtube::FormatOption>,
+    on_ok: F,
+) where
+    F: FnOnce(String) + 'static,
+{
     let dialog = Dialog::with_buttons(
         Some("Pilih Kualitas Video"),
         Some(parent),
@@ -93,39 +141,47 @@ pub fn show_quality_dialog(
     let mut first_btn: Option<CheckButton> = None;
 
     for q in QUALITIES {
-        let radio = match &first_btn {
-            Some(first) => {
-                let r = CheckButton::new();
-                r.set_group(Some(first));
-                r
-            }
-            None => CheckButton::new(),
-        };
-        if first_btn.is_none() {
+        let is_default = first_btn.is_none();
+        let (radio, row) = quality_row(
+            &selected,
+            first_btn.as_ref(),
+            q.id,
+            q.label,
+            q.desc,
+            is_default,
+        );
+        if is_default {
             first_btn = Some(radio.clone());
-            radio.set_active(true);
         }
-
-        let label = Label::new(None);
-        label.set_markup(&format!(
-            "<b>{}</b>  <span color='#585b70'>{}</span>",
-            q.label, q.desc
-        ));
-        label.set_halign(gtk4::Align::Start);
-
-        let row = GtkBox::new(Orientation::Horizontal, 8);
-        row.append(&radio);
-        row.append(&label);
-
-        let sel = selected.clone();
-        let qid = q.id.to_string();
-        radio.connect_toggled(move |btn| {
-            if btn.is_active() {
-                *sel.borrow_mut() = qid.clone();
-            }
-        });
-
         quality_box.append(&row);
+    }
+
+    // v2.6.0 (D6): format NYATA dari situs (hasil `yt-dlp -J` yang diambil
+    // window.rs sebelum dialog dibuka). Kosong = fetch gagal/tidak diminta →
+    // dialog persis seperti versi sebelumnya (hanya preset).
+    if !formats.is_empty() {
+        let hdr = Label::new(Some(&format!(
+            "Format lengkap dari situs ({}):",
+            formats.len()
+        )));
+        hdr.set_halign(gtk4::Align::Start);
+        hdr.set_margin_top(8);
+        hdr.add_css_class("detail-label");
+        quality_box.append(&hdr);
+        for f in &formats {
+            let (radio, row) = quality_row(
+                &selected,
+                first_btn.as_ref(),
+                &f.id,
+                &f.label,
+                &f.desc,
+                false,
+            );
+            if first_btn.is_none() {
+                first_btn = Some(radio.clone());
+            }
+            quality_box.append(&row);
+        }
     }
 
     scroll.set_child(Some(&quality_box));
@@ -161,42 +217,61 @@ pub fn show_quality_dialog(
     btn_box.append(&dl_btn);
     content.append(&btn_box);
 
-    dialog.show();
-
-    // GTK4 uses async dialogs differently — blocking approach via nested main loop
+    // v2.3.2 (M4): tanpa nested main loop — keputusan user ditangani sinyal
+    // `response`; tidak ada loop yang bisa menggantung, jadi guard
+    // connect_close_request pola lama tidak diperlukan lagi.
     let sel_result = selected.clone();
-    let main_context = glib::MainContext::default();
-    let response_val = std::rc::Rc::new(std::cell::RefCell::new(ResponseType::Cancel));
-    let responded_flg = std::rc::Rc::new(std::cell::RefCell::new(false));
-
-    let rv = response_val.clone();
-    let rf = responded_flg.clone();
+    let on_ok = std::rc::Rc::new(std::cell::RefCell::new(Some(on_ok)));
     dialog.connect_response(move |d, resp| {
-        *rv.borrow_mut() = resp;
-        *rf.borrow_mut() = true;
+        if resp == ResponseType::Ok {
+            let q = sel_result.borrow().clone();
+            if let Some(f) = on_ok.borrow_mut().take() {
+                f(q);
+            }
+        }
         d.close();
     });
+    dialog.show();
+}
 
-    // Kalau user menutup lewat tombol close window (bukan tombol dialog),
-    // GTK4 tidak selalu emit response → loop bisa menggantung. Beri nilai
-    // Cancel kalau belum ada response, supaya dialog pasti selesai.
-    let rv2 = response_val.clone();
-    let rf2 = responded_flg.clone();
-    dialog.connect_close_request(move |_| {
-        if !*rf2.borrow() {
-            *rv2.borrow_mut() = ResponseType::Cancel;
+/// Satu baris dialog: radio (se-group) + nama + detail. TEKS BIASA, bukan
+/// markup Pango — sejak D6 data label/desc bisa berasal dari output yt-dlp
+/// (data halaman!) dan tidak boleh diinterpretasikan sebagai markup.
+fn quality_row(
+    selected: &std::rc::Rc<std::cell::RefCell<String>>,
+    first: Option<&CheckButton>,
+    id: &str,
+    label_txt: &str,
+    desc: &str,
+    default_active: bool,
+) -> (CheckButton, GtkBox) {
+    let radio = match first {
+        Some(f) => {
+            let r = CheckButton::new();
+            r.set_group(Some(f));
+            r
         }
-        glib::Propagation::Proceed
+        None => CheckButton::new(),
+    };
+    if default_active {
+        radio.set_active(true);
+    }
+    let row = GtkBox::new(Orientation::Horizontal, 8);
+    let label = Label::new(Some(label_txt));
+    label.set_halign(gtk4::Align::Start);
+    row.append(&radio);
+    row.append(&label);
+    if !desc.is_empty() {
+        let d = Label::new(Some(desc));
+        d.add_css_class("detail-label");
+        row.append(&d);
+    }
+    let sel = selected.clone();
+    let owned = id.to_string();
+    radio.connect_toggled(move |btn| {
+        if btn.is_active() {
+            *sel.borrow_mut() = owned.clone();
+        }
     });
-
-    // Block until dialog closes
-    while dialog.is_visible() {
-        main_context.iteration(true);
-    }
-
-    if *response_val.borrow() == ResponseType::Ok {
-        Some(sel_result.borrow().clone())
-    } else {
-        None
-    }
+    (radio, row)
 }

@@ -1,8 +1,6 @@
 use crate::downloader::types::{DownloadInfo, DownloadStatus};
 use gtk4::prelude::*;
-use gtk4::{
-    Box as GtkBox, Button, Label, Orientation, ProgressBar,
-};
+use gtk4::{Box as GtkBox, Button, Label, Orientation, ProgressBar};
 
 pub struct DownloadRow {
     pub root: gtk4::ListBoxRow,
@@ -73,7 +71,9 @@ impl DownloadRow {
         let row3 = GtkBox::new(Orientation::Horizontal, 0);
 
         let size_lbl = Label::new(Some(&format!(
-            "{} / {}", info.downloaded_fmt(), info.total_size_fmt()
+            "{} / {}",
+            info.downloaded_fmt(),
+            info.total_size_fmt()
         )));
         size_lbl.set_hexpand(true);
         size_lbl.set_halign(gtk4::Align::Start);
@@ -114,14 +114,17 @@ impl DownloadRow {
         row4.set_margin_top(4);
 
         // B4: tombol selalu tampil (layout stabil) — yang tidak relevan di-disable
-        let pause_btn  = make_btn("Jeda",    &["btn-action", "btn-pause"], "Jeda unduhan");
-        let resume_btn = make_btn("Lanjut",  &["btn-action", "btn-resume"], "Lanjutkan unduhan");
-        let retry_btn  = make_btn("Ulangi",  &["btn-action", "btn-retry"], "Coba lagi");
-        let cancel_btn = make_btn("Batal",   &["btn-action", "btn-cancel"], "Batalkan unduhan");
-        let open_btn   = make_btn("Folder",  &["btn-action", "btn-open"], "Buka folder tujuan");
+        let pause_btn = make_btn("Jeda", &["btn-action", "btn-pause"], "Jeda unduhan");
+        let resume_btn = make_btn("Lanjut", &["btn-action", "btn-resume"], "Lanjutkan unduhan");
+        let retry_btn = make_btn("Ulangi", &["btn-action", "btn-retry"], "Coba lagi");
+        let cancel_btn = make_btn("Batal", &["btn-action", "btn-cancel"], "Batalkan unduhan");
+        let open_btn = make_btn("Folder", &["btn-action", "btn-open"], "Buka folder tujuan");
         // A5: jelaskan bahwa Remove tidak menghapus file
-        let remove_btn = make_btn("Hapus",   &["btn-action", "btn-remove"],
-            "Hapus dari daftar (file tetap ada di disk)");
+        let remove_btn = make_btn(
+            "Hapus",
+            &["btn-action", "btn-remove"],
+            "Hapus dari daftar (file tetap ada di disk)",
+        );
 
         row4.append(&retry_btn);
         row4.append(&resume_btn);
@@ -165,10 +168,13 @@ impl DownloadRow {
     pub fn update(&mut self, info: &DownloadInfo) {
         self.filename_lbl.set_text(&info.filename);
         self.filename_lbl.set_tooltip_text(Some(&info.url));
-        self.progress_bar.set_fraction((info.progress / 100.0).min(1.0));
+        self.progress_bar
+            .set_fraction((info.progress / 100.0).min(1.0));
         self.pct_label.set_text(&format!("{:.1}%", info.progress));
         self.size_lbl.set_text(&format!(
-            "{} / {}", info.downloaded_fmt(), info.total_size_fmt()
+            "{} / {}",
+            info.downloaded_fmt(),
+            info.total_size_fmt()
         ));
 
         if info.speed > 0 {
@@ -192,8 +198,11 @@ impl DownloadRow {
         let has_err = !info.error_msg.is_empty();
         let has_info = !has_err && !info.status_detail.is_empty();
         if has_err || has_info {
-            self.error_lbl
-                .set_text(if has_err { &info.error_msg } else { &info.status_detail });
+            self.error_lbl.set_text(if has_err {
+                &info.error_msg
+            } else {
+                &info.status_detail
+            });
             for c in ["error-label", "info-label"] {
                 self.error_lbl.remove_css_class(c);
                 self.status_icon.remove_css_class(c);
@@ -211,8 +220,12 @@ impl DownloadRow {
 
     fn update_badge(&self, status: &DownloadStatus) {
         let classes = [
-            "badge-downloading", "badge-resolving", "badge-completed",
-            "badge-error", "badge-paused", "badge-cancelled",
+            "badge-downloading",
+            "badge-resolving",
+            "badge-completed",
+            "badge-error",
+            "badge-paused",
+            "badge-cancelled",
         ];
         for c in &classes {
             self.status_lbl.remove_css_class(c);
@@ -220,12 +233,12 @@ impl DownloadRow {
 
         let cls = match status {
             DownloadStatus::Downloading => "badge-downloading",
-            DownloadStatus::Resolving   => "badge-resolving",
-            DownloadStatus::Completed   => "badge-completed",
-            DownloadStatus::Error       => "badge-error",
-            DownloadStatus::Paused      => "badge-paused",
-            DownloadStatus::Cancelled   => "badge-cancelled",
-            DownloadStatus::Queued      => "badge-paused",
+            DownloadStatus::Resolving => "badge-resolving",
+            DownloadStatus::Completed => "badge-completed",
+            DownloadStatus::Error => "badge-error",
+            DownloadStatus::Paused => "badge-paused",
+            DownloadStatus::Cancelled => "badge-cancelled",
+            DownloadStatus::Queued => "badge-paused",
         };
         self.status_lbl.add_css_class(cls);
     }
@@ -236,17 +249,20 @@ impl DownloadRow {
         }
         match status {
             DownloadStatus::Completed => self.progress_bar.add_css_class("completed"),
-            DownloadStatus::Error     => self.progress_bar.add_css_class("error"),
-            DownloadStatus::Paused    => self.progress_bar.add_css_class("paused"),
+            DownloadStatus::Error => self.progress_bar.add_css_class("error"),
+            DownloadStatus::Paused => self.progress_bar.add_css_class("paused"),
             _ => {}
         }
     }
 
     fn update_buttons(&mut self, status: &DownloadStatus) {
-        let active = matches!(status, DownloadStatus::Downloading | DownloadStatus::Resolving);
+        let active = matches!(
+            status,
+            DownloadStatus::Downloading | DownloadStatus::Resolving
+        );
         let paused = matches!(status, DownloadStatus::Paused);
-        let error  = matches!(status, DownloadStatus::Error);
-        let done   = matches!(status, DownloadStatus::Completed);
+        let error = matches!(status, DownloadStatus::Error);
+        let done = matches!(status, DownloadStatus::Completed);
         let cancel = matches!(status, DownloadStatus::Cancelled);
         let queued = matches!(status, DownloadStatus::Queued);
 
@@ -254,11 +270,13 @@ impl DownloadRow {
         self.pause_btn.set_sensitive(active);
         self.resume_btn.set_sensitive(paused);
         self.retry_btn.set_sensitive(error);
-        self.cancel_btn.set_sensitive(active || paused || error || queued);
+        self.cancel_btn
+            .set_sensitive(active || paused || error || queued);
         self.open_btn.set_sensitive(done);
         // B11: item Paused/Queued juga bisa dihapus — clear_download() sudah
         // men-kill prosesnya, tidak perlu cancel manual dulu.
-        self.remove_btn.set_sensitive(done || cancel || error || paused || queued);
+        self.remove_btn
+            .set_sensitive(done || cancel || error || paused || queued);
     }
 }
 
@@ -266,12 +284,12 @@ impl DownloadRow {
 fn status_label(status: &DownloadStatus) -> &'static str {
     match status {
         DownloadStatus::Downloading => "MENGUNDUH",
-        DownloadStatus::Resolving   => "MEMPROSES",
-        DownloadStatus::Completed   => "SELESAI",
-        DownloadStatus::Error       => "GAGAL",
-        DownloadStatus::Paused      => "JEDA",
-        DownloadStatus::Cancelled   => "DIBATALKAN",
-        DownloadStatus::Queued      => "ANTRIAN",
+        DownloadStatus::Resolving => "MEMPROSES",
+        DownloadStatus::Completed => "SELESAI",
+        DownloadStatus::Error => "GAGAL",
+        DownloadStatus::Paused => "JEDA",
+        DownloadStatus::Cancelled => "DIBATALKAN",
+        DownloadStatus::Queued => "ANTRIAN",
     }
 }
 

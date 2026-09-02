@@ -7,31 +7,37 @@
 
 ## 0. Status Perbaikan (v2.3.0 — 2026-09-02, branch `arena/01a0626b-fast-dm`)
 
-| Item                              | Status         | Catatan                                                                                                                                                                           |
-| --------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| K1 socket /tmp                    | ✅ Fixed       | `Config::ipc_socket_path()` → XDG_RUNTIME_DIR (validasi owner+0700) / fallback `~/.config/fast-dm/run`; `SO_PEERCRED` uid-check di accept; socket lama dibersihkan saat start     |
-| K2 wildcard build.sh              | ✅ Fixed       | `build.sh` + `build.patch` + `ci/build.yml.example` dihapus; packaging resmi = `packaging/build-deb.sh`                                                                           |
-| K3 aria2 input di /tmp            | ✅ Fixed       | `Config::aria2_input_dir()` privat, file 0600, GC sisa crash saat engine start                                                                                                    |
-| K4 kill hanya parent              | ✅ Fixed       | child di-spawn `process_group(0)`; `kill_child_pid`=killpg SIGTERM (pause/resume-friendly), `kill_child_group_hard`=SIGKILL group (cancel); jalur tutup-window ikut pakai helper  |
-| K5 README vs kode                 | ✅ Fixed       | `Config.auto_resume` (default ON) + `resume_restored()` — auto-resume nyata, toggle di Settings; README disinkronkan                                                              |
-| M2 daftar ekstensi                | ✅ Fixed       | daftar direct-file diselaraskan (+tests)                                                                                                                                          |
-| M3 limit dibagi statis            | ✅ Fixed       | `resolve_speed_limit(total, live_share)` adaptif saat start; promosi membawa config mentah (anti double-division). Batas proses berjalan tidak di-recalc (butuh RPC — roadmap B2) |
-| M5 session korup diam-diam        | ✅ Fixed       | format `{version:1,downloads}` + fallback legacy array + backup `*.corrupt-<ts>` + tests                                                                                          |
-| M6 regex YouTube kaku             | ✅ Fixed       | host+path based, `/live/ /embed/ /v/`, `v=` posisi berapa pun, tolak host mirip                                                                                                   |
-| M7 cookie TTL 1 tahun             | ✅ Fixed       | TTL 24 jam + GC >7 hari saat start                                                                                                                                                |
-| M8 sampah folder browser          | ✅ Fixed       | manifest hanya ditulis bila profil browser ada                                                                                                                                    |
-| M9 leak listener overlay          | ✅ Fixed       | AbortController per-attach di content.js                                                                                                                                          |
-| M10 error_msg = info              | ✅ Fixed       | field baru `status_detail` + `.info-label` biru                                                                                                                                   |
-| M11 skema tak divalidasi          | ✅ Fixed       | `add_download` tolak non-http(s)/ftp dengan pesan jelas                                                                                                                           |
-| L1 LICENSE/CHANGELOG hilang       | ✅ Fixed       | keduanya dibuat                                                                                                                                                                   |
-| L3 drift packaging                | ✅ Fixed       | file basi dihapus; versi Cargo.toml==manifest.json==2.3.0                                                                                                                         |
-| L4 FIFO tak deterministik         | ✅ Fixed       | `created` milidetik + kunci pembanding `id`                                                                                                                                       |
-| L7 timeout sendToNative           | ✅ Fixed       | 25 s + pesan                                                                                                                                                                      |
-| M1 tokio::process refactor        | ⏭️ Not started | refactor besar, butuh compiler run — masuk roadmap Sprint 2                                                                                                                       |
-| M4 dialog nested loop             | ⏭️ Not started | ubah ke async pattern — berisiko tanpa test GUI                                                                                                                                   |
-| L2 AGENTS.md usang                | ✅ Fixed       | ditulis ulang v0.2.0 sesuai arsitektur nyata                                                                                                                                      |
-| L10 CI tanpa clippy/audit         | ⚠️ Partial     | komentar basi dibersihkan; step clippy/deny belum (butuh keputusan policy)                                                                                                        |
-| D-x (fitur), B-x (arsitektur RPC) | 📋 Roadmap     | lihat §5 dokumen ini                                                                                                                                                              |
+| Item | Status | Catatan |
+|---|---|---|
+| K1 socket /tmp | ✅ Fixed | `Config::ipc_socket_path()` → XDG_RUNTIME_DIR (validasi owner+0700) / fallback `~/.config/fast-dm/run`; `SO_PEERCRED` uid-check di accept; socket lama dibersihkan saat start |
+| K2 wildcard build.sh | ✅ Fixed | `build.sh` + `build.patch` + `ci/build.yml.example` dihapus; packaging resmi = `packaging/build-deb.sh` |
+| K3 aria2 input di /tmp | ✅ Fixed | `Config::aria2_input_dir()` privat, file 0600, GC sisa crash saat engine start |
+| K4 kill hanya parent | ✅ Fixed | child di-spawn `process_group(0)`; `kill_child_pid`=killpg SIGTERM (pause/resume-friendly), `kill_child_group_hard`=SIGKILL group (cancel); jalur tutup-window ikut pakai helper |
+| K5 README vs kode | ✅ Fixed | `Config.auto_resume` (default ON) + `resume_restored()` — auto-resume nyata, toggle di Settings; README disinkronkan |
+| M2 daftar ekstensi | ✅ Fixed | daftar direct-file diselaraskan (+tests) |
+| M3 limit dibagi statis | ✅ Fixed | `resolve_speed_limit(total, live_share)` adaptif saat start; promosi membawa config mentah (anti double-division). Batas proses berjalan tidak di-recalc (butuh RPC — roadmap B2) |
+| M5 session korup diam-diam | ✅ Fixed | format `{version:1,downloads}` + fallback legacy array + backup `*.corrupt-<ts>` + tests |
+| M6 regex YouTube kaku | ✅ Fixed | host+path based, `/live/ /embed/ /v/`, `v=` posisi berapa pun, tolak host mirip |
+| M7 cookie TTL 1 tahun | ✅ Fixed | TTL 24 jam + GC >7 hari saat start |
+| M8 sampah folder browser | ✅ Fixed | manifest hanya ditulis bila profil browser ada |
+| M9 leak listener overlay | ✅ Fixed | AbortController per-attach di content.js |
+| M10 error_msg = info | ✅ Fixed | field baru `status_detail` + `.info-label` biru |
+| M11 skema tak divalidasi | ✅ Fixed | `add_download` tolak non-http(s)/ftp dengan pesan jelas |
+| L1 LICENSE/CHANGELOG hilang | ✅ Fixed | keduanya dibuat |
+| L3 drift packaging | ✅ Fixed | file basi dihapus; versi Cargo.toml==manifest.json==2.3.0 |
+| L4 FIFO tak deterministik | ✅ Fixed | `created` milidetik + kunci pembanding `id` |
+| L7 timeout sendToNative | ✅ Fixed | 25 s + pesan |
+| M1 tokio::process refactor | ✅ v2.3.1 | `tokio::process` + `ChildLines` + ticker 500ms + wait paus bounded 30s + kill_on_drop; panic `rt.block_on` di `universal.rs` ikut dibasmi |
+| M4 dialog nested loop | ✅ v2.3.2 | settings & quality dialog kini callback event-driven; bug "Batal tetap unduh" ikut hilang |
+| D3 proxy global | ✅ v2.4.0 | `Config::proxy_url` → `--all-proxy` (aria2) & `--proxy` (yt-dlp + resolver universal); tervalidasi saat Simpan |
+| D1 clipboard monitor | ✅ v2.4.0 | opt-in via Pengaturan; polling CLI `wl-paste`/`xclip` (tanpa dep crate baru), dedup konten, auto-stop bila tool absen |
+| D2 save-as dialog | ✅ v2.5.0 | tombol "Simpan Sebagai…" → FileDialog save_file (nama dari URL, folder awal = Download); dialog kualitas tetap menyusul; helper on_add diekstrak & diunit-test |
+| D6 format nyata yt-dlp | ✅ v2.6.0 | `fetch_formats` (yt-dlp -J, cap 20s) → section dinamis di dialog; id nyata → passthrough `--format <id>/best`; gagal → fallback preset |
+| B2.1 magnet via RPC | ✅ v2.7.0 | `aria2_rpc.rs`: daemon self-spawn (loopback+secret 600), addUri/tellStatus/forcePause, changeGlobalOption limit live; http per-proses masih jalur lama (B2.2 = migrasi penuh) |
+| D8.1 close-behavior+autostart | ✅ v2.8.0 | minimize-to-close opt-in (re-show via single-instance present()), XDG autostart write/remove; tray SNI ditangguh (dep berisiko) |
+| M11 skema tak divalidasi | ✅ Fixed || L2 AGENTS.md usang | ✅ Fixed | ditulis ulang v0.2.0 sesuai arsitektur nyata |
+| L10 CI tanpa clippy/audit | ⚠️ Partial | komentar basi dibersihkan; step clippy/deny belum (butuh keputusan policy) |
+| D-x (fitur), B-x (arsitektur RPC) | 📋 Roadmap | lihat §5 dokumen ini |
 
 ---
 
@@ -42,13 +48,13 @@
 Fast-DM adalah **Download Manager ala IDM untuk Linux** yang tidak mengimplementasikan
 protokol HTTP download sendiri, melainkan menjadi **orkestrator** dari dua tool CLI ternama:
 
-| Komponen                  | Teknologi                                            | Peran                                                        |
-| ------------------------- | ---------------------------------------------------- | ------------------------------------------------------------ |
-| Core app                  | Rust 2021, Tokio, GTK4 (`gtk4 0.9`, feature `v4_12`) | Scheduler, state, GUI, IPC                                   |
-| Accelerator file langsung | **aria2c** (subprocess CLI)                          | Multi-koneksi, resume, segmented download                    |
-| Resolver situs video      | **yt-dlp** (subprocess CLI)                          | YouTube + 1800+ situs, HLS/DASH, ekstraksi audio             |
-| Integrasi browser         | Ekstensi Manifest V3 + **Chrome Native Messaging**   | Intercept download, overlay tombol ⚡, kirim cookies/referer |
-| Packaging                 | `.deb` (dpkg-deb), zip extension, GitHub Actions CI  | Distribusi                                                   |
+| Komponen | Teknologi | Peran |
+|---|---|---|
+| Core app | Rust 2021, Tokio, GTK4 (`gtk4 0.9`, feature `v4_12`) | Scheduler, state, GUI, IPC |
+| Accelerator file langsung | **aria2c** (subprocess CLI) | Multi-koneksi, resume, segmented download |
+| Resolver situs video | **yt-dlp** (subprocess CLI) | YouTube + 1800+ situs, HLS/DASH, ekstraksi audio |
+| Integrasi browser | Ekstensi Manifest V3 + **Chrome Native Messaging** | Intercept download, overlay tombol ⚡, kirim cookies/referer |
+| Packaging | `.deb` (dpkg-deb), zip extension, GitHub Actions CI | Distribusi |
 
 Satu crate punya dua target: library `fast_dm` (di-import integration test) dan
 binary `fast-dm` dengan dispatch mode via flag:
@@ -174,7 +180,7 @@ Extension (SW) ──sendNativeMessage──> fast-dm --native ──1 baris JSO
 
 - `manifest.json`: MV3, `key` dipin → ID unpacked stabil (`EXT_ID` di repo = ID yang sama),
   permission: `downloads, nativeMessaging, storage, activeTab, contextMenus, cookies,
-clipboardRead`, host `<all_urls>`.
+  clipboardRead`, host `<all_urls>`.
 - `background.js` (service worker):
   1. **auto-register extension id** ke NMH (sekali per ID; retry on startup/install);
   2. `chrome.downloads.onCreated` → **intersep**: filter (exclude pattern, ekstensi file,
@@ -221,7 +227,6 @@ clipboardRead`, host `<all_urls>`.
 ## 3. Kelebihan
 
 **Arsitektur & rekayasa**
-
 1. **Tidak reinvent-the-wheel**: download berat didelegasikan ke aria2c/yt-dlp yang sudah
    tahan banting (resume, multi-connection, 1800+ extractor, HLS/DASH merge). Aplikasi
    fokus ke apa yang tool CLI tidak punya: GUI, antrean, integrasi browser, persistensi.
@@ -238,20 +243,27 @@ clipboardRead`, host `<all_urls>`.
 5. **Proses mati dengan sopan**: SIGTERM agar `.aria2` control file tertulis (B8),
    reap child anti-zombie, GUI spawn detached stdio-null (B4), prerm bersihkan socket.
 
-**Keamanan (di atas rata-rata proyek hobi)** 6. Cookies & file sensitif mode **0600**; strip `\r\n` header anti injeksi; sanitasi
-filename + proteksi path traversal; cap pesan 1 MB di NMH **dan** IPC (anti OOM);
-validasi extension ID untuk `register`; `verify_tls` default ON (opt-out eksplisit);
-tolak HTML yang menyamar jadi file. 7. `allowed_origins` NMH **tanpa wildcard** di jalur utama (EXT_ID pin + registry
-register) — sengaja dicatat di komentar setup-browser.sh.
+**Keamanan (di atas rata-rata proyek hobi)**
+6. Cookies & file sensitif mode **0600**; strip `\r\n` header anti injeksi; sanitasi
+   filename + proteksi path traversal; cap pesan 1 MB di NMH **dan** IPC (anti OOM);
+   validasi extension ID untuk `register`; `verify_tls` default ON (opt-out eksplisit);
+   tolak HTML yang menyamar jadi file.
+7. `allowed_origins` NMH **tanpa wildcard** di jalur utama (EXT_ID pin + registry
+   register) — sengaja dicatat di komentar setup-browser.sh.
 
-**Integrasi browser** 8. Sniffer MAIN-world (hook fetch/XHR) + jembatan dataset antar-world — teknik yang
-benar; overlay SPA-aware; HttpOnly cookie via `chrome.cookies` (bukan `document.cookie`). 9. Auto-register extension id + fallback intersep (cancel → kirim ke app → kalau app mati,
-Chrome lanjut download normal, `selfInitiated` anti-loop).
+**Integrasi browser**
+8. Sniffer MAIN-world (hook fetch/XHR) + jembatan dataset antar-world — teknik yang
+   benar; overlay SPA-aware; HttpOnly cookie via `chrome.cookies` (bukan `document.cookie`).
+9. Auto-register extension id + fallback intersep (cancel → kirim ke app → kalau app mati,
+   Chrome lanjut download normal, `selfInitiated` anti-loop).
 
-**Kualitas kode & DX** 10. ±106 unit+integration test untuk fungsi murni (parser, sanitizer, walk-up cookies,
-roundtrip serde, char-boundary truncation UTF-8), test tanpa dep berat (stdlib-only). 11. Komentar "mengapa" (bukan "apa") dengan kode bug (B1–B20) — jejak audit yang jelas;
-error init dipropagasi (bukan panic) `try_new` + signature-lock regression test. 12. Profil release agresif (LTO, codegen-units=1, strip, panic=abort); CI terstruktur +
-concurrency cancel; `.deb` + zip extension siap-pakai; dev-mode NMH wrapper otomatis.
+**Kualitas kode & DX**
+10. ±106 unit+integration test untuk fungsi murni (parser, sanitizer, walk-up cookies,
+    roundtrip serde, char-boundary truncation UTF-8), test tanpa dep berat (stdlib-only).
+11. Komentar "mengapa" (bukan "apa") dengan kode bug (B1–B20) — jejak audit yang jelas;
+    error init dipropagasi (bukan panic) `try_new` + signature-lock regression test.
+12. Profil release agresif (LTO, codegen-units=1, strip, panic=abort); CI terstruktur +
+    concurrency cancel; `.deb` + zip extension siap-pakai; dev-mode NMH wrapper otomatis.
 
 ---
 
@@ -259,46 +271,46 @@ concurrency cancel; `.deb` + zip extension siap-pakai; dev-mode NMH wrapper otom
 
 ### Kritis / Tinggi
 
-| #   | Isu                                                               | Detail                                                                                                                                                                                                                                                                                         | Lokasi                                    |
-| --- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| K1  | **Socket IPC di `/tmp` publik**                                   | `/tmp/fast-dm-<uid>.sock` — user lain bisa **pre-create socket** di path itu; app melihat "connect OK" → skip server; extension mengirim **URL + cookies** ke socket milik attacker (pencurian kredensial). Solusi: `XDG_RUNTIME_DIR` (0700) atau verifikasi `SO_PEERCRED`+`getuid` di accept. | `ipc/mod.rs:36`, `native_host/mod.rs:105` |
-| K2  | **`build.sh` postinst = wildcard `chrome-extension://*/*`**       | Deb hasil `build.sh` mengizinkan **ekstensi apa pun** memanggil NMH → kirim aksi `download`/`list`/tulis cookies. (Jalur CI `packaging/build-deb.sh` aman, tapi dua jalur build yang bertentangan = jebakan.) Seharusnya hanya satu skrip build.                                               | `build.sh:155` vs `setup-browser.sh:8`    |
-| K3  | **URL (sering bertoken) ditulis ke `/tmp/fast-dm/<id>.txt`**      | Dir dibuat tanpa mode eksplisit → bergantung umask; file input-file berisi signed URL tertinggal bila app crash (tidak dibersihkan saat start). Solusi: dir `0700` under `XDG_RUNTIME_DIR`/`Config::config_dir()`, atau kirim URL via argumen, + GC file yatim saat start.                     | `aria2.rs:113-121`                        |
-| K4  | **Kill hanya ke proses langsung**                                 | `kill_child_pid` men-SIGTERM child (yt-dlp) tapi **ffmpeg cucu tidak ikut** — yt-dlp spawn ffmpeg untuk merge; pause/cancel bisa menyisakan ffmpeg yatim yang menulis file. Solusi: spawn child dengan `process_group(0)` lalu `killpg`.                                                       | `mod.rs:468`                              |
-| K5  | **README vs kode: "otomatis di-resume saat restart" tidak benar** | Restore men-set `Paused` (`mod.rs:34`); tidak ada auto-start → user harus klik (atau "Lanjut Semua"). Fix salah satu: implementasikan auto-resume (opsi config) atau perbaiki klaim.                                                                                                           | `README.md:15`                            |
+| # | Isu | Detail | Lokasi |
+|---|---|---|---|
+| K1 | **Socket IPC di `/tmp` publik** | `/tmp/fast-dm-<uid>.sock` — user lain bisa **pre-create socket** di path itu; app melihat "connect OK" → skip server; extension mengirim **URL + cookies** ke socket milik attacker (pencurian kredensial). Solusi: `XDG_RUNTIME_DIR` (0700) atau verifikasi `SO_PEERCRED`+`getuid` di accept. | `ipc/mod.rs:36`, `native_host/mod.rs:105` |
+| K2 | **`build.sh` postinst = wildcard `chrome-extension://*/*`** | Deb hasil `build.sh` mengizinkan **ekstensi apa pun** memanggil NMH → kirim aksi `download`/`list`/tulis cookies. (Jalur CI `packaging/build-deb.sh` aman, tapi dua jalur build yang bertentangan = jebakan.) Seharusnya hanya satu skrip build. | `build.sh:155` vs `setup-browser.sh:8` |
+| K3 | **URL (sering bertoken) ditulis ke `/tmp/fast-dm/<id>.txt`** | Dir dibuat tanpa mode eksplisit → bergantung umask; file input-file berisi signed URL tertinggal bila app crash (tidak dibersihkan saat start). Solusi: dir `0700` under `XDG_RUNTIME_DIR`/`Config::config_dir()`, atau kirim URL via argumen, + GC file yatim saat start. | `aria2.rs:113-121` |
+| K4 | **Kill hanya ke proses langsung** | `kill_child_pid` men-SIGTERM child (yt-dlp) tapi **ffmpeg cucu tidak ikut** — yt-dlp spawn ffmpeg untuk merge; pause/cancel bisa menyisakan ffmpeg yatim yang menulis file. Solusi: spawn child dengan `process_group(0)` lalu `killpg`. | `mod.rs:468` |
+| K5 | **README vs kode: "otomatis di-resume saat restart" tidak benar** | Restore men-set `Paused` (`mod.rs:34`); tidak ada auto-start → user harus klik (atau "Lanjut Semua"). Fix salah satu: implementasikan auto-resume (opsi config) atau perbaiki klaim. | `README.md:15` |
 
 ### Sedang
 
-| #   | Isu                                                                                  | Detail                                                                                                                                                                                                                                                                       | Lokasi                                      |
-| --- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| M1  | **1 blocking thread + 1 stderr thread per download**, `rt.block_on` per baris stdout | `spawn_blocking` + `std::process::Command` + sinkron; tiap baris output memicu block_on cek status. Jalan di 2-worker runtime + max 10 concurrent, tapi boros; arsitektur ideal: `tokio::process` + `AsyncBufRead` event-driven (lihat O2).                                  | `aria2.rs`, `youtube.rs`                    |
-| M2  | **Daftar ekstensi `is_direct_file_url` ≠ daftar extension-intercept**                | `.exe/.msi/.dmg/.bz2/.doc(x)/.xls(x)` diintersep extension tapi tidak ada di daftar Rust → dibuang 1–3 dtk mencoba yt-dlp dulu, baru fallback aria2.                                                                                                                         | `mod.rs:392` vs `background.js`             |
-| M3  | **Limit kecepatan dibagi rata `max_concurrent` permanen**                            | 1 unduhan aktif hanya dapat `limit/3` — tidak memanfaatkan bandwidth; solusi benar: aria2 daemon JSON-RPC (satu `--max-overall-download-limit` global) atau hitung per **jumlah aktif saat ini**.                                                                            | `aria2.rs per_process_speed_limit`          |
-| M4  | **Nested main-loop dialog sinkron**                                                  | `while dialog.is_visible() { iteration(true) }` — rapuh (app quit, dialog ditutup paksa), memblokir interaksi window lain; drag-drop multi-URL memunculkan dialog beruntun. Pola GTK4 yang benar: async dialog + callback.                                                   | `window.rs:890`, `youtube_dialog.rs:193`    |
-| M5  | **`session.json` korup → semua riwayat hilang diam-diam**                            | `unwrap_or_default()` tanpa backup/versi skema.                                                                                                                                                                                                                              | `mod.rs load_session`                       |
-| M6  | **Deteksi YouTube terlalu kaku**                                                     | Regex menuntut `watch?v=` sebagai param pertama → `watch?app=desktop&v=…`, `/live/<id>`, `/embed/` (di GUI) tidak terdeteksi (content script memang handle embed, tapi jalur GUI/URL-typing miss → yt-dlp tetap berhasil via universal, hanya dialog kualitas tidak muncul). | `youtube.rs:9-12`                           |
-| M7  | **Cookies lama 1 tahun di disk + tanpa cleanup**                                     | `expires = now + 365d` untuk semua cookie; file `cookies_*.txt` tak pernah dihapus (freshness 2 jam hanya memengaruhi preferensi yt-dlp, bukan penghapusan).                                                                                                                 | `ipc/mod.rs:223`                            |
-| M8  | **Manifest ditulis ke ±13 folder browser meski browser tidak terpasang**             | `check_and_setup` `create_dir_all` buta → polusi `~/.config`. Seharusnya hanya bila folder browser ada.                                                                                                                                                                      | `setup.rs check_and_setup/get_all_nmh_dirs` |
-| M9  | **Leak listener overlay YouTube**                                                    | `attachOverlay` men-tambah `mouseenter/mouseleave` ke elemen player yang sama di tiap ganti video SPA (overlay lama di-`remove()` tapi listener di parent tidak) — menumpuk perlahan.                                                                                        | `content.js:485-505`                        |
-| M10 | **`error_msg` dipakai sebagai channel info**                                         | "Merging video + audio…" lewat `error_msg` → UI menampilkan baris error merah untuk proses normal; dan di-clear oleh progress berikutnya — semantik tercampur.                                                                                                               | `youtube.rs` + `download_row.rs`            |
-| M11 | **Ekstensi `file://`/URL asing ke engine tanpa validasi skema**                      | `add_download` menerima string apa pun; `blob:` difilter extension tapi aksi IPC `download` langsung bisa berisi skema aneh → aria2 error lambat, bukan penolakan cepat.                                                                                                     | `ipc/mod.rs handle_message`                 |
+| # | Isu | Detail | Lokasi |
+|---|---|---|---|
+| M1 | **1 blocking thread + 1 stderr thread per download**, `rt.block_on` per baris stdout | `spawn_blocking` + `std::process::Command` + sinkron; tiap baris output memicu block_on cek status. Jalan di 2-worker runtime + max 10 concurrent, tapi boros; arsitektur ideal: `tokio::process` + `AsyncBufRead` event-driven (lihat O2). | `aria2.rs`, `youtube.rs` |
+| M2 | **Daftar ekstensi `is_direct_file_url` ≠ daftar extension-intercept** | `.exe/.msi/.dmg/.bz2/.doc(x)/.xls(x)` diintersep extension tapi tidak ada di daftar Rust → dibuang 1–3 dtk mencoba yt-dlp dulu, baru fallback aria2. | `mod.rs:392` vs `background.js` |
+| M3 | **Limit kecepatan dibagi rata `max_concurrent` permanen** | 1 unduhan aktif hanya dapat `limit/3` — tidak memanfaatkan bandwidth; solusi benar: aria2 daemon JSON-RPC (satu `--max-overall-download-limit` global) atau hitung per **jumlah aktif saat ini**. | `aria2.rs per_process_speed_limit` |
+| M4 | **Nested main-loop dialog sinkron** | `while dialog.is_visible() { iteration(true) }` — rapuh (app quit, dialog ditutup paksa), memblokir interaksi window lain; drag-drop multi-URL memunculkan dialog beruntun. Pola GTK4 yang benar: async dialog + callback. | `window.rs:890`, `youtube_dialog.rs:193` |
+| M5 | **`session.json` korup → semua riwayat hilang diam-diam** | `unwrap_or_default()` tanpa backup/versi skema. | `mod.rs load_session` |
+| M6 | **Deteksi YouTube terlalu kaku** | Regex menuntut `watch?v=` sebagai param pertama → `watch?app=desktop&v=…`, `/live/<id>`, `/embed/` (di GUI) tidak terdeteksi (content script memang handle embed, tapi jalur GUI/URL-typing miss → yt-dlp tetap berhasil via universal, hanya dialog kualitas tidak muncul). | `youtube.rs:9-12` |
+| M7 | **Cookies lama 1 tahun di disk + tanpa cleanup** | `expires = now + 365d` untuk semua cookie; file `cookies_*.txt` tak pernah dihapus (freshness 2 jam hanya memengaruhi preferensi yt-dlp, bukan penghapusan). | `ipc/mod.rs:223` |
+| M8 | **Manifest ditulis ke ±13 folder browser meski browser tidak terpasang** | `check_and_setup` `create_dir_all` buta → polusi `~/.config`. Seharusnya hanya bila folder browser ada. | `setup.rs check_and_setup/get_all_nmh_dirs` |
+| M9 | **Leak listener overlay YouTube** | `attachOverlay` men-tambah `mouseenter/mouseleave` ke elemen player yang sama di tiap ganti video SPA (overlay lama di-`remove()` tapi listener di parent tidak) — menumpuk perlahan. | `content.js:485-505` |
+| M10 | **`error_msg` dipakai sebagai channel info** | "Merging video + audio…" lewat `error_msg` → UI menampilkan baris error merah untuk proses normal; dan di-clear oleh progress berikutnya — semantik tercampur. | `youtube.rs` + `download_row.rs` |
+| M11 | **Ekstensi `file://`/URL asing ke engine tanpa validasi skema** | `add_download` menerima string apa pun; `blob:` difilter extension tapi aksi IPC `download` langsung bisa berisi skema aneh → aria2 error lambat, bukan penolakan cepat. | `ipc/mod.rs handle_message` |
 
 ### Rendah / Polishing
 
-| #   | Isu                                                                                                                                                                                                         | Lokasi                                    |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| L1  | README link `LICENSE` & `CHANGELOG.md` **404** (dua file itu tidak ada di repo padahal badge MIT diklaim)                                                                                                   | root                                      |
-| L2  | `AGENTS.md` usang: menggambarkan `src/aria2/`, `src/hls/`, JSON-RPC WebSocket — tidak ada satu pun di kode nyata; menyesatkan contributor/agent AI                                                          | `AGENTS.md`                               |
-| L3  | Duplikasi & drift packaging: `build.sh` hardcode `2.1.3`, postinst echo "v2.1.0", vs Cargo `2.2.5`; `ci/build.yml.example` duplikat workflow; `build.patch` nyasar di repo; typo `.gitignore` `ekstension/` | `build.sh:7,229`, `.gitignore`            |
-| L4  | Order antrian tidak deterministik pada timestamp sama (`created` presisi detik, iterasi HashMap)                                                                                                            | `mod.rs promote_next`                     |
-| L5  | `retry_count` engine hanya di-increment; tidak ada auto-retry/backoff di level aplikasi (hanya aria2 `--max-tries` internal; setelah error total → status Error, manual "Ulangi")                           | `mod.rs`                                  |
-| L6  | `chrome.storage.sync` (kuota kecil, throttle) untuk config yang tidak perlu tersinkron antar perangkat → `local` lebih pas; badge `setTimeout` di SW bisa mati sebelum ke-sweep                             | `background.js`                           |
-| L7  | `sendToNative` tanpa timeout JS (cold-start GUI ±15 dtk user lihat "tidak terjadi apa-apa")                                                                                                                 | `background.js`                           |
-| L8  | Context-menu video tidak memanfaatkan kandidat sniffer → blob:/MSE `srcUrl` dikirim apa adanya dan gagal                                                                                                    | `background.js onClicked` vs `content.js` |
-| L9  | Tidak ada penghapusan entri lama yang **Completed** secara otomatis dari session selain cap 200; tidak ada tombol "hapus semua selesai+hapus file"                                                          | `mod.rs flush_session`                    |
-| L10 | CI tanpa `cargo clippy`, `cargo audit`/`cargo deny`, tanpa job test extension (`web-ext lint`/vitest), komentar "97 unit test" padahal 106                                                                  | `.github/workflows/ci.yml`                |
-| L11 | Tidak ada skema/versi di `session.json`/`config.json` untuk migrasi                                                                                                                                         | `config.rs`, `types.rs`                   |
-| L12 | `resolve_client`: jika `build()` gagal sekali, tidak di-cache → retry builder tiap download (trivial tapi ada); OnceLock per verify_tls hanya men-cache satu pasangan                                       | `aria2.rs:399`                            |
+| # | Isu | Lokasi |
+|---|---|---|
+| L1 | README link `LICENSE` & `CHANGELOG.md` **404** (dua file itu tidak ada di repo padahal badge MIT diklaim) | root |
+| L2 | `AGENTS.md` usang: menggambarkan `src/aria2/`, `src/hls/`, JSON-RPC WebSocket — tidak ada satu pun di kode nyata; menyesatkan contributor/agent AI | `AGENTS.md` |
+| L3 | Duplikasi & drift packaging: `build.sh` hardcode `2.1.3`, postinst echo "v2.1.0", vs Cargo `2.2.5`; `ci/build.yml.example` duplikat workflow; `build.patch` nyasar di repo; typo `.gitignore` `ekstension/` | `build.sh:7,229`, `.gitignore` |
+| L4 | Order antrian tidak deterministik pada timestamp sama (`created` presisi detik, iterasi HashMap) | `mod.rs promote_next` |
+| L5 | `retry_count` engine hanya di-increment; tidak ada auto-retry/backoff di level aplikasi (hanya aria2 `--max-tries` internal; setelah error total → status Error, manual "Ulangi") | `mod.rs` |
+| L6 | `chrome.storage.sync` (kuota kecil, throttle) untuk config yang tidak perlu tersinkron antar perangkat → `local` lebih pas; badge `setTimeout` di SW bisa mati sebelum ke-sweep | `background.js` |
+| L7 | `sendToNative` tanpa timeout JS (cold-start GUI ±15 dtk user lihat "tidak terjadi apa-apa") | `background.js` |
+| L8 | Context-menu video tidak memanfaatkan kandidat sniffer → blob:/MSE `srcUrl` dikirim apa adanya dan gagal | `background.js onClicked` vs `content.js` |
+| L9 | Tidak ada penghapusan entri lama yang **Completed** secara otomatis dari session selain cap 200; tidak ada tombol "hapus semua selesai+hapus file" | `mod.rs flush_session` |
+| L10 | CI tanpa `cargo clippy`, `cargo audit`/`cargo deny`, tanpa job test extension (`web-ext lint`/vitest), komentar "97 unit test" padahal 106 | `.github/workflows/ci.yml` |
+| L11 | Tidak ada skema/versi di `session.json`/`config.json` untuk migrasi | `config.rs`, `types.rs` |
+| L12 | `resolve_client`: jika `build()` gagal sekali, tidak di-cache → retry builder tiap download (trivial tapi ada); OnceLock per verify_tls hanya men-cache satu pasangan | `aria2.rs:399` |
 
 ---
 
@@ -315,7 +327,7 @@ concurrency cancel; `.deb` + zip extension siap-pakai; dev-mode NMH wrapper otom
    `kill_child_pid` → `nix::sys::signal::killpg(pid, SIGTERM)`; fallback ke pid tunggal
    bila `ESRCH`.
 3. **Satukan daftar ekstensi direct-file** (M2): tambah `.exe .msi .dmg .bz2 .tbz2 .txz
-.doc .docx .xls .xlsx .ppt .pptx .epub .mobi .bin .img .dmg` ke `EXTENSIONS`
+   .doc .docx .xls .xlsx .ppt .pptx .epub .mobi .bin .img .dmg` ke `EXTENSIONS`
    `mod.rs:392` (atau konstanta tunggal yang dibaca dua tempat + test konsistensi).
 4. **Perbaiki klaim auto-resume** (K5): tambah `Config.auto_resume: bool` (default true)
    → di `DownloadEngine::new`, entri `Paused` hasil restore langsung `start_download`
@@ -359,7 +371,7 @@ concurrency cancel; `.deb` + zip extension siap-pakai; dev-mode NMH wrapper otom
    untuk antrean FIFO yang deterministik (fix L4 juga).
 4. **Sniffer/content.js**: (a) `persist()` men-serialize ulang 50 URL JSON per event —
    batch dengan rAF/microtask; (b) `scan()` seluruh `a[href]` tiap burst 300 ms — cukup
-   scan _added nodes_ dari MutationObserver; (c) di situs non-YouTube, gate penuh:
+   scan *added nodes* dari MutationObserver; (c) di situs non-YouTube, gate penuh:
    skip scan bila tidak ada elemen media setelah N detik; (d) `matches` manifest bisa
    dipersempit (mis. exclude `*://*.google.com/*` dsb.) untuk memangkas injeksi MAIN-world
    di 90% situs (host_permissions tetap `<all_urls>` untuk cookies/referer — itu memang perlu).
@@ -368,7 +380,7 @@ concurrency cancel; `.deb` + zip extension siap-pakai; dev-mode NMH wrapper otom
    (engine tahu — kirim lewat config snapshot per spawn) alih-alih `max_concurrent` statis;
    recalc saat slot berubah. (Solusi bersih tetap B2/daemon.)
 6. **Resolve paralel ringan**: `resolve_client` cache per-verify; `resolve_filename`
-   bisa di-_memoize_ per (host, path) dengan TTL pendek untuk download massal dari
+   bisa di-*memoize* per (host, path) dengan TTL pendek untuk download massal dari
    host yang sama; `cookie_header_for` baca file sekali per host per sesi (sudah murah,
    opsional).
 
@@ -432,19 +444,19 @@ concurrency cancel; `.deb` + zip extension siap-pakai; dev-mode NMH wrapper otom
 4. `thiserror`/`anyhow` untuk error boundary (sesuai aturan AGENTS.md sendiri; kini
    `String`-based error di seluruh engine) — minimal untuk API publik `ipc`/`engine`.
 5. **Single source of version**: hapus duplikasi (L3), CI verifikasi `Cargo.toml ==
-extension/manifest.json` (ada test kecil `xtask`/shell `grep`).
+   extension/manifest.json` (ada test kecil `xtask`/shell `grep`).
 6. `#[allow(dead_code)]` di `impl DownloadEngine` dan `QUALITIES` — cek ulang:
    `get_download` memang tak dipakai? Kalau API IPC bertambah (`get`), manfaatkan; kalau
    tidak, hapus.
 
 ### F. Urutan kerja yang disarankan (roadmap mini)
 
-| Sprint                   | Isi                                                                                                            |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| Sprint | Isi |
+|---|---|
 | 1 (keamanan + kebenaran) | A1 socket+peercred, A2 killpg, A3 ekstensi list, A9 hapus build.sh, LICENSE, README/AGENTS fix, A4 auto-resume |
-| 2 (performa)             | B1 tokio::process, B3 churn GUI & sniffer, B5 limit adaptif, A5/A6/A7/M10 polish                               |
-| 3 (fitur)                | D1 clipboard, D2 save-as, D3 proxy, D6 format nyata yt-dlp                                                     |
-| 4 (arsitektur)           | B2 aria2 RPC mode (feature-flag), E2 integration tests engine, D8 tray                                         |
+| 2 (performa) | B1 tokio::process, B3 churn GUI & sniffer, B5 limit adaptif, A5/A6/A7/M10 polish |
+| 3 (fitur) | ✅ D1 clipboard + ✅ D3 proxy (v2.4.0) — sisa: D2 save-as (✅ v2.5.0), D6 format nyata yt-dlp |
+| 4 (arsitektur) | B2 aria2 RPC mode (feature-flag), E2 integration tests engine, D8 tray |
 
 ---
 

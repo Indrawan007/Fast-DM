@@ -23,6 +23,35 @@ pub struct Config {
     /// saat aplikasi dibuka. Matikan bila lebih suka memutuskan manual.
     #[serde(default = "default_true")]
     pub auto_resume: bool,
+    /// v2.4.0 (D3): proxy untuk SEMUA engine (aria2 `--all-proxy`,
+    /// yt-dlp `--proxy`). Format: http://host:port, https://…, socks5://…,
+    /// termasuk kredensial di URL (http://user:pass@127.0.0.1:3128).
+    /// String kosong = tanpa proxy. `#[serde(default)]` → config.json lama
+    /// tetap bisa dibaca.
+    #[serde(default)]
+    pub proxy_url: String,
+    /// v2.4.0 (D1): deteksi URL unduhan dari clipboard ala IDM — butuh
+    /// `wl-clipboard` (Wayland) atau `xclip` (X11). Default OFF (opt-in).
+    #[serde(default)]
+    pub clipboard_monitor: bool,
+    /// v2.7.0 (B2): port daemon RPC aria2 (loopback-only). Ubah bila 6800
+    /// sudah dipakai aria2/daemon lain di mesin.
+    #[serde(default = "default_rpc_port")]
+    pub rpc_port: u16,
+    /// v2.8.0 (D8): tutup jendela saat ada unduhan aktif → app tetap hidup
+    /// di latar (window disembunyikan). Buka kembali = jalankan ulang
+    /// `fast-dm` (single-instance akan menampilkannya lagi). Default OFF —
+    /// perilaku lama (dialog konfirmasi lalu quit) tidak berubah.
+    #[serde(default)]
+    pub minimize_to_close: bool,
+    /// v2.8.0 (D8): tulis/hapus ~/.config/autostart/fast-dm.desktop saat
+    /// user menggeser toggle di Pengaturan (bukan tiap save).
+    #[serde(default)]
+    pub autostart: bool,
+}
+
+fn default_rpc_port() -> u16 {
+    6800
 }
 
 fn default_true() -> bool {
@@ -52,6 +81,11 @@ impl Default for Config {
             auto_file_renaming: true,
             verify_tls: true,
             auto_resume: true,
+            proxy_url: String::new(),
+            clipboard_monitor: false,
+            rpc_port: 6800,
+            minimize_to_close: false,
+            autostart: false,
         }
     }
 }
@@ -61,6 +95,76 @@ impl Config {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join("fast-dm")
+    }
+
+    /// v2.7.0 (B2): secret RPC stabil-per-installasi. Disimpan di file 600
+    /// agar daemon yatim dari sesi app sebelumnya tetap bisa di-reuse (probe
+    /// ber-token cocok) sementara proses lain tidak bisa mengontrolnya.
+    pub fn rpc_secret() -> String {
+        Self::rpc_secret_in(&Self::config_dir())
+    }
+
+    /// Inti `rpc_secret()` — dir parameterisasi supaya bisa diuji tanpa
+    /// menyentuh XDG config asli (test paralel tidak boleh beradu env var).
+    pub fn rpc_secret_in(dir: &Path) -> String {
+        let p = dir.join("rpc.secret");
+        if let Ok(s) = fs::read_to_string(&p) {
+            let t = s.trim().to_string();
+            if !t.is_empty() && t.len() <= 64 {
+                return t;
+            }
+        }
+        let fresh = uuid::Uuid::new_v4().simple().to_string()[..16].to_string();
+        if fs::create_dir_all(dir).is_ok()
+            && fs::write(&p, &fresh).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
+                }
+            }
+        fresh
+    }
+
+    /// Isi file .desktop XDG autostart. Path dgn spasi → dikutip
+    /// (spesifikasi desktop-entry mengizinkan quoting pada Exec).
+    pub(crate) fn desktop_entry_for(exe: &Path) -> String {
+        let raw = exe.to_string_lossy();
+        let exec = if raw.contains(' ') {
+            format!("\"{}\"", raw)
+        } else {
+            raw.to_string()
+        };
+        format!(
+            "[Desktop Entry]\nType=Application\nName=Fast DM\nComment=Fast Download Manager\nExec={}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+            exec
+        )
+    }
+
+    /// Tulis (enable) / hapus (disable) entry autostart di `dir`.
+    /// Inti terpisah dari path asli agar bisa diuji tanpa ~/.config.
+    pub(crate) fn apply_autostart_in(dir: &Path, exe: &Path, enable: bool) -> Result<(), String> {
+        let f = dir.join("fast-dm.desktop");
+        if enable {
+            fs::create_dir_all(dir).map_err(|e| format!("mkdir autostart: {e}"))?;
+            fs::write(&f, Self::desktop_entry_for(exe)).map_err(|e| format!("tulis .desktop: {e}"))?;
+            Ok(())
+        } else {
+            match fs::remove_file(&f) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(format!("hapus .desktop: {e}")),
+            }
+        }
+    }
+
+    /// Sisi-efek nyata: ~/.config/autostart. Failures dilaporkan pemanggil.
+    pub fn apply_autostart(enable: bool) -> Result<(), String> {
+        let dir = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("autostart");
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fast-dm"));
+        Self::apply_autostart_in(&dir, &exe, enable)
     }
 
     /// XDG_RUNTIME_DIR hanya diterima bila benar-benar aman: absolute,
@@ -119,7 +223,10 @@ impl Config {
     /// Cookie yang ditulis extension punya TTL 24 jam — yang menua tak akan
     /// pernah dipakai lagi (yt-dlp menolak > 2 jam), jadi buang saja.
     pub fn gc_stale_cookies() -> usize {
-        Self::gc_cookie_files_in(&Self::config_dir(), std::time::Duration::from_secs(7 * 24 * 3600))
+        Self::gc_cookie_files_in(
+            &Self::config_dir(),
+            std::time::Duration::from_secs(7 * 24 * 3600),
+        )
     }
 
     fn gc_cookie_files_in(dir: &Path, max_age: std::time::Duration) -> usize {
@@ -132,7 +239,7 @@ impl Config {
             let is_cookie = path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map_or(false, |n| n.starts_with("cookies_") && n.ends_with(".txt"));
+                .is_some_and(|n| n.starts_with("cookies_") && n.ends_with(".txt"));
             if !is_cookie {
                 continue;
             }
@@ -141,7 +248,7 @@ impl Config {
                 .ok()
                 .and_then(|md| md.modified().ok())
                 .and_then(|m| m.elapsed().ok())
-                .map_or(false, |age| age > max_age);
+                .is_some_and(|age| age > max_age);
             if stale && fs::remove_file(&path).is_ok() {
                 removed += 1;
             }
@@ -149,14 +256,13 @@ impl Config {
         removed
     }
 
-
     pub fn config_file() -> PathBuf {
         Self::config_dir().join("config.json")
     }
     /// B7: file cookie per-domain (cookies_<host>.txt). Per-domain supaya dua
     /// download bersamaan dari situs berbeda tidak saling menimpa cookies.
     pub fn cookies_file_for(domain: &str) -> PathBuf {
-Self::cookies_file_for_host(&Self::normalize_host(domain))
+        Self::cookies_file_for_host(&Self::normalize_host(domain))
     }
 
     /// Cari file cookie untuk host — coba host persis dulu, lalu naik ke
@@ -242,6 +348,26 @@ Self::cookies_file_for_host(&Self::normalize_host(domain))
     }
 }
 
+/// v2.4.0 (D3): validasi proxy sebelum disimpan — nilai ngawur bikin aria2
+/// exit / yt-dlp diam-diam tetap langsung (membingungkan). Yang diterima:
+/// skema http/https/socks4/socks4a/socks5/socks5h dengan host non-kosong.
+/// (Port opsional — socks server bisa pakai default 1080.)
+pub fn is_valid_proxy_url(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    match url::Url::parse(s) {
+        Ok(u) => {
+            matches!(
+                u.scheme(),
+                "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
+            ) && u.host_str().is_some_and(|h| !h.is_empty())
+        }
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,7 +443,7 @@ mod tests {
         assert!(c.max_concurrent > 0 && c.max_concurrent <= 10);
         assert!(c.timeout > 0);
         assert!(c.verify_tls); // default aman
-assert!(c.auto_resume); // K5: default lanjutkan restore otomatis
+        assert!(c.auto_resume); // K5: default lanjutkan restore otomatis
     }
 
     // ── v2.3.0: path privat (K1/K3) ──
@@ -356,8 +482,7 @@ assert!(c.auto_resume); // K5: default lanjutkan restore otomatis
             f.write_all(b"# Netscape HTTP Cookie File\n").unwrap();
         }
         // Mundur mtime file "old" ke jaman UNIX_EPOCH+1000s (pasti > 1 jam)
-        let ft = std::fs::FileTimes::new()
-            .set_modified(UNIX_EPOCH + Duration::from_secs(1_000));
+        let ft = std::fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1_000));
         fs::File::options()
             .write(true)
             .open(&old)
@@ -389,11 +514,113 @@ assert!(c.auto_resume); // K5: default lanjutkan restore otomatis
         // JSON kosong (atau hanya sebagian field) harus fallback ke default
         // via #[serde(default)] di struct Config
         let partial = r#"{"download_dir": "/custom"}"#;
-        let c: Config = serde_json::from_str(partial)
-            .expect("field opsional harus fallback ke default");
+        let c: Config =
+            serde_json::from_str(partial).expect("field opsional harus fallback ke default");
         assert_eq!(c.download_dir, "/custom");
         // Field lain dari default impl
         assert!(c.max_connections > 0);
     }
-}
 
+    // ── v2.4.0 (D1/D3): default & kompatibilitas field baru ──
+
+    #[test]
+    fn defaults_off_and_empty_for_new_fields() {
+        let c = Config::default();
+        assert_eq!(c.proxy_url, "");
+        assert!(!c.clipboard_monitor);
+    }
+
+    #[test]
+    fn old_config_without_new_fields_loads() {
+        // config.json dari v≤2.3.x TANPA proxy_url/clipboard_monitor —
+        // #[serde(default)] harus menyelamatkan; tanpa itu load gagal dan
+        // user kehilangan seluruh pengaturan saat upgrade.
+        let json = r#"{"download_dir":"/tmp/d","max_connections":8,"max_concurrent":2,"max_overall_speed":"1M","retry_count":3,"retry_wait":2,"timeout":10,"disk_cache_size":"32M","file_allocation":"none","auto_file_renaming":false,"verify_tls":false}"#;
+        let c: Config = serde_json::from_str(json).expect("config lama harus tetap terbaca");
+        assert_eq!(c.proxy_url, "");
+        assert!(!c.clipboard_monitor);
+        assert!(!c.verify_tls);
+    }
+
+    // ── is_valid_proxy_url (D3) ──
+
+    #[test]
+    fn desktop_entry_quoting_and_shape() {
+        let e = Config::desktop_entry_for(Path::new("/usr/bin/fast-dm"));
+        assert!(e.contains("Exec=/usr/bin/fast-dm\n"));
+        assert!(e.starts_with("[Desktop Entry]"));
+        let e2 = Config::desktop_entry_for(Path::new("/home/a b/Fast-DM/target/debug/fast-dm"));
+        assert!(e2.contains("Exec=\"/home/a b/Fast-DM/target/debug/fast-dm\"\n"));
+    }
+
+    #[test]
+    fn apply_autostart_toggle_writes_and_removes() {
+        let dir = std::env::temp_dir().join(format!("fast-dm-autostart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let exe = Path::new("/usr/bin/fast-dm");
+        Config::apply_autostart_in(&dir, exe, true).unwrap();
+        let f = dir.join("fast-dm.desktop");
+        assert!(f.exists());
+        // idempotent — tulis ulang tidak error
+        Config::apply_autostart_in(&dir, exe, true).unwrap();
+        Config::apply_autostart_in(&dir, exe, false).unwrap();
+        assert!(!f.exists());
+        // disable saat tidak ada file = no-op sukses
+        Config::apply_autostart_in(&dir, exe, false).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn d8_flags_default_off() {
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert!(!cfg.minimize_to_close);
+        assert!(!cfg.autostart);
+    }
+
+    #[test]
+    fn rpc_port_defaults_and_legacy_config_loads() {
+        // config.json lama (tanpa field) → default 6800, bukan 0/error
+        let cfg: Config = serde_json::from_str(r#"{"download_dir":"/x"}"#).unwrap();
+        assert_eq!(cfg.rpc_port, 6800);
+        let cfg2: Config = serde_json::from_str(r#"{"rpc_port":6900}"#).unwrap();
+        assert_eq!(cfg2.rpc_port, 6900);
+        assert_eq!(Config::default().rpc_port, 6800);
+    }
+
+    #[test]
+    fn rpc_secret_is_stable_and_private() {
+        let dir = std::env::temp_dir().join(format!("fast-dm-secret-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = Config::rpc_secret_in(&dir);
+        let b = Config::rpc_secret_in(&dir);
+        assert_eq!(a, b, "secret harus stabil antar-panggilan");
+        assert_eq!(a.len(), 16);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let m = std::fs::metadata(dir.join("rpc.secret")).unwrap().permissions().mode();
+            assert_eq!(m & 0o777, 0o600, "secret tidak boleh terbaca group/other");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn proxy_url_valid_forms() {
+        assert!(is_valid_proxy_url("http://127.0.0.1:8080"));
+        assert!(is_valid_proxy_url("https://proxy.example.com:3128"));
+        assert!(is_valid_proxy_url("socks5://10.0.0.1:1080"));
+        assert!(is_valid_proxy_url("socks5h://user:pass@host:1080"));
+        assert!(is_valid_proxy_url("http://[::1]:8888"));
+        assert!(is_valid_proxy_url("  http://host:3128  "));
+    }
+
+    #[test]
+    fn proxy_url_invalid_forms() {
+        assert!(!is_valid_proxy_url(""));
+        assert!(!is_valid_proxy_url("   "));
+        assert!(!is_valid_proxy_url("127.0.0.1:8080")); // tanpa skema
+        assert!(!is_valid_proxy_url("ftp://proxy:21"));
+        assert!(!is_valid_proxy_url("http://")); // host kosong
+        assert!(!is_valid_proxy_url("not a url"));
+    }
+}

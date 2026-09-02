@@ -1,9 +1,7 @@
 use super::types::*;
 use crate::config::Config;
 use regex::Regex;
-use std::io::{BufRead, BufReader};
-use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio::sync::{mpsc, Mutex};
@@ -23,11 +21,15 @@ static RE_H: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)h").unwrap());
 static RE_M: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)m").unwrap());
 static RE_S: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)s").unwrap());
 static RE_CONTENT_RANGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"/(\d+)").unwrap());
-static RE_CD_RFC5987: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"filename\*\s*=\s*(?:[Uu][Tt][Ff]-8)?'[^']*'(.+?)(?:\s*;|$)").unwrap());
-static RE_CD_QUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"filename\s*=\s*"([^"]+)""#).unwrap());
-static RE_CD_UNQUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"filename\s*=\s*([^\s;]+)").unwrap());
+static RE_CD_RFC5987: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"filename\*\s*=\s*(?:[Uu][Tt][Ff]-8)?'[^']*'(.+?)(?:\s*;|$)").unwrap()
+});
+static RE_CD_QUOTED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"filename\s*=\s*"([^"]+)""#).unwrap());
+static RE_CD_UNQUOTED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"filename\s*=\s*([^\s;]+)").unwrap());
 
-const CHROME_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+pub(crate) const CHROME_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 pub async fn download(
     info: Arc<Mutex<DownloadInfo>>,
@@ -98,11 +100,8 @@ pub async fn download(
 
     tracing::info!("Downloading: {}", info.lock().await.filename);
 
-    // Spawn aria2c
-    let _result = tokio::task::spawn_blocking(move || {
-        run_aria2c(cmd, info.clone(), tx.clone())
-    })
-    .await;
+    // Spawn aria2c — v2.3.1 (M1): async penuh, tanpa spawn_blocking
+    run_aria2c(cmd, info.clone(), tx.clone()).await;
 
     // Cleanup input file
     if let Some(path) = input_file {
@@ -123,10 +122,7 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
     let _ = std::fs::write(&input_path, format!("{}\n", info.url));
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(
-            &input_path,
-            std::fs::Permissions::from_mode(0o600),
-        );
+        let _ = std::fs::set_permissions(&input_path, std::fs::Permissions::from_mode(0o600));
     }
 
     let mut cmd = vec![
@@ -152,12 +148,11 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         "--human-readable=false".into(),
         "--show-console-readout=true".into(),
         "--download-result=full".into(),
-                // Limit user adalah TOTAL aplikasi, tapi tiap download = proses aria2c
+        // Limit user adalah TOTAL aplikasi, tapi tiap download = proses aria2c
         // sendiri. Engine sudah membaginya menurut jumlah unduhan hidup SAAT
         // proses ini start (v2.3.0 M3, lihat DownloadEngine::spawn_supervised)
         // — di sini tinggal pakai. "0" = tanpa batas.
         format!("--max-overall-download-limit={}", config.max_overall_speed),
-
         // check-integrity sengaja TIDAK dimatikan (default aria2 = true):
         // tanpa ini, resume setelah crash bisa menandai file korup sebagai
         // selesai.
@@ -167,8 +162,8 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         // default true → tabrakan menjadi "file (1).ext". allow-overwrite
         // harus berlawanan: kalau overwrite=true, aria2 menimpa SEBELUM
         // sempat auto-rename.
-        format!("--allow-overwrite={}", !config.auto_file_renaming).into(),
-        format!("--auto-file-renaming={}", config.auto_file_renaming).into(),
+        format!("--allow-overwrite={}", !config.auto_file_renaming),
+        format!("--auto-file-renaming={}", config.auto_file_renaming),
     ];
 
     // Header kustom dari browser extension (mis. Referer) — strip \r\n anti injection.
@@ -197,25 +192,42 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         }
     }
 
+    // v2.4.0 (D3): proxy untuk semua protokol (http/https/ftp). Kredensial
+    // dikandung langsung di URL (http://user:pass@host:port) — tidak perlu
+    // --all-proxy-user/--all-proxy-password terpisah.
+    if !config.proxy_url.trim().is_empty() {
+        cmd.push(format!("--all-proxy={}", config.proxy_url.trim()));
+    }
+
     (cmd, Some(input_path.to_string_lossy().to_string()))
 }
 
-fn run_aria2c(
+/// v2.3.1 (M1): tokio::process penuh — pola lama (std::process di dalam
+/// `spawn_blocking` + `Handle::current().block_on` per baris output) rapuh dan
+/// punya tiga bug nyata:
+/// 1. pause/cancel hanya dicek saat baris output baru tiba — aria2c yang stall
+///    (tanpa output) membuat tombol user tidak berdampak sampai ada baris lagi;
+/// 2. `child.wait()` tanpa batas — child yang tidak merespons SIGTERM (pause)
+///     membekukan thread blocking selamanya;
+/// 3. thread khusus stderr yang bisa bocor saat panic.
+/// Sekarang: `ChildLines` (baca cancellation-safe), ticker 500ms untuk cek
+/// status walau child diam, wait PAUSA terbatas 30 dtk dengan eskalasi SIGKILL,
+/// dan `kill_on_drop` sebagai jaring pengaman bila future seluruhnya di-drop.
+async fn run_aria2c(
     cmd: Vec<String>,
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
 ) {
-
     // process_group(0): child jadi leader group → SIGTERM/SIGKILL via killpg
     // menjangkau seluruh keturunannya (K4).
-    let child = Command::new(&cmd[0])
+    let mut child = match tokio::process::Command::new(&cmd[0])
         .args(&cmd[1..])
         .process_group(0)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn();
-
-    let mut child = match child {
+        .kill_on_drop(true)
+        .spawn()
+    {
         Ok(c) => c,
         Err(e) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
@@ -223,75 +235,66 @@ fn run_aria2c(
             } else {
                 format!("aria2c: {}", e)
             };
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let mut i = info.lock().await;
-                i.status = DownloadStatus::Error;
-                i.error_msg = msg;
-                let _ = tx.send(DownloadEvent::Error(i.clone()));
-            });
+            let mut i = info.lock().await;
+            i.status = DownloadStatus::Error;
+            i.error_msg = msg;
+            let _ = tx.send(DownloadEvent::Error(i.clone()));
             return;
         }
     };
 
-    // Simpan PID supaya bisa di-kill saat app ditutup (anti orphan)
-    {
-        let rt = tokio::runtime::Handle::current();
-        let pid = child.id();
-        rt.block_on(async { info.lock().await.pid = Some(pid); });
-    }
+    // Simpan PID supaya bisa di-kill saat app ditutup (anti orphan).
+    // tokio: id() -> Option, None bila proses sudah selesai. Semua pemakaian
+    // pid di bawah dijaga Option — killpg(0) akan mengenai GRUP FAST-DM SENDIRI.
+    let pid = child.id();
+    info.lock().await.pid = pid;
 
     let stdout = child.stdout.take().unwrap();
-
-    // Baca stderr di thread terpisah — kalau tidak, buffer pipe (64KB) bisa
-    // penuh oleh log error/warning dan aria2c berhenti menulis → deadlock.
     let stderr = child.stderr.take().unwrap();
-    let stderr_buf = Arc::new(std::sync::Mutex::new(String::new()));
-    let stderr_buf_clone = stderr_buf.clone();
-    let stderr_thread = std::thread::Builder::new()
-        .name("aria2-stderr".into())
-        .spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines().flatten() {
-                let mut buf = stderr_buf_clone.lock().unwrap();
-                buf.push_str(&line);
-                buf.push('\n');
-                // Batasi 16 KB (pertahankan yang terbaru) — log error bisa
-                // sangat panjang untuk download yang bermasalah
-                if buf.len() > 16 * 1024 {
-                    let cut = buf.len() - 8 * 1024;
-                    let drop = buf[..cut]
-                        .find(|c: char| c == '\n')
-                        .map(|i| i + 1)
-                        .unwrap_or(cut);
-                    buf.drain(..drop);
-                }
+
+    // stderr disedot task terpisah — kalau tidak, buffer pipe (64KB) bisa
+    // penuh oleh log error/warning dan aria2c berhenti menulis → deadlock.
+    // Task mengembalikan seluruh buffer; tidak perlu Mutex karena pemakainya
+    // hanya jalur ini (join sebelum membaca isinya).
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = super::ChildLines::new(stderr);
+        let mut buf = String::new();
+        while let Some(line) = lines.next_line().await {
+            buf.push_str(&line);
+            buf.push('\n');
+            // Batasi 16 KB (pertahankan yang terbaru) — log error bisa
+            // sangat panjang untuk download yang bermasalah
+            if buf.len() > 16 * 1024 {
+                let cut = buf.len() - 8 * 1024;
+                let drop = buf[..cut].find('\n').map(|i| i + 1).unwrap_or(cut);
+                buf.drain(..drop);
             }
-        })
-        .ok();
-
-    let reader = BufReader::new(stdout);
-    let mut last_update = Instant::now();
-
-    for line in reader.lines().flatten() {
-        // Check cancel/pause
-        let rt = tokio::runtime::Handle::current();
-        let status = rt.block_on(async { info.lock().await.status });
-
-        if matches!(status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-            // B8: Paused → SIGTERM sudah dikirim pause_download(); TUNGGU aria2c
-            // menulis control file .aria2 (supaya bisa di-resume), jangan SIGKILL.
-            // Cancelled → paksa kill, via group (K4) lalu child.kill() sebagai
-            // fallback bila group sudah tidak ada.
-            if status == DownloadStatus::Cancelled {
-                super::kill_child_group_hard(child.id());
-                let _ = child.kill();
-            }
-            // Reap the child so it does not linger as a zombie process
-            let _ = child.wait();
-            rt.block_on(async { info.lock().await.pid = None; });
-            return;
         }
+        buf
+    });
+
+    let mut lines = super::ChildLines::new(stdout);
+    let mut last_update = Instant::now();
+    // v2.3.1 (M1): cek status juga saat child tidak mengeluarkan output.
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
+    let mut aborted = None;
+
+    loop {
+        let line = tokio::select! {
+            biased;
+            l = lines.next_line() => match l {
+                Some(s) => s,
+                None => break, // stdout tertutup — aria2c akan selesai
+            },
+            _ = ticker.tick() => {
+                let status = info.lock().await.status;
+                if matches!(status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
+                    aborted = Some(status);
+                    break;
+                }
+                continue;
+            }
+        };
 
         // Parse progress (dukung format raw & human-readable)
         if let Some(m) = RE_PROGRESS.captures(&line) {
@@ -316,60 +319,81 @@ fn run_aria2c(
 
             // Throttle updates to 5fps
             if last_update.elapsed().as_millis() >= 200 {
-                rt.block_on(async {
-                    let mut i = info.lock().await;
-                    i.downloaded = downloaded;
-                    i.total_size = total;
-                    i.progress = progress;
-                    i.speed = speed;
-                    i.connections = connections;
-                    i.eta = eta;
-                    // Bersihkan error lama saat download berjalan lagi (mis. setelah Retry)
-                    i.error_msg.clear();
-                                        i.status_detail.clear();
-                    let _ = tx.send(DownloadEvent::Progress(i.clone()));
-                });
+                let mut i = info.lock().await;
+                i.downloaded = downloaded;
+                i.total_size = total;
+                i.progress = progress;
+                i.speed = speed;
+                i.connections = connections;
+                i.eta = eta;
+                // Bersihkan error lama saat download berjalan lagi (mis. setelah Retry)
+                i.error_msg.clear();
+                i.status_detail.clear();
+                let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                drop(i);
                 last_update = Instant::now();
             }
         }
     }
 
-    // Tunggu pembaca stderr selesai (berarti proses sudah menutup stderr)
-    if let Some(thread) = stderr_thread {
-        let _ = thread.join();
+    if let Some(status) = aborted {
+        // B8: Paused → SIGTERM sudah dikirim pause_download(); TUNGGU aria2c
+        // menulis control file .aria2 (supaya bisa di-resume), jangan SIGKILL —
+        // tapi sekarang TERBATAS 30 dtk (M1), lalu eskalasi SIGKILL ke group
+        // bila aria2c macet. Cancelled → langsung SIGKILL group (K4) + kill()
+        // langsung sebagai fallback dan reap anti-zombie.
+        if status == DownloadStatus::Paused {
+            if tokio::time::timeout(std::time::Duration::from_secs(30), child.wait())
+                .await
+                .is_err()
+            {
+                if let Some(pid) = pid {
+                    super::kill_child_group_hard(pid);
+                }
+            }
+        } else if let Some(pid) = pid {
+            super::kill_child_group_hard(pid);
+        }
+        let _ = child.kill().await; // SIGKILL child langsung + reap (no-op jika sudah mati)
+        info.lock().await.pid = None;
+        stderr_task.abort();
+        return;
     }
 
-    let exit_code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+    // stdout EOF → proses akan selesai. Tunggu stderr selesai (pipe tertutup),
+    // lalu exit code. (kill_on_drop tetap jadi jaring pengaman jalur panic.)
+    let err_detail = stderr_task.await.unwrap_or_default();
+    let exit_code = child
+        .wait()
+        .await
+        .map(|s| s.code().unwrap_or(-1))
+        .unwrap_or(-1);
 
-    let rt = tokio::runtime::Handle::current();
-    rt.block_on(async {
-        let mut i = info.lock().await;
-        i.pid = None;
+    let mut i = info.lock().await;
+    i.pid = None;
 
-        if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-            return;
-        }
+    if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
+        return;
+    }
 
-        if exit_code == 0 {
-            i.status = DownloadStatus::Completed;
-            i.progress = 100.0;
-            i.speed = 0;
-            i.status_detail.clear();
-            let _ = tx.send(DownloadEvent::Completed(i.clone()));
+    if exit_code == 0 {
+        i.status = DownloadStatus::Completed;
+        i.progress = 100.0;
+        i.speed = 0;
+        i.status_detail.clear();
+        let _ = tx.send(DownloadEvent::Completed(i.clone()));
+    } else {
+        let detail = if err_detail.trim().is_empty() {
+            String::new()
         } else {
-            let err_detail = stderr_buf.lock().unwrap().clone();
-            let detail = if err_detail.trim().is_empty() {
-                String::new()
-            } else {
-                format!("\n{}", err_detail.trim())
-            };
-            i.status = DownloadStatus::Error;
-            i.error_msg = format!("aria2c exit code: {}{}", exit_code, detail);
-            i.status_detail.clear();
-            i.speed = 0;
-            let _ = tx.send(DownloadEvent::Error(i.clone()));
-        }
-    });
+            format!("\n{}", err_detail.trim())
+        };
+        i.status = DownloadStatus::Error;
+        i.error_msg = format!("aria2c exit code: {}{}", exit_code, detail);
+        i.status_detail.clear();
+        i.speed = 0;
+        let _ = tx.send(DownloadEvent::Error(i.clone()));
+    }
 }
 
 /// Cek ruang disk tersedia untuk direktori tujuan. Gagal cek → izinkan (jangan blokir).
@@ -383,7 +407,6 @@ fn has_space(dir: &str, needed: u64) -> bool {
     }
 }
 
-/// Limit total user → limit per-proses aria2c ("0" = tanpa batas).
 /// Limit total user → batas per-proses aria2c. v2.3.0 (M3): pembaginya
 /// adalah jumlah unduhan HIDUP (aktif+antri) saat proses ini start — dihitung
 /// engine — bukan `max_concurrent` statis, sehingga unduhan tunggal kini
@@ -403,9 +426,7 @@ pub(crate) fn resolve_speed_limit(total: &str, live_share: usize) -> String {
 /// "0" | "512K" | "2M" | "10G" → byte/detik (konvensi aria2: K = 1024)
 fn parse_speed_setting(s: &str) -> u64 {
     let s = s.trim();
-    let (num, unit) = s.split_at(
-        s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()),
-    );
+    let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
     let num: f64 = num.parse().unwrap_or(0.0);
     let mult: f64 = match unit.trim().to_ascii_uppercase().as_str() {
         "K" => 1024.0,
@@ -464,18 +485,18 @@ fn resolve_client(verify_tls: bool) -> Option<&'static reqwest::Client> {
     static VERIFY: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     static NO_VERIFY: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     let slot = if verify_tls { &VERIFY } else { &NO_VERIFY };
-if slot.get().is_none() {
-    let client = reqwest::Client::builder()
-        .user_agent(CHROME_UA)
-        .danger_accept_invalid_certs(!verify_tls)
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .timeout(std::time::Duration::from_secs(10))
-        .build();
-    if let Ok(c) = client {
-        let _ = slot.set(c);
+    if slot.get().is_none() {
+        let client = reqwest::Client::builder()
+            .user_agent(CHROME_UA)
+            .danger_accept_invalid_certs(!verify_tls)
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .timeout(std::time::Duration::from_secs(10))
+            .build();
+        if let Ok(c) = client {
+            let _ = slot.set(c);
+        }
     }
-}
-slot.get()
+    slot.get()
 }
 
 async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) -> Result<(), String> {
@@ -543,9 +564,7 @@ async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) -> 
         .unwrap_or("")
         .to_string();
     let ct = ct_raw.split(';').next().unwrap_or("").trim().to_lowercase();
-    let is_html = ct == "text/html"
-        || ct == "application/xhtml+xml"
-        || ct.contains("text/html");
+    let is_html = ct == "text/html" || ct == "application/xhtml+xml" || ct.contains("text/html");
     if is_html {
         return Err(
             "URL ini mengembalikan halaman web (HTML), bukan file video — posting/halaman situs \
@@ -608,15 +627,23 @@ async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) -> 
     //       mengembalikan video → GANTI ekstensi ke ekstensi media asli
     if let Some(ext) = content_type_to_ext(&ct) {
         let lower = i.filename.to_lowercase();
-        let fake_ext = [".php", ".asp", ".aspx", ".jsp", ".do", ".action", ".html", ".htm"]
-            .iter()
-            .any(|e| lower.ends_with(e));
+        let fake_ext = [
+            ".php", ".asp", ".aspx", ".jsp", ".do", ".action", ".html", ".htm",
+        ]
+        .iter()
+        .any(|e| lower.ends_with(e));
         if fake_ext && !i.filename.is_empty() {
-            let stem = i.filename
+            let stem = i
+                .filename
                 .rsplit_once('.')
                 .map(|(s, _)| s.to_string())
                 .unwrap_or_else(|| i.filename.clone());
-            tracing::info!("Ganti ekstensi {} → {} (content-type: {})", i.filename, ext, ct);
+            tracing::info!(
+                "Ganti ekstensi {} → {} (content-type: {})",
+                i.filename,
+                ext,
+                ct
+            );
             i.filename = format!("{}{}", stem, ext);
         } else if !i.filename.contains('.') {
             i.filename = format!("{}{}", i.filename, ext);
@@ -630,7 +657,11 @@ async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) -> 
 /// Baca cookies.txt (Netscape) untuk domain URL → header "Cookie: ...".
 /// Supaya resolve & aria2 memakai sesi login yang sama dengan browser.
 fn cookie_header_for(url: &str) -> Option<String> {
-    let host = url::Url::parse(url).ok()?.host_str()?.trim_start_matches("www.").to_ascii_lowercase();
+    let host = url::Url::parse(url)
+        .ok()?
+        .host_str()?
+        .trim_start_matches("www.")
+        .to_ascii_lowercase();
     // File per-domain dulu (termasuk domain induk — file video sering ada di
     // subdomain CDN, sedangkan cookies disimpan dengan host halaman);
     // fallback ke cookies.txt lama (versi sebelumnya)
@@ -666,16 +697,15 @@ fn cookie_header_for(url: &str) -> Option<String> {
     }
 }
 
-fn is_generic_filename(name: &str) -> bool {
+pub(crate) fn is_generic_filename(name: &str) -> bool {
     if name.is_empty() {
         return true;
     }
     let lower = name.to_lowercase();
     let stem = lower.split('.').next().unwrap_or("");
     let generic = [
-        "download", "index", "file", "get", "fetch",
-        "stream", "media", "content", "data", "output",
-        "video", "audio", "default", "main",
+        "download", "index", "file", "get", "fetch", "stream", "media", "content", "data",
+        "output", "video", "audio", "default", "main",
     ];
     if generic.contains(&stem) {
         return true;
@@ -692,30 +722,30 @@ fn is_generic_filename(name: &str) -> bool {
 fn content_type_to_ext(ct: &str) -> Option<&'static str> {
     let ct = ct.split(';').next().unwrap_or("").trim().to_lowercase();
     match ct.as_str() {
-        "video/mp4"        => Some(".mp4"),
-        "video/webm"       => Some(".webm"),
+        "video/mp4" => Some(".mp4"),
+        "video/webm" => Some(".webm"),
         "video/x-matroska" => Some(".mkv"),
-        "video/quicktime"  => Some(".mov"),
-        "video/x-msvideo"  => Some(".avi"),
-        "video/x-flv"      => Some(".flv"),
-        "video/3gpp"       => Some(".3gp"),
-        "video/mp2t"       => Some(".ts"),
-        "audio/mpeg"       => Some(".mp3"),
-        "audio/mp4"        => Some(".m4a"),
-        "audio/ogg"        => Some(".ogg"),
-        "audio/wav"        => Some(".wav"),
-        "audio/flac"       => Some(".flac"),
-        "application/pdf"  => Some(".pdf"),
-        "application/zip"  => Some(".zip"),
+        "video/quicktime" => Some(".mov"),
+        "video/x-msvideo" => Some(".avi"),
+        "video/x-flv" => Some(".flv"),
+        "video/3gpp" => Some(".3gp"),
+        "video/mp2t" => Some(".ts"),
+        "audio/mpeg" => Some(".mp3"),
+        "audio/mp4" => Some(".m4a"),
+        "audio/ogg" => Some(".ogg"),
+        "audio/wav" => Some(".wav"),
+        "audio/flac" => Some(".flac"),
+        "application/pdf" => Some(".pdf"),
+        "application/zip" => Some(".zip"),
         "application/gzip" => Some(".gz"),
         "application/x-rar-compressed" => Some(".rar"),
-        "application/x-7z-compressed"  => Some(".7z"),
-        "application/x-tar"            => Some(".tar"),
-        "application/x-iso9660-image"  => Some(".iso"),
-        "image/jpeg"       => Some(".jpg"),
-        "image/png"        => Some(".png"),
-        "image/gif"        => Some(".gif"),
-        "image/webp"       => Some(".webp"),
+        "application/x-7z-compressed" => Some(".7z"),
+        "application/x-tar" => Some(".tar"),
+        "application/x-iso9660-image" => Some(".iso"),
+        "image/jpeg" => Some(".jpg"),
+        "image/png" => Some(".png"),
+        "image/gif" => Some(".gif"),
+        "image/webp" => Some(".webp"),
         _ => None,
     }
 }
@@ -849,8 +879,6 @@ mod tests {
         assert_eq!(parse_speed_setting("2m"), 2 * 1024 * 1024);
     }
 
-    // ── per_process_speed_limit ──
-
     // ── resolve_speed_limit (M3) ──
 
     #[test]
@@ -892,24 +920,29 @@ mod tests {
     #[test]
     fn is_generic_filename_true_cases() {
         let generic = [
-            "", "download", "index.html", "file.zip", "video.mp4",
-            "get.bin", "default.jpg", "123.mp4", "download_12345.mp4",
+            "",
+            "download",
+            "index.html",
+            "file.zip",
+            "video.mp4",
+            "get.bin",
+            "default.jpg",
+            "123.mp4",
+            "download_12345.mp4",
             "main.bin",
         ];
         for name in generic {
-            assert!(
-                is_generic_filename(name),
-                "{} harus dianggap generic",
-                name
-            );
+            assert!(is_generic_filename(name), "{} harus dianggap generic", name);
         }
     }
 
     #[test]
     fn is_generic_filename_false_cases() {
         let specific = [
-            "my-video.mp4", "linuxmint-21-cinnamon-64bit.iso",
-            "github-cli_2.40.0_linux_amd64.deb", "report-2024.pdf",
+            "my-video.mp4",
+            "linuxmint-21-cinnamon-64bit.iso",
+            "github-cli_2.40.0_linux_amd64.deb",
+            "report-2024.pdf",
         ];
         for name in specific {
             assert!(
@@ -938,8 +971,14 @@ mod tests {
     #[test]
     fn content_type_to_ext_archive() {
         assert_eq!(content_type_to_ext("application/zip"), Some(".zip"));
-        assert_eq!(content_type_to_ext("application/x-rar-compressed"), Some(".rar"));
-        assert_eq!(content_type_to_ext("application/x-7z-compressed"), Some(".7z"));
+        assert_eq!(
+            content_type_to_ext("application/x-rar-compressed"),
+            Some(".rar")
+        );
+        assert_eq!(
+            content_type_to_ext("application/x-7z-compressed"),
+            Some(".7z")
+        );
     }
 
     #[test]
@@ -952,7 +991,10 @@ mod tests {
     fn content_type_to_ext_strips_charset() {
         // Content-Type bisa ada charset: "text/html; charset=utf-8"
         // (walau text/html harus ditolak duluan, parser-nya strip ";")
-        assert_eq!(content_type_to_ext("video/mp4; charset=binary"), Some(".mp4"));
+        assert_eq!(
+            content_type_to_ext("video/mp4; charset=binary"),
+            Some(".mp4")
+        );
     }
 
     #[test]
@@ -967,13 +1009,19 @@ mod tests {
     fn parse_content_disposition_rfc5987() {
         // RFC 5987: filename*=UTF-8''<urlencoded>
         let cd = "attachment; filename=\"fallback.zip\"; filename*=UTF-8''nama%20file.zip";
-        assert_eq!(parse_content_disposition(cd), Some("nama file.zip".to_string()));
+        assert_eq!(
+            parse_content_disposition(cd),
+            Some("nama file.zip".to_string())
+        );
     }
 
     #[test]
     fn parse_content_disposition_quoted() {
         let cd = "attachment; filename=\"my report.pdf\"";
-        assert_eq!(parse_content_disposition(cd), Some("my report.pdf".to_string()));
+        assert_eq!(
+            parse_content_disposition(cd),
+            Some("my report.pdf".to_string())
+        );
     }
 
     #[test]
@@ -993,7 +1041,10 @@ mod tests {
     fn parse_content_disposition_rfc5987_lowercase() {
         // utf-8 (lowercase) juga harus cocok
         let cd = "filename*=utf-8''my%20video.mp4";
-        assert_eq!(parse_content_disposition(cd), Some("my video.mp4".to_string()));
+        assert_eq!(
+            parse_content_disposition(cd),
+            Some("my video.mp4".to_string())
+        );
     }
 
     // ── Regex RE_PROGRESS (regresi: format dual) ──
@@ -1002,7 +1053,9 @@ mod tests {
     fn re_progress_matches_human_readable() {
         // Format: [#2089b0 400.0KiB/33.2MiB(1%) CN:1 DL:115.7KiB ETA:4m51s]
         let line = "[#2089b0 400.0KiB/33.2MiB(1%) CN:1 DL:115.7KiB ETA:4m51s]";
-        let m = RE_PROGRESS.captures(line).expect("harus match human format");
+        let m = RE_PROGRESS
+            .captures(line)
+            .expect("harus match human format");
         assert_eq!(&m[1], "400.0KiB");
         assert_eq!(&m[2], "33.2MiB");
         assert_eq!(&m[3], "1");

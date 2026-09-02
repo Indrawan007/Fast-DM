@@ -71,32 +71,51 @@ impl DownloadInfo {
         quality: Option<String>,
     ) -> Self {
         Self {
-            id, url, filename, save_dir,
+            id,
+            url,
+            filename,
+            save_dir,
             status: DownloadStatus::Queued,
-            total_size: 0, downloaded: 0,
-            speed: 0, eta: 0, progress: 0.0,
+            total_size: 0,
+            downloaded: 0,
+            speed: 0,
+            eta: 0,
+            progress: 0.0,
             error_msg: String::new(),
             status_detail: String::new(),
-            connections: 0, retry_count: 0,
+            connections: 0,
+            retry_count: 0,
             is_youtube: false,
-            headers, quality,
+            headers,
+            quality,
             pid: None,
             created: chrono::Utc::now().timestamp_millis(),
         }
     }
 
-    pub fn total_size_fmt(&self) -> String { format_size(self.total_size) }
-    pub fn downloaded_fmt(&self) -> String { format_size(self.downloaded) }
-    pub fn speed_fmt(&self) -> String {
-        if self.speed == 0 { "0 B/s".into() }
-        else { format!("{}/s", format_size(self.speed)) }
+    pub fn total_size_fmt(&self) -> String {
+        format_size(self.total_size)
     }
-    pub fn eta_fmt(&self) -> String { format_eta(self.eta) }
+    pub fn downloaded_fmt(&self) -> String {
+        format_size(self.downloaded)
+    }
+    pub fn speed_fmt(&self) -> String {
+        if self.speed == 0 {
+            "0 B/s".into()
+        } else {
+            format!("{}/s", format_size(self.speed))
+        }
+    }
+    pub fn eta_fmt(&self) -> String {
+        format_eta(self.eta)
+    }
 }
 
 pub fn format_size(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
-    if bytes == 0 { return "0 B".into(); }
+    if bytes == 0 {
+        return "0 B".into();
+    }
     let mut size = bytes as f64;
     let mut i = 0;
     while size >= 1024.0 && i < UNITS.len() - 1 {
@@ -107,8 +126,12 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 pub fn format_eta(seconds: u64) -> String {
-    if seconds == 0 { return "--".into(); }
-    if seconds < 60 { return format!("{}s", seconds); }
+    if seconds == 0 {
+        return "--".into();
+    }
+    if seconds < 60 {
+        return format!("{}s", seconds);
+    }
     if seconds < 3600 {
         return format!("{}m {}s", seconds / 60, seconds % 60);
     }
@@ -142,7 +165,12 @@ mod tests {
             (DownloadStatus::Cancelled, "cancelled"),
         ];
         for (status, expected) in cases {
-            assert_eq!(status.to_string(), expected, "status {:?} display salah", status);
+            assert_eq!(
+                status.to_string(),
+                expected,
+                "status {:?} display salah",
+                status
+            );
         }
     }
 
@@ -251,8 +279,12 @@ mod tests {
     #[test]
     fn download_info_formatters() {
         let mut info = DownloadInfo::new(
-            "x".into(), "u".into(), "f".into(), "/tmp".into(),
-            Default::default(), None,
+            "x".into(),
+            "u".into(),
+            "f".into(),
+            "/tmp".into(),
+            Default::default(),
+            None,
         );
         info.total_size = 2048;
         info.downloaded = 1024;
@@ -269,8 +301,12 @@ mod tests {
     #[test]
     fn download_info_speed_zero() {
         let info = DownloadInfo::new(
-            "x".into(), "u".into(), "f".into(), "/tmp".into(),
-            Default::default(), None,
+            "x".into(),
+            "u".into(),
+            "f".into(),
+            "/tmp".into(),
+            Default::default(),
+            None,
         );
         // speed=0 → "0 B/s" (special case di speed_fmt, BUKAN format_size
         // yang return "0.0 B" — lihat types.rs)

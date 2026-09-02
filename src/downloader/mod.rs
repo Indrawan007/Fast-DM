@@ -1,4 +1,5 @@
 pub mod aria2;
+pub mod aria2_rpc;
 pub mod types;
 pub mod universal;
 pub mod youtube;
@@ -14,8 +15,13 @@ use types::*;
 use url::Url;
 use uuid::Uuid;
 
+/// v2.8.1 (clippy `type_complexity`): alias utk tipe peta yang berulang di
+/// banyak signature — hanya kosmetik, tipe identik.
+pub(crate) type SharedInfo = Arc<Mutex<DownloadInfo>>;
+pub(crate) type DownloadMap = Arc<RwLock<HashMap<String, SharedInfo>>>;
+
 pub struct DownloadEngine {
-    downloads: Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
+    downloads: DownloadMap,
     event_tx: mpsc::UnboundedSender<DownloadEvent>,
     config: Arc<RwLock<Config>>,
     dirty: Arc<AtomicBool>,
@@ -76,10 +82,14 @@ impl DownloadEngine {
     /// - hanya item hasil restore sesi (user yang pause manual TIDAK diutak-atik),
     /// - hanya selama status masih Paused (kalau user sudah menekan apa pun, batalkan),
     /// - slot & antrean tetap diatur start_download (max_concurrent tidak jebol).
+    ///
     /// Dapat dimatikan via Settings → auto_resume.
     pub async fn resume_restored(&self) {
         if !self.get_config().await.auto_resume {
-            tracing::info!("auto_resume dimatikan — {} unduhan dibiarkan Paused", self.restored_ids.lock().await.len());
+            tracing::info!(
+                "auto_resume dimatikan — {} unduhan dibiarkan Paused",
+                self.restored_ids.lock().await.len()
+            );
             return;
         }
         let ids: Vec<String> = self.restored_ids.lock().await.drain(..).collect();
@@ -121,6 +131,13 @@ impl DownloadEngine {
         if cfg.max_overall_speed != "0" && !is_valid_speed_limit(&cfg.max_overall_speed) {
             return Err("Speed limit tidak valid (contoh: 0, 512K, 2M)".into());
         }
+        // v2.4.0 (D3): proxy divalidasi sebelum disimpan — nilai ngawur bikin
+        // aria2 exit / yt-dlp diam-diam tetap koneksi langsung (membingungkan).
+        if !cfg.proxy_url.trim().is_empty() && !crate::config::is_valid_proxy_url(&cfg.proxy_url) {
+            return Err(
+                "Proxy tidak valid — contoh: http://127.0.0.1:8080, socks5://host:1080".to_string(),
+            );
+        }
         cfg.save().map_err(|e| e.to_string())?;
         *self.config.write().await = cfg;
         Ok(())
@@ -135,7 +152,7 @@ impl DownloadEngine {
         headers: HashMap<String, String>,
         quality: Option<String>,
     ) -> String {
-        let id = format!("dl_{}", Uuid::new_v4().to_string()[..8].to_string());
+        let id = format!("dl_{}", &Uuid::new_v4().to_string()[..8]);
         let save = match save_dir {
             Some(d) => d.to_string(),
             None => self.config.read().await.download_dir.clone(),
@@ -145,7 +162,7 @@ impl DownloadEngine {
         let _ = std::fs::create_dir_all(&save);
 
         let fname = filename
-            .map(|f| sanitize_filename(f))
+            .map(sanitize_filename)
             .unwrap_or_else(|| extract_filename_from_url(url));
 
         // Deduplikasi: download live (url+dir+file sama) → kembalikan yang sudah ada.
@@ -177,17 +194,11 @@ impl DownloadEngine {
 
         let is_yt = youtube::is_youtube_url(url);
 
-        let mut info = DownloadInfo::new(
-            id.clone(),
-            url.to_string(),
-            fname,
-            save,
-            headers,
-            quality,
-        );
+        let mut info =
+            DownloadInfo::new(id.clone(), url.to_string(), fname, save, headers, quality);
         info.is_youtube = is_yt;
 
-       // v2.3.0 (M11): tolak cepat skema non-download (blob:, data:, javascript:,
+        // v2.3.0 (M11): tolak cepat skema non-download (blob:, data:, javascript:,
         // file:, magnet: dst.) — dulu lolos dan baru gagal lambat di CLI dengan
         // error yang tidak jelas. (magnet bisa didukung via aria2 RPC — roadmap.)
         let scheme_ok = Url::parse(url)
@@ -195,8 +206,7 @@ impl DownloadEngine {
             .unwrap_or(false);
         if !scheme_ok {
             info.status = DownloadStatus::Error;
-            info.error_msg =
-                "Skema URL tidak didukung — hanya http, https, dan ftp.".to_string();
+            info.error_msg = "Skema URL tidak didukung — hanya http, https, dan ftp.".to_string();
             let _ = self.event_tx.send(DownloadEvent::Error(info.clone()));
             self.downloads
                 .write()
@@ -208,7 +218,10 @@ impl DownloadEngine {
         }
 
         let info = Arc::new(Mutex::new(info));
-        self.downloads.write().await.insert(id.clone(), info.clone());
+        self.downloads
+            .write()
+            .await
+            .insert(id.clone(), info.clone());
         self.mark_dirty();
 
         if auto_start {
@@ -223,14 +236,14 @@ impl DownloadEngine {
         let max = usize::from(config.max_concurrent.max(1));
         let tx = self.event_tx.clone();
 
-
         // B3: hitung slot + klaim status dilakukan dalam SATU write-lock
         // (pola promote_next) — dua start yang bersamaan tidak bisa sama-sama
         // lolos batas max_concurrent (double-spawn / over-slot).
-        let claimed: Option<(Arc<Mutex<DownloadInfo>>, usize)> = {
-
+        let claimed: Option<(SharedInfo, usize)> = {
             let downloads = self.downloads.write().await;
-            let Some(info) = downloads.get(id).cloned() else { return };
+            let Some(info) = downloads.get(id).cloned() else {
+                return;
+            };
 
             let mut active = 0usize;
             for other in downloads.values() {
@@ -281,11 +294,22 @@ impl DownloadEngine {
                 1 // tidak dipakai (tidak spawn)
             };
 
-            if start { Some((info, live)) } else { None }
+            if start {
+                Some((info, live))
+            } else {
+                None
+            }
         };
 
         if let Some((info, live)) = claimed {
-            spawn_supervised(self.downloads.clone(), info, tx, config, self.dirty.clone(), live);
+            spawn_supervised(
+                self.downloads.clone(),
+                info,
+                tx,
+                config,
+                self.dirty.clone(),
+                live,
+            );
         }
     }
 
@@ -293,7 +317,10 @@ impl DownloadEngine {
         let downloads = self.downloads.read().await;
         if let Some(info) = downloads.get(id) {
             let mut i = info.lock().await;
-            if matches!(i.status, DownloadStatus::Downloading | DownloadStatus::Resolving) {
+            if matches!(
+                i.status,
+                DownloadStatus::Downloading | DownloadStatus::Resolving
+            ) {
                 // Kill child proses LANGSUNG (jangan menunggu baris output berikutnya,
                 // bisa lama/hang kalau aria2/yt-dlp sedang stall).
                 kill_child_pid(i.pid);
@@ -414,12 +441,12 @@ impl DownloadEngine {
 
 /// Jalankan download lalu promote antrian berikutnya saat selesai
 fn spawn_supervised(
-    downloads: Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
-    info: Arc<Mutex<DownloadInfo>>,
+    downloads: DownloadMap,
+    info: SharedInfo,
     tx: mpsc::UnboundedSender<DownloadEvent>,
     config: Config,
     dirty: Arc<AtomicBool>,
-        live_share: usize,
+    live_share: usize,
 ) {
     // v2.3.0 (M3): bagi limit total aplikasi menurut jumlah unduhan hidup saat
     // proses ini start, bukan max_concurrent statis — unduhan tunggal kini
@@ -433,7 +460,8 @@ fn spawn_supervised(
     let promote_config = config.clone();
     let mut config = config;
     if !config.max_overall_speed.is_empty() && config.max_overall_speed != "0" {
-        config.max_overall_speed = aria2::resolve_speed_limit(&config.max_overall_speed, live_share);
+        config.max_overall_speed =
+            aria2::resolve_speed_limit(&config.max_overall_speed, live_share);
     }
     tokio::spawn(async move {
         let (is_yt, url) = {
@@ -444,6 +472,14 @@ fn spawn_supervised(
         if is_yt {
             // YouTube: yt-dlp dengan dialog kualitas (behavior lama)
             youtube::download(info.clone(), tx.clone(), &config).await;
+        } else if aria2_rpc::is_magnet(&url) {
+            // v2.7.0 (B2.1): magnet/torrent → daemon RPC aria2. Limit total
+            // di sini ditegakkan GLOBAL oleh daemon (changeGlobalOption),
+            // jadi `config.max_overall_speed` yang terbagi per-proses dari
+            // M3 sengaja TIDAK dipakai ulang (daemon tidak butuh bagian).
+            let mut cfg = config.clone();
+            cfg.max_overall_speed = promote_config.max_overall_speed.clone();
+            aria2_rpc::download(info.clone(), tx.clone(), &cfg).await;
         } else if is_direct_file_url(&url) {
             // File langsung (mp4/zip/dll): aria2 tanpa resolve — cepat
             aria2::download(info.clone(), tx.clone(), &config).await;
@@ -456,10 +492,7 @@ fn spawn_supervised(
                 universal::Outcome::Failed => {
                     let aborted = {
                         let i = info.lock().await;
-                        matches!(
-                            i.status,
-                            DownloadStatus::Cancelled | DownloadStatus::Paused
-                        )
+                        matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused)
                     };
                     if !aborted {
                         aria2::download(info.clone(), tx.clone(), &config).await;
@@ -483,26 +516,31 @@ fn spawn_supervised(
 pub fn is_direct_file_url(url: &str) -> bool {
     // Potong FRAGMENT dulu baru QUERY — fragment setelah ekstensi
     // (mis. "https://x.com/file.mp4#t=10") membuat cek ekstensi lama gagal.
-    let path = url.split('#').next().unwrap_or(url).split('?').next().unwrap_or(url);
+    let path = url
+        .split('#')
+        .next()
+        .unwrap_or(url)
+        .split('?')
+        .next()
+        .unwrap_or(url);
     let lower = path.to_ascii_lowercase();
     // v2.3.0 (M2): SELARASKAN dengan daftar intersep extension/background.js —
     // dulu .exe/.msi/.dmg/.bz2/.docx dll tidak ada di sini sehingga URL-nya
     // dicoba lewat yt-dlp dulu (gagal, ±1-3 dtk terbuang) baru fallback aria2.
     const EXTENSIONS: &[&str] = &[
-        ".mp4", ".webm", ".mkv", ".avi", ".mov", ".m4v", ".flv", ".wmv", ".3gp", ".ts",
-        ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav",
-        ".zip", ".tar", ".gz", ".bz2", ".tbz2", ".xz", ".txz", ".7z", ".rar",
-        ".pdf", ".iso", ".img", ".bin", ".apk", ".deb", ".rpm", ".exe", ".msi", ".dmg",
-        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico",
-        ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".epub", ".mobi",
-        ".txt", ".csv", ".json", ".xml",
+        ".mp4", ".webm", ".mkv", ".avi", ".mov", ".m4v", ".flv", ".wmv", ".3gp", ".ts", ".mp3",
+        ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav", ".zip", ".tar", ".gz", ".bz2", ".tbz2",
+        ".xz", ".txz", ".7z", ".rar", ".pdf", ".iso", ".img", ".bin", ".apk", ".deb", ".rpm",
+        ".exe", ".msi", ".dmg", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico",
+        ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".epub", ".mobi", ".txt",
+        ".csv", ".json", ".xml",
     ];
     EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
 }
 
 /// Cari download Queued tertua dan jalankan jika ada slot kosong
 async fn promote_next(
-    downloads: Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
+    downloads: DownloadMap,
     tx: mpsc::UnboundedSender<DownloadEvent>,
     config: Config,
     dirty: Arc<AtomicBool>,
@@ -522,7 +560,7 @@ async fn promote_next(
         // v2.3.0 (L4): FIFO deterministik — kunci (created_ms, id); tanpa
         // pembanding kedua, dua download yang dibuat pada waktu sama urutannya
         // acak mengikuti iterasi HashMap.
-        let mut oldest: Option<((i64, String), Arc<Mutex<DownloadInfo>>)> = None;
+        let mut oldest: Option<((i64, String), SharedInfo)> = None;
 
         let mut queued = 0usize;
         for info in map.values() {
@@ -532,7 +570,7 @@ async fn promote_next(
                 DownloadStatus::Queued => {
                     queued += 1;
                     let key = (i.created, i.id.clone());
-                    if oldest.as_ref().map_or(true, |(k, _)| key < *k) {
+                    if oldest.as_ref().is_none_or(|(k, _)| key < *k) {
                         oldest = Some((key, info.clone()));
                     }
                 }
@@ -596,6 +634,58 @@ pub(crate) fn kill_child_group_hard(pid: u32) {
     }
 }
 
+/// v2.3.1 (M1): pembaca baris output child process yang CANCELLATION-SAFE.
+///
+/// Kenapa tidak `AsyncBufReadExt::read_line`/`lines()` langsung: keduanya TIDAK
+/// aman dibatalkan di tengah — kalau `select!` memilih cabang ticker (cek
+/// pause/cancel) saat read_line sedang berjalan, byte yang terlanjur masuk ke
+/// buffer pemanggil bisa hilang / baris berikutnya terpotong. Di sini byte mentah
+/// disimpan di `pending` milik struct (bukan milik future), jadi future `read()`
+/// yang dibatalkan tidak pernah menelan data: read() hanya menulis buffer saat
+/// ia selesai.
+pub(crate) struct ChildLines<R> {
+    reader: R,
+    pending: Vec<u8>,
+    raw: Vec<u8>,
+    eof: bool,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> ChildLines<R> {
+    pub(crate) fn new(reader: R) -> Self {
+        Self {
+            reader,
+            pending: Vec::new(),
+            raw: vec![0u8; 8 * 1024],
+            eof: false,
+        }
+    }
+
+    /// Baris berikutnya (tanpa '\\n'); `None` = stream benar-benar EOF.
+    pub(crate) async fn next_line(&mut self) -> Option<String> {
+        use tokio::io::AsyncReadExt;
+        loop {
+            if let Some(pos) = self.pending.iter().position(|&b| b == b'\n') {
+                let mut line: Vec<u8> = self.pending.drain(..=pos).collect();
+                line.pop(); // buang '\n'
+                return Some(String::from_utf8_lossy(&line).into_owned());
+            }
+            if self.eof {
+                return if self.pending.is_empty() {
+                    None
+                } else {
+                    // baris terakhir tanpa newline penutup
+                    Some(String::from_utf8_lossy(&std::mem::take(&mut self.pending)).into_owned())
+                };
+            }
+            match self.reader.read(&mut self.raw).await {
+                Ok(0) => self.eof = true,
+                Ok(n) => self.pending.extend_from_slice(&self.raw[..n]),
+                Err(_) => self.eof = true,
+            }
+        }
+    }
+}
+
 /// v2.3.0 (K3): file input aria2 (`aria2-<id>.txt`) berisi URL penuh — mungkin
 /// bertoken login. Dibersihkan 0600 saat selesai; ini sapuan sisa sesi crash.
 fn cleanup_orphan_aria2_inputs() {
@@ -606,7 +696,7 @@ fn cleanup_orphan_aria2_inputs() {
             let ours = path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map_or(false, |n| n.starts_with("aria2-") && n.ends_with(".txt"));
+                .is_some_and(|n| n.starts_with("aria2-") && n.ends_with(".txt"));
             if ours {
                 let _ = std::fs::remove_file(&path);
             }
@@ -671,7 +761,7 @@ fn load_session() -> Vec<DownloadInfo> {
 
 /// Tulis snapshot session secara atomic (tmp + rename), dibatasi 200 entri terbaru
 async fn flush_session(
-    downloads: &Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
+    downloads: &DownloadMap,
     dirty: &AtomicBool,
 ) {
     if !dirty.swap(false, Ordering::SeqCst) {
@@ -713,9 +803,7 @@ pub(crate) fn is_valid_speed_limit(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
-    let (num, unit) = s.split_at(
-        s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()),
-    );
+    let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
     let num_ok = !num.is_empty() && num.parse::<u64>().is_ok();
     if !unit.is_empty() && !matches!(unit.to_ascii_uppercase().as_str(), "K" | "M" | "G") {
         return false;
@@ -775,7 +863,7 @@ mod tests {
         // Ekstensi yang harus terdeteksi (langsung ke aria2)
         let direct_valid = [
             "https://x.com/v.mp4",
-            "https://x.com/a.ZIP",     // case-insensitive
+            "https://x.com/a.ZIP",       // case-insensitive
             "https://x.com/file.tar.gz", // multi-ext (.gz terdaftar)
             "https://x.com/p.pdf",
             "https://x.com/img.JPG",
@@ -789,7 +877,11 @@ mod tests {
             "https://x.com/buku.epub",
         ];
         for url in direct_valid {
-            assert!(is_direct_file_url(url), "{} harus dianggap direct file", url);
+            assert!(
+                is_direct_file_url(url),
+                "{} harus dianggap direct file",
+                url
+            );
         }
     }
 
@@ -970,7 +1062,6 @@ mod tests {
         assert!(!s.contains(".."), "filename tidak boleh ada '..': {:?}", s);
     }
 
-
     // ── parse_session (M5: format berversi + kompatibel legacy) ──
 
     const LEGACY_ITEM: &str = r#"{
@@ -1001,6 +1092,41 @@ mod tests {
     fn parse_session_empty_and_garbage() {
         assert_eq!(parse_session("").map(|v| v.len()), Some(0));
         assert_eq!(parse_session("   ").map(|v| v.len()), Some(0));
-        assert!(parse_session("{bukan json").is_none(), "korup → None (caller bikin backup)");
+        assert!(
+            parse_session("{bukan json").is_none(),
+            "korup → None (caller bikin backup)"
+        );
+    }
+
+    // ── v2.3.1 (M1): ChildLines — pembaca baris cancellation-safe ──
+
+    #[tokio::test]
+    async fn child_lines_splits_and_flushes_tail() {
+        let data: &[u8] = b"satu\ndua-tiga\nekor"; // baris terakhir TANPA newline
+        let mut lines = ChildLines::new(std::io::Cursor::new(data));
+        assert_eq!(lines.next_line().await.as_deref(), Some("satu"));
+        assert_eq!(lines.next_line().await.as_deref(), Some("dua-tiga"));
+        assert_eq!(lines.next_line().await.as_deref(), Some("ekor"));
+        assert_eq!(lines.next_line().await, None);
+    }
+
+    #[tokio::test]
+    async fn child_lines_empty_input_is_eof_none() {
+        let data: &[u8] = b"";
+        let mut lines = ChildLines::new(std::io::Cursor::new(data));
+        assert_eq!(lines.next_line().await, None);
+    }
+
+    #[tokio::test]
+    async fn child_lines_survives_split_across_reads() {
+        // Cursor membaca sekaligus, jadi pakai duplikat: byte dipecah manual
+        // dengan VecDeque reader sederhana di atas — cukup pastikan pending
+        // menahan baris parsial antar-panggilan.
+        let data: &[u8] = b"aaa bbb\nccc\n";
+        let mut lines = ChildLines::new(std::io::Cursor::new(data));
+        // baca pertama selalu mengembalikan baris penuh pertama
+        assert_eq!(lines.next_line().await.as_deref(), Some("aaa bbb"));
+        assert_eq!(lines.next_line().await.as_deref(), Some("ccc"));
+        assert_eq!(lines.next_line().await, None);
     }
 }

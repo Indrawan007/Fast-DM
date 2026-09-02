@@ -60,12 +60,11 @@ fn write_manifests(json_str: &str) -> usize {
             continue;
         }
         let manifest = dir.join(format!("{}.json", HOST_NAME));
-        if fs::create_dir_all(dir).is_ok() {
-            if fs::write(&manifest, json_str).is_ok() {
+        if fs::create_dir_all(dir).is_ok()
+            && fs::write(&manifest, json_str).is_ok() {
                 written += 1;
                 tracing::debug!("Manifest: {}", manifest.display());
             }
-        }
     }
     written
 }
@@ -108,14 +107,12 @@ pub fn check_and_setup() -> Result<usize, Box<dyn std::error::Error>> {
             true
         };
 
-        if need_update {
-            if fs::create_dir_all(dir).is_ok() {
-                if fs::write(&manifest, &json_str).is_ok() {
+        if need_update
+            && fs::create_dir_all(dir).is_ok()
+                && fs::write(&manifest, &json_str).is_ok() {
                     created += 1;
                     tracing::debug!("Setup: {}", manifest.display());
                 }
-            }
-        }
     }
 
     if created > 0 {
@@ -149,7 +146,11 @@ pub fn register_extension_id(ext_id: &str) -> Result<usize, Box<dyn std::error::
     let json_str = serde_json::to_string_pretty(&host_json)?;
     let updated = write_manifests(&json_str);
 
-    tracing::info!("Extension ID registered: {} ({} manifests)", ext_id, updated);
+    tracing::info!(
+        "Extension ID registered: {} ({} manifests)",
+        ext_id,
+        updated
+    );
     Ok(updated)
 }
 
@@ -173,10 +174,10 @@ pub fn resolve_native_path() -> String {
             // install .deb.
             let in_target = parent
                 .file_name()
-                .map_or(false, |p| p == "debug" || p == "release")
-                && parent
-                    .parent()
-                    .map_or(false, |p| p.file_name() == Some(std::ffi::OsStr::new("target")));
+                .is_some_and(|p| p == "debug" || p == "release")
+                && parent.parent().is_some_and(|p| {
+                    p.file_name() == Some(std::ffi::OsStr::new("target"))
+                });
             if in_target {
                 let _ = fs::write(
                     &candidate,
@@ -218,7 +219,7 @@ fn get_all_nmh_dirs() -> Vec<PathBuf> {
         "yandex-browser",
         "sidekick",
         "helium",
-        "net.imput.helium",  // Helium Flatpak
+        "net.imput.helium", // Helium Flatpak
     ];
 
     for browser in &browsers {
