@@ -140,18 +140,39 @@ chrome.runtime.onStartup.addListener(() => {
 // Native Messaging
 // ═══════════════════════════════════════════════
 
+// v2.3.0 (L7): batas waktu eksplisit. Native host bisa menahan request cukup
+// lama saat cold start GUI (poll socket hingga ±15 dtk + forward 5 dtk);
+// tanpa timeout, promise menggantung tanpa umpan balik ke user.
+const NATIVE_TIMEOUT_MS = 25_000;
+
 function sendToNative(message) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer;
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(arg);
+    };
+    timer = setTimeout(
+      () =>
+        finish(
+          reject,
+          new Error("Timeout — Fast DM tidak merespons (apakah baru mulai?)"),
+        ),
+      NATIVE_TIMEOUT_MS,
+    );
     try {
       chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, message, (resp) => {
         if (chrome.runtime.lastError) {
-          reject(chrome.runtime.lastError);
+          finish(reject, chrome.runtime.lastError);
           return;
         }
-        resolve(resp);
+        finish(resolve, resp);
       });
     } catch (err) {
-      reject(err);
+      finish(reject, err);
     }
   });
 }

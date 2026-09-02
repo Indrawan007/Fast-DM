@@ -15,6 +15,8 @@ pub struct DownloadRow {
     speed_lbl: Label,
     eta_lbl: Label,
     error_lbl: Label,
+    /// v2.3.0 (M10): ikon baris status — ikut warna error/info
+    status_icon: Label,
     error_box: GtkBox,
 
     pub pause_btn: Button,
@@ -90,12 +92,12 @@ impl DownloadRow {
         row3.append(&speed_lbl);
         row3.append(&eta_lbl);
 
-        // Row 3b: error
+        // Row 3b: error / info status (M10: dua peran di satu baris)
         let error_box = GtkBox::new(Orientation::Horizontal, 6);
         error_box.set_visible(false);
 
-        let error_icon = Label::new(Some("\u{25CF}")); // ●
-        error_icon.add_css_class("error-label");
+        let status_icon = Label::new(Some("\u{25CF}")); // ●
+        status_icon.add_css_class("error-label");
 
         let error_lbl = Label::new(None::<&str>);
         error_lbl.set_hexpand(true);
@@ -103,7 +105,7 @@ impl DownloadRow {
         error_lbl.set_ellipsize(gtk4::pango::EllipsizeMode::End);
         error_lbl.add_css_class("error-label");
 
-        error_box.append(&error_icon);
+        error_box.append(&status_icon);
         error_box.append(&error_lbl);
 
         // Row 4: buttons
@@ -146,6 +148,7 @@ impl DownloadRow {
             speed_lbl,
             eta_lbl,
             error_lbl,
+            status_icon,
             error_box,
             pause_btn,
             resume_btn,
@@ -184,9 +187,20 @@ impl DownloadRow {
         self.update_badge(&info.status);
         self.update_progress_class(&info.status);
 
-        // Error
-        if !info.error_msg.is_empty() {
-            self.error_lbl.set_text(&info.error_msg);
+        // Baris status: error (merah) ATAU info non-error seperti "Menggabungkan…"
+        // (biru) — v2.3.0 (M10), dulu info menumpang error_msg sehingga tampil merah.
+        let has_err = !info.error_msg.is_empty();
+        let has_info = !has_err && !info.status_detail.is_empty();
+        if has_err || has_info {
+            self.error_lbl
+                .set_text(if has_err { &info.error_msg } else { &info.status_detail });
+            for c in ["error-label", "info-label"] {
+                self.error_lbl.remove_css_class(c);
+                self.status_icon.remove_css_class(c);
+            }
+            let cls = if has_err { "error-label" } else { "info-label" };
+            self.error_lbl.add_css_class(cls);
+            self.status_icon.add_css_class(cls);
             self.error_box.set_visible(true);
         } else {
             self.error_box.set_visible(false);

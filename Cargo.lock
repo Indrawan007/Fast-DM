@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "fast-dm"
-version = "2.2.5"
+version = "2.3.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1335,6 +1335,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]

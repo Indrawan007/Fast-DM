@@ -132,6 +132,7 @@ pub async fn download(
         i.status = DownloadStatus::Downloading;
         i.speed = 0;
         i.error_msg.clear();
+        i.status_detail.clear();
         let _ = tx.send(DownloadEvent::Progress(i.clone()));
     });
 

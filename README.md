@@ -12,7 +12,8 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 🍪 **Cookie per-domain** — download login-protected dari subdomain CDN
 - 🌑 **Tema Catppuccin Mocha** untuk GTK4 GUI
 - ⏸️ **Pause/resume/cancel** dengan SIGTERM (resume-friendly, bukan kill paksa)
-- 📋 **Session persist** — unduhan yang belum selesai otomatis di-resume saat restart
+- 📋 **Session persist** — unduhan yang belum selesai otomatis di-resume saat restart (bisa dimatikan di Pengaturan)
+- 🔒 **IPC lokal aman** — socket di `XDG_RUNTIME_DIR` (0700) + verifikasi UID peer; cookies & file token tidak pernah ditulis ke `/tmp` publik
 
 ## Download
 

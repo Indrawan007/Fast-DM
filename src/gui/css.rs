@@ -117,6 +117,15 @@ pub const THEME_CSS: &str = r#"
     font-style: italic;
 }
 
+/* v2.3.0 (M10): info non-error (mis. "Merging video + audio…") — tidak lagi
+   menumpang error_msg merah */
+.fast-dm-window .info-label {
+    color: #89dceb;
+    font-size: 11px;
+    font-weight: 500;
+}
+
+
 /* Badges */
 .fast-dm-window .badge {
     font-size: 9px;

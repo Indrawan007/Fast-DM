@@ -40,6 +40,11 @@ pub struct DownloadInfo {
     pub eta: u64,
     pub progress: f64,
     pub error_msg: String,
+    /// v2.3.0 (M10): info status non-error (mis. "Merging video + audio…").
+    /// Dulu info seperti ini ditulis ke error_msg → UI menampilkan baris
+    /// merah untuk proses yang sebenarnya normal.
+    #[serde(default)]
+    pub status_detail: String,
     pub connections: u8,
     pub retry_count: u8,
     pub is_youtube: bool,
@@ -49,6 +54,9 @@ pub struct DownloadInfo {
     pub quality: Option<String>,
     #[serde(default)]
     pub pid: Option<u32>,
+    /// epoch MILLISECONDS (v2.3.0, L4 — dulu detik sehingga antrian FIFO tidak
+    /// deterministik bila dua download dibuat pada detik yang sama)
+
     #[serde(default)]
     pub created: i64,
 }
@@ -68,11 +76,12 @@ impl DownloadInfo {
             total_size: 0, downloaded: 0,
             speed: 0, eta: 0, progress: 0.0,
             error_msg: String::new(),
+            status_detail: String::new(),
             connections: 0, retry_count: 0,
             is_youtube: false,
             headers, quality,
             pid: None,
-            created: chrono::Utc::now().timestamp(),
+            created: chrono::Utc::now().timestamp_millis(),
         }
     }
 
@@ -233,7 +242,10 @@ mod tests {
         assert_eq!(info.progress, 0.0);
         assert!(info.error_msg.is_empty());
         assert!(info.pid.is_none());
-        assert!(info.created > 0);
+        assert!(info.status_detail.is_empty());
+        assert!(info.pid.is_none());
+        // created sekarang milliseconds — harus jauh > 0
+        assert!(info.created > 1_700_000_000_000);
     }
 
     #[test]
@@ -294,5 +306,6 @@ mod tests {
         assert!(info.headers.is_empty());
         assert!(info.quality.is_none());
         assert!(info.pid.is_none());
+        assert!(info.status_detail.is_empty()); // field baru → default "" (M10)
     }
 }

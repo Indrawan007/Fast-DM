@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -19,6 +19,14 @@ pub struct Config {
     pub file_allocation: String,
     pub auto_file_renaming: bool,
     pub verify_tls: bool,
+    /// v2.3.0 (K5): unduhan tertunda hasil restore sesi dilanjutkan otomatis
+    /// saat aplikasi dibuka. Matikan bila lebih suka memutuskan manual.
+    #[serde(default = "default_true")]
+    pub auto_resume: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -43,6 +51,7 @@ impl Default for Config {
             file_allocation: "falloc".into(),
             auto_file_renaming: true,
             verify_tls: true,
+            auto_resume: true,
         }
     }
 }
@@ -53,6 +62,93 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join("fast-dm")
     }
+
+    /// XDG_RUNTIME_DIR hanya diterima bila benar-benar aman: absolute,
+    /// milik UID kita, dan tidak bisa diakses group/other (0700 ala systemd).
+    /// Kalau tidak valid → None (pemanggil fallback ke config dir).
+    fn validated_runtime_dir() -> Option<PathBuf> {
+        use std::os::unix::fs::MetadataExt;
+        let raw = std::env::var_os("XDG_RUNTIME_DIR")?;
+        let p = PathBuf::from(&raw);
+        if !p.is_absolute() {
+            return None;
+        }
+        let md = fs::metadata(&p).ok()?;
+        if md.uid() != nix::unistd::geteuid().as_raw() {
+            return None;
+        }
+        if md.mode() & 0o077 != 0 {
+            return None;
+        }
+        Some(p)
+    }
+
+    /// Buat (atau perketat) direktori privat per-user. Best-effort chmod 0700
+    /// — bila direktori sudah ada milik orang lain, set_permissions gagal dan
+    /// konten tetap dilindungi 0600 per file.
+    fn ensure_private_dir(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::create_dir_all(dir);
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        dir.to_path_buf()
+    }
+
+    /// v2.3.0 (K1): basis untuk socket IPC & file sementara. Dulu langsung di
+    /// `/tmp/fast-dm-<uid>.sock` — user lain bisa pre-create socket di path
+    /// publik yang predictable dan menerima kirian URL + cookies. Sekarang
+    /// `XDG_RUNTIME_DIR/fast-dm` (0700, per-user, tmpfs), fallback ke
+    /// `~/.config/fast-dm/run`.
+    pub fn work_dir() -> PathBuf {
+        match Self::validated_runtime_dir() {
+            Some(rt) => Self::ensure_private_dir(&rt.join("fast-dm")),
+            None => Self::ensure_private_dir(&Self::config_dir().join("run")),
+        }
+    }
+
+    /// Path socket IPC — dipakai GUI (bind) dan native host (connect).
+    pub fn ipc_socket_path() -> PathBuf {
+        Self::work_dir().join("fast-dm.sock")
+    }
+
+    /// Direktori input-file aria2 (berisi URL yang mungkin bertoken) — 0600/0700 (K3).
+    pub fn aria2_input_dir() -> PathBuf {
+        Self::ensure_private_dir(&Self::work_dir().join("aria2-in"))
+    }
+
+    /// Hapus file cookie `cookies_*.txt` yang lebih tua dari `max_age`.
+    /// Cookie yang ditulis extension punya TTL 24 jam — yang menua tak akan
+    /// pernah dipakai lagi (yt-dlp menolak > 2 jam), jadi buang saja.
+    pub fn gc_stale_cookies() -> usize {
+        Self::gc_cookie_files_in(&Self::config_dir(), std::time::Duration::from_secs(7 * 24 * 3600))
+    }
+
+    fn gc_cookie_files_in(dir: &Path, max_age: std::time::Duration) -> usize {
+        let mut removed = 0;
+        let Ok(rd) = fs::read_dir(dir) else {
+            return 0;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let is_cookie = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map_or(false, |n| n.starts_with("cookies_") && n.ends_with(".txt"));
+            if !is_cookie {
+                continue;
+            }
+            let stale = path
+                .metadata()
+                .ok()
+                .and_then(|md| md.modified().ok())
+                .and_then(|m| m.elapsed().ok())
+                .map_or(false, |age| age > max_age);
+            if stale && fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
 
     pub fn config_file() -> PathBuf {
         Self::config_dir().join("config.json")
@@ -221,6 +317,61 @@ mod tests {
         assert!(c.max_concurrent > 0 && c.max_concurrent <= 10);
         assert!(c.timeout > 0);
         assert!(c.verify_tls); // default aman
+assert!(c.auto_resume); // K5: default lanjutkan restore otomatis
+    }
+
+    // ── v2.3.0: path privat (K1/K3) ──
+
+    #[test]
+    fn ipc_socket_path_is_named_and_absolute() {
+        let p = Config::ipc_socket_path();
+        assert!(p.is_absolute(), "socket path harus absolute: {p:?}");
+        assert!(p.ends_with("fast-dm.sock"));
+        // work_dir = runtime dir (0700) atau config dir — bukan /tmp telanjang
+        // yang bisa di-preempt user lain (K1).
+        assert_ne!(p.parent().unwrap(), Path::new("/tmp"));
+    }
+
+    #[test]
+    fn aria2_input_dir_is_private_subdir() {
+        let d = Config::aria2_input_dir();
+        assert!(d.exists());
+        assert!(d.ends_with("aria2-in"));
+    }
+
+    #[test]
+    fn gc_cookie_files_removes_only_old_cookie_files() {
+        use std::io::Write;
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let tmp = std::env::temp_dir().join(format!("fast-dm-gc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let fresh = tmp.join("cookies_fresh.com.txt");
+        let old = tmp.join("cookies_old.com.txt");
+        let keep = tmp.join("config.json");
+        for p in [&fresh, &old, &keep] {
+            let mut f = fs::File::create(p).unwrap();
+            f.write_all(b"# Netscape HTTP Cookie File\n").unwrap();
+        }
+        // Mundur mtime file "old" ke jaman UNIX_EPOCH+1000s (pasti > 1 jam)
+        let ft = std::fs::FileTimes::new()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(1_000));
+        fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_times(ft)
+            .unwrap();
+
+        let removed = Config::gc_cookie_files_in(&tmp, Duration::from_secs(3600));
+        assert_eq!(removed, 1, "hanya cookie lama yang dibuang");
+        assert!(fresh.exists(), "cookie fresh harus tetap ada");
+        assert!(!old.exists(), "cookie basi harus dibuang");
+        assert!(keep.exists(), "bukan file cookie tidak boleh disentuh");
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]

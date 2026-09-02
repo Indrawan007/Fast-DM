@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::downloader::DownloadEngine;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
@@ -31,15 +32,48 @@ struct IpcResponse {
     message: Option<String>,
 }
 
+/// v2.3.0 (K1): socket pindah dari /tmp publik ke direktori privat
+/// (`XDG_RUNTIME_DIR/fast-dm` bila valid, fallback `~/.config/fast-dm/run`).
+/// Path lama yang ditinggalkan versi ≤2.2.5 dibersihkan saat start, bila
+/// memang socket milik user kita sendiri (jangan sentuh symlink/sock orang lain).
+fn cleanup_legacy_socket() {
+    use std::os::unix::fs::MetadataExt;
+    let old = PathBuf::from(format!(
+        "/tmp/fast-dm-{}.sock",
+        nix::unistd::getuid().as_raw()
+    ));
+    if let Ok(md) = std::fs::symlink_metadata(&old) {
+        if md.file_type().is_socket() && md.uid() == nix::unistd::getuid().as_raw() {
+            let _ = std::fs::remove_file(&old);
+        }
+    }
+}
+
+/// Defense-in-depth: terima koneksi HANYA dari proses dengan UID yang sama.
+/// Permission socket 0600 sudah membatasi, tapi bila parent dir pernah salah
+/// mode (mis. hasil versi lama / home di-share), peer-cred tetap menutup celah.
+fn peer_uid_ok(stream: &std::os::unix::net::UnixStream) -> bool {
+    match nix::sys::socket::getsockopt(
+        stream,
+        nix::sys::socket::sockopt::PeerCredentials,
+    ) {
+        Ok(cred) => cred.uid() == nix::unistd::getuid(),
+        Err(_) => false,
+    }
+}
+
 pub async fn start_server(engine: Arc<DownloadEngine>) -> Result<(), Box<dyn std::error::Error>> {
-    let uid = nix::unistd::getuid();
-    let socket_path = format!("/tmp/fast-dm-{}.sock", uid);
+    let socket_path = Config::ipc_socket_path();
+    cleanup_legacy_socket();
 
     // Single-instance: kalau ada instance lain yang masih melayani socket ini,
     // jangan ambil alih. Kalau tidak, instance kedua menghapus socket instance
     // pertama dan semua koneksi browser masuk ke instance yang salah.
     if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
-        tracing::info!("IPC already active on {} — skip server", socket_path);
+        tracing::info!(
+            "IPC already active on {} — skip server",
+            socket_path.display()
+        );
         return Ok(());
     }
 
@@ -52,10 +86,16 @@ pub async fn start_server(engine: Arc<DownloadEngine>) -> Result<(), Box<dyn std
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
 
-    tracing::info!("IPC listening on {}", socket_path);
+    tracing::info!("IPC listening on {}", socket_path.display());
 
     loop {
         let (stream, _) = listener.accept().await?;
+
+        if !peer_uid_ok(&stream) {
+            tracing::warn!("IPC: koneksi ditolak (peer UID != uid kita) — ditutup");
+            drop(stream); // close
+            continue;
+        }
         let engine = engine.clone();
 
         tokio::spawn(async move {
@@ -220,7 +260,12 @@ fn write_cookies_txt(cookie_header: &str, domain: &str) -> Result<(), String> {
         return Err("invalid domain".into());
     }
 
-    let expires = chrono::Utc::now().timestamp() + 31_536_000;
+    // v2.3.0 (M7): TTL 24 jam — dulu 1 tahun (!) padahal ini salinan sesi
+    // browser; GC engine (7 hari) + kedaluwarsa mandiri menjamin tidak ada
+    // kredensial basi menumpuk di disk. Cookie session browser memang pendek
+    // umurnya, 24 jam lebih dari cukup untuk menyelesaikan unduhan.
+    let expires = chrono::Utc::now().timestamp() + 24 * 3600;
+
     let mut out = String::from("# Netscape HTTP Cookie File\n");
     let mut count = 0;
 

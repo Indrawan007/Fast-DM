@@ -44,10 +44,21 @@ fn make_origins(registered: &[String]) -> Vec<String> {
     origins
 }
 
+/// v2.3.0 (M8): tulis manifest HANYA untuk browser yang profilnya benar-benar
+/// ada. NativeMessagingHosts selalu = <profil browser>/NativeMessagingHosts,
+/// jadi cukup cek parent-nya. Dulu `create_dir_all` buta → ±13 folder sampah
+/// di ~/.config walau user cuma punya 1 browser.
+fn browser_profile_exists(nmh_dir: &Path) -> bool {
+    nmh_dir.parent().is_some_and(|p| p.is_dir())
+}
+
 /// Tulis manifest ke semua lokasi browser, kembalikan jumlah yang ditulis.
 fn write_manifests(json_str: &str) -> usize {
     let mut written = 0;
     for dir in get_all_nmh_dirs() {
+        if !browser_profile_exists(dir) {
+            continue;
+        }
         let manifest = dir.join(format!("{}.json", HOST_NAME));
         if fs::create_dir_all(dir).is_ok() {
             if fs::write(&manifest, json_str).is_ok() {
@@ -78,6 +89,11 @@ pub fn check_and_setup() -> Result<usize, Box<dyn std::error::Error>> {
 
     for dir in &dirs {
         let manifest = dir.join(format!("{}.json", HOST_NAME));
+
+        // M8: lewati browser yang tidak ter-install (profil tidak ada)
+        if !browser_profile_exists(dir) {
+            continue;
+        }
 
         // Cek apakah perlu update (bandingkan konten penuh, bukan hanya path).
         // Karena origin register ikut disertakan, manifest tidak lagi ditimpa

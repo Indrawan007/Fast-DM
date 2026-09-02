@@ -2,26 +2,58 @@ use super::types::*;
 use crate::config::Config;
 use regex::Regex;
 use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio::sync::{mpsc, Mutex};
 
-static RE_YT_WATCH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:https?://)?(?:www\.)?youtube\.com/watch\?v=[\w-]+").unwrap());
-static RE_YT_SHORTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:https?://)?(?:www\.)?youtube\.com/shorts/[\w-]+").unwrap());
-static RE_YT_BE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:https?://)?youtu\.be/[\w-]+").unwrap());
-static RE_YT_MUSIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:https?://)?music\.youtube\.com/watch\?v=[\w-]+").unwrap());
+
 static RE_YTDLP_PROGRESS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[download\]\s+(\d+\.?\d*)%\s+of\s+~?\s*(\S+)\s+at\s+(\S+)\s+ETA\s+(\S+)").unwrap());
 static RE_YTDLP_PROGRESS2: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[download\]\s+(\d+\.?\d*)%").unwrap());
 static RE_YTDLP_DEST: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[download\]\s+Destination:\s+(.+)").unwrap());
 static RE_YTDLP_MERGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[Merger\]|\[ffmpeg\]|Merging").unwrap());
 static RE_SPEED_PARSE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([\d.]+)\s*(\S+)").unwrap());
 
+/// v2.3.0 (M6): deteksi host-based menggantikan regex lama yang menuntut
+/// `?v=` menjadi parameter pertama (`watch?app=desktop&v=…` dulu terlewat)
+/// dan tidak mengenal /live/, /embed/, /v/.
 pub fn is_youtube_url(url: &str) -> bool {
-    RE_YT_WATCH.is_match(url)
-        || RE_YT_SHORTS.is_match(url)
-        || RE_YT_BE.is_match(url)
-        || RE_YT_MUSIC.is_match(url)
+    let s = url.trim();
+    let candidate = if s.contains("://") {
+        s.to_string()
+    } else {
+        format!("https://{s}")
+    };
+    let Ok(u) = url::Url::parse(&candidate) else {
+        return false;
+    };
+    if !matches!(u.scheme(), "http" | "https") {
+        return false;
+    }
+    let host = u
+        .host_str()
+        .unwrap_or("")
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    // host dievaluasi EKSPLISIT — "notyoutube.com" / "youtube.com.evil.test"
+    // tidak boleh ikut.
+    let path = u.path().to_string();
+    let has_v = u.query_pairs().any(|(k, v)| k == "v" && !v.is_empty());
+    let seg = |p: &str, i: usize| p.split('/').nth(i).map_or(false, |x| !x.is_empty());
+
+    match host.as_str() {
+        "youtu.be" => seg(&path, 1),
+        "youtube.com" | "www.youtube.com" | "m.youtube.com" => {
+            ((path == "/watch" || path.starts_with("/watch/")) && has_v)
+                || (path.starts_with("/shorts/") && seg(&path, 2))
+                || (path.starts_with("/live/") && seg(&path, 2))
+                || (path.starts_with("/embed/") && seg(&path, 2))
+                || (path.starts_with("/v/") && seg(&path, 2))
+        }
+        "music.youtube.com" => (path == "/watch" || path.starts_with("/watch/")) && has_v,
+        _ => false,
+    }
 }
 
 /// Deteksi browser untuk cookies — gunakan nama support yt-dlp.
@@ -245,7 +277,8 @@ pub(crate) fn run_ytdlp(
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
 ) -> bool {
-    let mut child = match Command::new(&cmd[0]).args(&cmd[1..]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+    // process_group(0) → killpg menjangkau ffmpeg anak-anaknya saat pause/cancel (K4).
+    let mut child = match Command::new(&cmd[0]).args(&cmd[1..]).process_group(0).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
@@ -308,8 +341,10 @@ pub(crate) fn run_ytdlp(
 
         if matches!(status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
             // B8: Paused → SIGTERM sudah dikirim pause_download(); tunggu proses
-            // berhenti rapi (file .part tetap bisa di-resume). Cancelled → kill.
+             // berhenti rapi (file .part tetap bisa di-resume). Cancelled → kill
+            // seluruh group (ffmpeg ikut mati, K4) + fallback child.kill().
             if status == DownloadStatus::Cancelled {
+                super::kill_child_group_hard(child.id());
                 let _ = child.kill();
             }
             let _ = child.wait();
@@ -333,7 +368,8 @@ pub(crate) fn run_ytdlp(
             rt.block_on(async {
                 let mut i = info.lock().await;
                 i.progress = 99.0;
-                i.error_msg = "Merging video + audio...".into();
+                // M10: info merge → status_detail (bukan error_msg merah)
+                i.status_detail = "Menggabungkan video + audio…".into();
                 let _ = tx.send(DownloadEvent::Progress(i.clone()));
             });
             continue;
@@ -361,6 +397,7 @@ pub(crate) fn run_ytdlp(
                     }
                     i.eta = eta;
                     i.error_msg.clear();
+                    i.status_detail.clear();
                     let _ = tx.send(DownloadEvent::Progress(i.clone()));
                 });
                 last_update = Instant::now();
@@ -391,12 +428,14 @@ pub(crate) fn run_ytdlp(
                 i.downloaded = i.total_size;
             }
             i.error_msg.clear();
+            i.status_detail.clear();
             let _ = tx.send(DownloadEvent::Completed(i.clone()));
             true
         } else {
             i.status = DownloadStatus::Error;
             let detail = if err_detail.is_empty() { String::new() } else { format!("\n{}", err_detail.trim()) };
             i.error_msg = format!("yt-dlp exit code: {}{}", exit_code, detail);
+            i.status_detail.clear();
             i.speed = 0;
             let _ = tx.send(DownloadEvent::Error(i.clone()));
             false
@@ -450,6 +489,13 @@ mod tests {
             "https://youtu.be/dQw4w9WgXcQ",
             "https://music.youtube.com/watch?v=abc",
             "http://www.youtube.com/watch?v=abc", // http juga
+            // M6: kasus yang regex lama lewatkan
+            "https://www.youtube.com/watch?app=desktop&v=dQw4w9WgXcQ", // v= bukan param pertama
+            "https://www.youtube.com/live/dQw4w9WgXcQ",
+            "https://www.youtube.com/embed/dQw4w9WgXcQ",
+            "https://www.youtube.com/v/dQw4w9WgXcQ",
+            "youtube.com/watch?v=abc", // tanpa scheme (GUI menambahkan https://, tapi fungsi harus toleran)
+            "https://m.youtube.com/watch?v=abc",
         ];
         for url in urls {
             assert!(is_youtube_url(url), "{} harus dianggap YouTube", url);
@@ -465,6 +511,14 @@ mod tests {
             "https://example.com/file.mp4",
             "not a url",
             "",
+            // host mirip tapi bukan YouTube
+            "https://notyoutube.com/watch?v=abc",
+            "https://youtube.com.evil.test/watch?v=abc",
+            // halaman non-video di youtube.com → biar universal resolver yang urus
+            "https://www.youtube.com/",
+            "https://www.youtube.com/playlist?list=PL123",
+            // watch tanpa id
+            "https://www.youtube.com/watch",
         ];
         for url in urls {
             assert!(!is_youtube_url(url), "{} BUKAN YouTube", url);

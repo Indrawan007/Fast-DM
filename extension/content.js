@@ -479,21 +479,36 @@
     const pos = getComputedStyle(player).position;
     if (pos === "static") player.style.position = "relative";
 
+    // v2.3.0 (M9): elemen player BERTAHAN antar navigasi SPA YouTube —
+    // tanpa abort ini, listener hover lama menumpuk di node yang sama setiap
+    // ganti video (dulu bocor perlahan).
+    if (player.__fastdmAC) player.__fastdmAC.abort();
+    const ac = new AbortController();
+    player.__fastdmAC = ac;
+
     player.appendChild(overlay);
 
     // Show/hide on hover
-    player.addEventListener("mouseenter", () => {
-      clearTimeout(hideTimeout);
-      overlay.classList.add("visible");
-    });
+    player.addEventListener(
+      "mouseenter",
+      () => {
+        clearTimeout(hideTimeout);
+        overlay.classList.add("visible");
+      },
+      { signal: ac.signal },
+    );
 
-    player.addEventListener("mouseleave", () => {
-      hideTimeout = setTimeout(() => {
-        if (!dropdownVisible) {
-          overlay.classList.remove("visible");
-        }
-      }, 600);
-    });
+    player.addEventListener(
+      "mouseleave",
+      () => {
+        hideTimeout = setTimeout(() => {
+          if (!dropdownVisible) {
+            overlay.classList.remove("visible");
+          }
+        }, 600);
+      },
+      { signal: ac.signal },
+    );
 
     // Keep visible while dropdown open
     overlay.addEventListener("mouseenter", () => {

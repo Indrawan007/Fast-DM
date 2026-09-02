@@ -19,6 +19,9 @@ pub struct DownloadEngine {
     event_tx: mpsc::UnboundedSender<DownloadEvent>,
     config: Arc<RwLock<Config>>,
     dirty: Arc<AtomicBool>,
+    /// v2.3.0 (K5): id hasil restore sesi — di-auto-resume sekali saat start
+    /// bila config.auto_resume; bukan untuk item yang user pause manual.
+    restored_ids: Arc<Mutex<Vec<String>>>,
 }
 
 #[allow(dead_code)]
@@ -26,6 +29,7 @@ impl DownloadEngine {
     pub fn new(event_tx: mpsc::UnboundedSender<DownloadEvent>) -> Self {
         // Restore session sebelumnya — yang tadinya aktif jadi Paused agar bisa di-resume
         let mut map = HashMap::new();
+        let mut restored_ids = Vec::new();
         for mut d in load_session() {
             if matches!(
                 d.status,
@@ -33,11 +37,17 @@ impl DownloadEngine {
             ) {
                 d.status = DownloadStatus::Paused;
                 d.speed = 0;
+                restored_ids.push(d.id.clone());
             }
             d.pid = None;
             map.insert(d.id.clone(), Arc::new(Mutex::new(d)));
         }
         let downloads = Arc::new(RwLock::new(map));
+
+        // v2.3.0: sapuan keras saat start — file input aria2 sisa crash +
+        // cookie kedaluwarsa (K3, M7).
+        cleanup_orphan_aria2_inputs();
+        Config::gc_stale_cookies();
 
         let dirty = Arc::new(AtomicBool::new(false));
 
@@ -56,6 +66,35 @@ impl DownloadEngine {
             event_tx,
             config: Arc::new(RwLock::new(Config::load().clone())),
             dirty,
+            restored_ids: Arc::new(Mutex::new(restored_ids)),
+        }
+    }
+
+    /// v2.3.0 (K5): lanjutkan unduhan yang terputus karena aplikasi keluar.
+    /// README lama mengklaim "otomatis di-resume" padahal kode hanya menandai
+    /// Paused — method ini menepati klaim itu, dengan penghormatan:
+    /// - hanya item hasil restore sesi (user yang pause manual TIDAK diutak-atik),
+    /// - hanya selama status masih Paused (kalau user sudah menekan apa pun, batalkan),
+    /// - slot & antrean tetap diatur start_download (max_concurrent tidak jebol).
+    /// Dapat dimatikan via Settings → auto_resume.
+    pub async fn resume_restored(&self) {
+        if !self.get_config().await.auto_resume {
+            tracing::info!("auto_resume dimatikan — {} unduhan dibiarkan Paused", self.restored_ids.lock().await.len());
+            return;
+        }
+        let ids: Vec<String> = self.restored_ids.lock().await.drain(..).collect();
+        for id in ids {
+            let still_paused = {
+                let downloads = self.downloads.read().await;
+                match downloads.get(&id) {
+                    Some(info) => info.lock().await.status == DownloadStatus::Paused,
+                    None => false,
+                }
+            };
+            if still_paused {
+                tracing::info!("Auto-resume unduhan tersisa sesi: {}", id);
+                self.start_download(&id).await;
+            }
         }
     }
 
@@ -148,6 +187,26 @@ impl DownloadEngine {
         );
         info.is_youtube = is_yt;
 
+       // v2.3.0 (M11): tolak cepat skema non-download (blob:, data:, javascript:,
+        // file:, magnet: dst.) — dulu lolos dan baru gagal lambat di CLI dengan
+        // error yang tidak jelas. (magnet bisa didukung via aria2 RPC — roadmap.)
+        let scheme_ok = Url::parse(url)
+            .map(|u| matches!(u.scheme(), "http" | "https" | "ftp"))
+            .unwrap_or(false);
+        if !scheme_ok {
+            info.status = DownloadStatus::Error;
+            info.error_msg =
+                "Skema URL tidak didukung — hanya http, https, dan ftp.".to_string();
+            let _ = self.event_tx.send(DownloadEvent::Error(info.clone()));
+            self.downloads
+                .write()
+                .await
+                .insert(id.clone(), Arc::new(Mutex::new(info)));
+            self.mark_dirty();
+            tracing::warn!("Download ditolak (skema URL): {}", url);
+            return id;
+        }
+
         let info = Arc::new(Mutex::new(info));
         self.downloads.write().await.insert(id.clone(), info.clone());
         self.mark_dirty();
@@ -168,7 +227,8 @@ impl DownloadEngine {
         // B3: hitung slot + klaim status dilakukan dalam SATU write-lock
         // (pola promote_next) — dua start yang bersamaan tidak bisa sama-sama
         // lolos batas max_concurrent (double-spawn / over-slot).
-        let claimed: Option<Arc<Mutex<DownloadInfo>>> = {
+        let claimed: Option<(Arc<Mutex<DownloadInfo>>, usize)> = {
+
             let downloads = self.downloads.write().await;
             let Some(info) = downloads.get(id).cloned() else { return };
 
@@ -202,11 +262,30 @@ impl DownloadEngine {
                 }
             };
 
-            if start { Some(info) } else { None }
+            // v2.3.0 (M3): jumlah unduhan hidup (menempati bandwidth atau akan
+            // menempati slot) TERMASUK diri sendiri — dipakai membagi limit total.
+            let live = if start {
+                let mut n = 0usize;
+                for other in downloads.values() {
+                    if matches!(
+                        other.lock().await.status,
+                        DownloadStatus::Queued
+                            | DownloadStatus::Resolving
+                            | DownloadStatus::Downloading
+                    ) {
+                        n += 1;
+                    }
+                }
+                n.max(1)
+            } else {
+                1 // tidak dipakai (tidak spawn)
+            };
+
+            if start { Some((info, live)) } else { None }
         };
 
-        if let Some(info) = claimed {
-            spawn_supervised(self.downloads.clone(), info, tx, config, self.dirty.clone());
+        if let Some((info, live)) = claimed {
+            spawn_supervised(self.downloads.clone(), info, tx, config, self.dirty.clone(), live);
         }
     }
 
@@ -340,7 +419,22 @@ fn spawn_supervised(
     tx: mpsc::UnboundedSender<DownloadEvent>,
     config: Config,
     dirty: Arc<AtomicBool>,
+        live_share: usize,
 ) {
+    // v2.3.0 (M3): bagi limit total aplikasi menurut jumlah unduhan hidup saat
+    // proses ini start, bukan max_concurrent statis — unduhan tunggal kini
+    // memakai limit penuh. Batas lama pada proses yang sudah berjalan tidak
+    // di-recalculate (butuh aria2 RPC — lihat roadmap CODE-REVIEW.md B2);
+    // pembagian ulang terjadi saat proses berikutnya start/promote.
+    //
+    // PENTING: `promote_config` harus tetap config ASLI (limit user mentah) —
+    // kalau pakai yang sudah dibagi, rantai promote akan membagi ulang limit
+    // setiap spawn berikutnya (double division → limit menyusut ke 1K).
+    let promote_config = config.clone();
+    let mut config = config;
+    if !config.max_overall_speed.is_empty() && config.max_overall_speed != "0" {
+        config.max_overall_speed = aria2::resolve_speed_limit(&config.max_overall_speed, live_share);
+    }
     tokio::spawn(async move {
         let (is_yt, url) = {
             let i = info.lock().await;
@@ -378,7 +472,9 @@ fn spawn_supervised(
         dirty.store(true, Ordering::SeqCst);
 
         // Slot bebas → jalankan antrian tertua
-        promote_next(downloads, tx, config, dirty).await;
+        // Slot bebas → jalankan antrian tertua.
+        // Pakai promote_config (limit mentah) — lihat komentar M3 (anti double-division).
+        promote_next(downloads, tx, promote_config, dirty).await;
     });
 }
 
@@ -389,12 +485,17 @@ pub fn is_direct_file_url(url: &str) -> bool {
     // (mis. "https://x.com/file.mp4#t=10") membuat cek ekstensi lama gagal.
     let path = url.split('#').next().unwrap_or(url).split('?').next().unwrap_or(url);
     let lower = path.to_ascii_lowercase();
+    // v2.3.0 (M2): SELARASKAN dengan daftar intersep extension/background.js —
+    // dulu .exe/.msi/.dmg/.bz2/.docx dll tidak ada di sini sehingga URL-nya
+    // dicoba lewat yt-dlp dulu (gagal, ±1-3 dtk terbuang) baru fallback aria2.
     const EXTENSIONS: &[&str] = &[
         ".mp4", ".webm", ".mkv", ".avi", ".mov", ".m4v", ".flv", ".wmv", ".3gp", ".ts",
         ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav",
-        ".zip", ".tar", ".gz", ".7z", ".rar", ".xz",
-        ".pdf", ".iso", ".img", ".apk", ".deb", ".rpm",
-        ".jpg", ".jpeg", ".png", ".gif", ".webp",
+        ".zip", ".tar", ".gz", ".bz2", ".tbz2", ".xz", ".txz", ".7z", ".rar",
+        ".pdf", ".iso", ".img", ".bin", ".apk", ".deb", ".rpm", ".exe", ".msi", ".dmg",
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico",
+        ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".epub", ".mobi",
+        ".txt", ".csv", ".json", ".xml",
     ];
     EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
 }
@@ -418,15 +519,21 @@ async fn promote_next(
         // (kunci info lalu minta map) di kode mana pun.
         let map = downloads.write().await;
         let mut active = 0usize;
-        let mut oldest: Option<(i64, Arc<Mutex<DownloadInfo>>)> = None;
+        // v2.3.0 (L4): FIFO deterministik — kunci (created_ms, id); tanpa
+        // pembanding kedua, dua download yang dibuat pada waktu sama urutannya
+        // acak mengikuti iterasi HashMap.
+        let mut oldest: Option<((i64, String), Arc<Mutex<DownloadInfo>>)> = None;
 
+        let mut queued = 0usize;
         for info in map.values() {
             let i = info.lock().await;
             match i.status {
                 DownloadStatus::Downloading | DownloadStatus::Resolving => active += 1,
                 DownloadStatus::Queued => {
-                    if oldest.as_ref().map_or(true, |(t, _)| i.created < *t) {
-                        oldest = Some((i.created, info.clone()));
+                    queued += 1;
+                    let key = (i.created, i.id.clone());
+                    if oldest.as_ref().map_or(true, |(k, _)| key < *k) {
+                        oldest = Some((key, info.clone()));
                     }
                 }
                 _ => {}
@@ -436,6 +543,9 @@ async fn promote_next(
         if active >= max {
             None
         } else if let Some((_, info)) = oldest {
+            // hidup = yang sedang jalan + yang di antrian (termasuk yang akan
+            // klaim ini) — dipakai membagi limit kecepatan (M3)
+            let live = (active + queued).max(1);
             // Scope guard: MutexGuard harus drop SEBELUM `info` dipindah keluar
             let started = {
                 let mut i = info.lock().await;
@@ -448,7 +558,7 @@ async fn promote_next(
                 }
             };
             if started {
-                Some(info)
+                Some((info, live))
             } else {
                 None
             }
@@ -457,20 +567,50 @@ async fn promote_next(
         }
     };
 
-    if let Some(info) = next {
-        spawn_supervised(downloads, info, tx, config, dirty);
+    if let Some((info, live)) = next {
+        spawn_supervised(downloads, info, tx, config, dirty, live);
     }
 }
 
 /// Kirim SIGTERM ke child download (aria2c/yt-dlp) supaya berhenti segera.
 /// SIGTERM dipilih (bukan SIGKILL) agar aria2/yt-dlp sempat menulis control file
 /// sehingga download bisa di-resume.
-fn kill_child_pid(pid: Option<u32>) {
-    if let Some(pid) = pid {
-        let _ = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(pid as i32),
-            nix::sys::signal::Signal::SIGTERM,
-        );
+///
+/// v2.3.0 (K4): sinyal dikirim ke PROCESS GROUP dulu — yt-dlp men-spawn
+/// ffmpeg untuk merge; kill ke parent saja meninggalkan ffmpeg yatim yang terus
+/// menulis file. Child di-spawn dengan `process_group(0)` sehingga pgid == pid.
+/// killpg gagal (mis. child bukan leader group) → fallback kill satu proses.
+pub(crate) fn kill_child_pid(pid: Option<u32>) {
+    let Some(pid) = pid else { return };
+    let pid = nix::unistd::Pid::from_raw(pid as i32);
+    if nix::sys::signal::killpg(pid, nix::sys::signal::Signal::SIGTERM).is_err() {
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+    }
+}
+
+/// SIGKILL ke seluruh process group (jalur Cancel — tidak perlu control file).
+pub(crate) fn kill_child_group_hard(pid: u32) {
+    let pid = nix::unistd::Pid::from_raw(pid as i32);
+    if nix::sys::signal::killpg(pid, nix::sys::signal::Signal::SIGKILL).is_err() {
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+    }
+}
+
+/// v2.3.0 (K3): file input aria2 (`aria2-<id>.txt`) berisi URL penuh — mungkin
+/// bertoken login. Dibersihkan 0600 saat selesai; ini sapuan sisa sesi crash.
+fn cleanup_orphan_aria2_inputs() {
+    let dir = Config::aria2_input_dir();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let ours = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map_or(false, |n| n.starts_with("aria2-") && n.ends_with(".txt"));
+            if ours {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 }
 
@@ -481,9 +621,50 @@ fn session_file() -> std::path::PathBuf {
     Config::config_dir().join("session.json")
 }
 
+/// v2.3.0 (M5): format berversi `{ "version": 1, "downloads": [...] }`.
+/// Array telanjang (format ≤2.2.x) tetap dibaca agar sesi user lama tidak
+/// hilang saat upgrade.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SessionFile {
+    version: u32,
+    downloads: Vec<DownloadInfo>,
+}
+
+/// Some(vec) = terbaca (format baru ATAU lama); None = benar-benar korup.
+fn parse_session(content: &str) -> Option<Vec<DownloadInfo>> {
+    if content.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    if let Ok(sf) = serde_json::from_str::<SessionFile>(content) {
+        return Some(sf.downloads);
+    }
+    if let Ok(v) = serde_json::from_str::<Vec<DownloadInfo>>(content) {
+        return Some(v); // legacy bare array
+    }
+    None
+}
+
 fn load_session() -> Vec<DownloadInfo> {
-    match std::fs::read_to_string(session_file()) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+    let path = session_file();
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match parse_session(&content) {
+            Some(v) => v,
+            None => {
+                // M5: jangan buang riwayat diam-diam — singkirkan file rusak
+                // supaya (a) user bisa recovery manual, (b) flush berikutnya
+                // tidak terus-menerus membaca ulang sampah.
+                let backup = format!(
+                    "{}.corrupt-{}",
+                    path.display(),
+                    chrono::Utc::now().timestamp()
+                );
+                tracing::warn!(
+                    "session.json tidak bisa dibaca — dipindah ke {backup} untuk recovery manual"
+                );
+                let _ = std::fs::rename(&path, &backup);
+                Vec::new()
+            }
+        },
         Err(_) => Vec::new(),
     }
 }
@@ -506,12 +687,17 @@ async fn flush_session(
         v
     };
 
-    all.sort_by_key(|d| d.created);
+    // urut (created_ms, id) — konsisten dengan promote_next (L4)
+    all.sort_by_key(|d| (d.created, d.id.clone()));
     if all.len() > 200 {
         all = all.split_off(all.len() - 200);
     }
 
-    if let Ok(json) = serde_json::to_string(&all) {
+    let wrapped = SessionFile {
+        version: 1,
+        downloads: all,
+    };
+    if let Ok(json) = serde_json::to_string(&wrapped) {
         let path = session_file();
         let tmp = path.with_extension("json.tmp");
         if std::fs::write(&tmp, json).is_ok() {
@@ -593,6 +779,14 @@ mod tests {
             "https://x.com/file.tar.gz", // multi-ext (.gz terdaftar)
             "https://x.com/p.pdf",
             "https://x.com/img.JPG",
+            // M2: harus selaras dengan daftar intersep extension
+            "https://x.com/setup.exe",
+            "https://x.com/App.msi",
+            "https://x.com/mac.dmg",
+            "https://x.com/src.bz2",
+            "https://x.com/laporan.docx",
+            "https://x.com/data.xlsx",
+            "https://x.com/buku.epub",
         ];
         for url in direct_valid {
             assert!(is_direct_file_url(url), "{} harus dianggap direct file", url);
@@ -774,5 +968,39 @@ mod tests {
         // Yang penting: TIDAK boleh mengandung ".." atau "/"
         assert!(!s.contains('/'), "filename tidak boleh ada '/': {:?}", s);
         assert!(!s.contains(".."), "filename tidak boleh ada '..': {:?}", s);
+    }
+
+
+    // ── parse_session (M5: format berversi + kompatibel legacy) ──
+
+    const LEGACY_ITEM: &str = r#"{
+        "id": "dl_1", "url": "https://x.com/a.zip", "filename": "a.zip",
+        "save_dir": "/tmp", "status": "paused", "total_size": 10, "downloaded": 5,
+        "speed": 0, "eta": 0, "progress": 50.0, "error_msg": "", "connections": 0,
+        "retry_count": 0, "is_youtube": false
+    }"#;
+
+    #[test]
+    fn parse_session_accepts_wrapped_versioned() {
+        let json = format!(r#"{{"version":1,"downloads":[{}]}}"#, LEGACY_ITEM);
+        let got = parse_session(&json).expect("format v1 harus terbaca");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "dl_1");
+    }
+
+    #[test]
+    fn parse_session_accepts_legacy_bare_array() {
+        // session.json keluaran ≤2.2.x = array telanjang — WAJIB tetap dibaca
+        let json = format!("[{}]", LEGACY_ITEM);
+        let got = parse_session(&json).expect("legacy array harus terbaca");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].filename, "a.zip");
+    }
+
+    #[test]
+    fn parse_session_empty_and_garbage() {
+        assert_eq!(parse_session("").map(|v| v.len()), Some(0));
+        assert_eq!(parse_session("   ").map(|v| v.len()), Some(0));
+        assert!(parse_session("{bukan json").is_none(), "korup → None (caller bikin backup)");
     }
 }

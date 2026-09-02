@@ -1,53 +1,86 @@
-# AGENTS.md - Rust + Aria2 Download Manager AI Operating Guidelines
+# AGENTS.md — Panduan AI/Contributor Fast-DM
 
-Version: 0.1.0
+Version: 0.2.0 (disinkronkan dengan arsitektur kode nyata — sebelumnya dokumen
+ini menggambarkan desain lama "aria2 JSON-RPC + src/hls" yang **tidak** dipakai)
 
 ## 1. Role & Objective
 
-- **Role:** High-Performance Systems & Network Engineer (Rust Specialist).
-- **Objective:** Mengembangkan, mengoptimasi, dan merawat Download Manager berbasis Rust dan Aria2 (JSON-RPC) dengan kapabilitas download file umum dan media streaming HLS (m3u8).
+- **Role:** Systems Engineer (Rust specialist) untuk Fast-DM.
+- **Objective:** Merawat download manager Linux: GUI GTK4 + integrasi browser,
+  dengan kecepatan didelegasikan ke **aria2c** dan **yt-dlp** sebagai subprocess CLI.
 
-## 2. Tech Stack & Architectural Boundaries
+## 2. Arsitektur Nyata (baca ini sebelum menyentuh kode)
 
-- **Core Language:** Rust (2021 edition).
-- **Async Runtime:** `tokio`.
-- **Downloader Backend:** Aria2 (melalui protokol JSON-RPC over WebSocket/HTTP).
-- **Streaming Parser:** Parser m3u8 (misal: `m3u8-rs` atau parsing kustom terisolasi).
-- **Media Processing:** FFmpeg integration (subprocess/bindings) hanya jika diperlukan transmuxing/concatenation segment `.ts` / `.m4s`.
-- **Arsitektur Modular (KISS):**
-  - `src/aria2/`: RPC Client, task dispatcher, session manager.
-  - `src/hls/`: Manifest downloader, parser, segment batch generator.
-  - `src/core/`: Task orchestrator, queue manager, state machine.
-  - `src/main.rs`: CLI / Entrypoint interface.
+```
+Browser (extension MV3: background/sniffer/content)
+   │ chrome.runtime.sendNativeMessage (stdio, length-prefixed JSON)
+   ▼
+fast-dm --native  ──1 baris JSON──►  Unix socket (Config::ipc_socket_path(),
+   │  (spawn GUI bila mati)          peer-cred uid, 0600)  ►  DownloadEngine (tokio)
+                                        │ spawn_supervised: pilih backend per URL
+                                        ▼
+                          aria2c (subprocess, stdout di-parse regex)
+                          yt-dlp (subprocess universal resolver, fallback: aria2c)
+```
 
-## 3. Strict Development Rules & Constraints
+- **Bukan** JSON-RPC: setiap unduhan = proses `aria2c`/`yt-dlp` sendiri; kontrol
+  dilakukan via sinyal (SIGTERM ke process group → resume-friendly) + parsing
+  stdout (`--console-log-level`, throttle UI 5 fps).
+- `src/downloader/` = `aria2.rs` (spawn+parse aria2c), `youtube.rs`
+  (argumen yt-dlp + runner), `universal.rs` (resolver non-YouTube + fallback),
+  `mod.rs` (engine, antrian, sesi), `types.rs` (model).
+- `src/ipc/mod.rs` = server socket (download/ping/pause/resume/cancel/list/register).
+- `src/native_host/` = jembatan stdio ⇄ socket + setup manifest NMH multi-browser.
+- `src/gui/` = GTK4 window/dialog; state GUI disinkronkan via `mpsc::Unbounded<DownloadEvent>`.
+- `extension/` = MV3: `background.js` (intercept + native msg), `sniffer.js`
+  (MAIN world, hook fetch/XHR), `content.js` (overlay ⚡), `popup.*`.
+- Persistensi di `~/.config/fast-dm/`: `config.json`, `session.json` (cap 200,
+  flush ≤2 dtk atomik), `cookies_<host>.txt` (0600), `extension_ids.json`.
+  IPC + file kerja di `XDG_RUNTIME_DIR/fast-dm` (fallback `~/.config/fast-dm/run`).
 
-- **NO Direct Git Operations:** DILARANG push/commit langsung ke GitHub.
-- **Minimal Diff:** Modifikasi hanya baris kode yang relevan dengan tugas. Jangan melakukan refactoring menyeluruh tanpa instruksi.
-- **KISS Principle:** Prioritaskan solusi paling sederhana. Gunakan built-in libraries atau minimal crates sebelum menambah dependensi baru.
-- **Zero Hallucination:** Jika detail spesifikasi (misal: format auth aria2, encryption AES-128 pada m3u8, atau custom headers) tidak didefinisikan, tanyakan secara spesifik.
-- **No Conversational Filler:** Langsung sajikan kode dan penjelasan teknis to the point tanpa basa-basi intro/outro.
+## 3. Aturan Pengembangan (ketat)
 
-## 4. Specific Engine Directives (HLS & Aria2)
+- **Minimal diff** — ubah hanya yang relevan; jangan reformat/refactor massal.
+- **KISS** — hindari crate baru; yang sudah ada: tokio, gtk4, serde, reqwest,
+  url, regex, dirs, clap, tracing, nix, chrono, uuid, glob, urlencoding.
+- **Error idiomatik** — `Result<T, E>` (String-based ok di boundary internal);
+  JANGAN `.expect()/panic` di jalur runtime user; error init dipropagasi ke main().
+- **Kontrak lock-ordering** — selalu `downloads` RwLock dulu, baru `Mutex` item;
+  jangan pernah terbalik (anti-deadlock, lihat `promote_next` B13).
+- Semua child process di-spawn `process_group(0)`; kill hanya via
+  `kill_child_pid` / `kill_child_group_hard` (SIGTERM = resume-friendly).
+- Input eksternal (URL, header, nama file, cookie) WAJIB disanitasi — pola
+  sudah ada di `sanitize_filename`, strip `\r\n` header, cap ukuran pesan 1 MB.
+- Jangan menulis file sensitif (cookie, URL bertoken) ke path publik `/tmp`.
 
-- **Aria2 Handling:**
-  - Komunikasi RPC wajib menangani error timeout, authentication token (`secret`), dan validasi GID.
-  - Download file standar harus didelegasikan penuh ke Aria2.
-- **HLS (m3u8) Handling:**
-  - Parse Playlist (Master / Media Playlist) untuk mengekstrak URI segment.
-  - Generate download queue untuk chunk segments dan distribusikan ke Aria2 atau internal worker pool.
-  - Handle validasi decryption keys (`EXT-X-KEY`) secara aman sebelum concatenation.
-  - Hindari memory exhaustion: Jangan buffer video chunks berukuran gigabyte di dalam RAM; gunakan stream/disk write langsung.
+## 4. Tes & Verifikasi
 
-## 5. Semantic Versioning Protocol
+- Unit test fungsi murni di tiap modul (`#[cfg(test)]`); integration test di
+  `tests/` wajib **serial** terhadap env var global (pola `ENV_LOCK` + EnvGuard
+  di `tests/find_cookies.rs`) dan tidak boleh menyentuh `~/.config` user nyata
+  (override `XDG_CONFIG_HOME` ke tempdir).
+- Dev-dependencies kosong dengan sengaja (stdlib-only) — jangan tambah crate
+  test berat tanpa alasan kuat.
+- `cargo fmt --all -- --check` adalah gerbang CI (blocking) — jalankan sebelum commit.
+- `cargo clippy` advisory — ikuti bila mudah.
+- Perubahan regex parser output CLI wajib menambah regression test
+  (contoh: dual-format aria2 human/raw).
 
-Setiap perbaikan atau penambahan kode wajib mencantumkan versi terbaru di header file atau respons:
+## 5. Versi & Rilis
 
-- **Bug Fix / Patch:** `+0.0.1` (Contoh: `0.1.0` -> `0.1.1`)
-- **New Feature / Module:** `+0.1.0` (Contoh: `0.1.0` -> `0.2.0`)
-- **Breaking Changes / Protocol Overhaul:** `+1.0.0`
+- **Bug fix:** `+0.0.1` · **Fitur:** `+0.1.0` · **Breaking:** `+1.0.0`.
+- Satu sumber versi: `Cargo.toml` — `extension/manifest.json` WAJIB disamakan
+  manual saat rilis; GUI membaca versi via `env!("CARGO_PKG_VERSION")`.
+- `EXT_ID` = extension ID stabil (dipin lewat `key` manifest) — dipakai
+  `allowed_origins`; JANGAN diganti sembarangan.
+- Rilis `.deb` HANYA via `packaging/build-deb.sh` (versi dibaca dari Cargo.toml).
+  Tiada lagi `build.sh` (dihapus: postinst-nya memasang wildcard origin = lubang keamanan).
+- `src/native_host/setup.rs` satu-satunya yang menulis manifest NMH saat runtime
+  (register extension ID unpacked) — perluas daftar browser di satu tempat saja.
 
-## 6. Output Delivery Standard
+## 6. Keluaran Standar
 
-- Sajikan kode lengkap (tidak terpotong / `// TODO: implement later` pada fungsi inti).
-- Sertakan error handling idiomatik Rust (`Result<T, E>`, `thiserror`, `anyhow`).
+- Sajikan kode lengkap, tidak terpotong; sertakan test untuk perilaku baru.
+- Untuk perubahan user-facing, perbarui `README.md` + `CHANGELOG.md` di commit yang sama.
+- Jangan menyimpan dependensi/artefak besar di repo; log sensitif (token URL)
+  tidak boleh masuk tracing::info.

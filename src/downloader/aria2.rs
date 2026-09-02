@@ -2,6 +2,7 @@ use super::types::*;
 use crate::config::Config;
 use regex::Regex;
 use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
@@ -111,14 +112,22 @@ pub async fn download(
 
 fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option<String>) {
     // Write URL to input file (handles long URLs)
-    let tmp_dir = std::env::temp_dir().join("fast-dm");
-    let _ = std::fs::create_dir_all(&tmp_dir);
-    let input_path = tmp_dir.join(format!("{}.txt", info.id));
+    // v2.3.0 (K3): direktori privat (XDG_RUNTIME_DIR/config dir, 0700) +
+    // file 0600 — URL bisa mengandung token; jangan lagi di /tmp publik.
+    let input_dir = Config::aria2_input_dir();
+    let input_path = input_dir.join(format!("aria2-{}.txt", info.id));
 
     // Hanya URL di input-file (untuk menangani URL panjang). Semua opsi lain
     // dikirim sebagai argumen CLI: nilai dengan spasi (path folder, nama file,
     // header) tidak salah di-parse oleh format input-file aria2.
     let _ = std::fs::write(&input_path, format!("{}\n", info.url));
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            &input_path,
+            std::fs::Permissions::from_mode(0o600),
+        );
+    }
 
     let mut cmd = vec![
         "aria2c".into(),
@@ -143,13 +152,12 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         "--human-readable=false".into(),
         "--show-console-readout=true".into(),
         "--download-result=full".into(),
-        // Limit user adalah TOTAL aplikasi, tapi tiap download = proses
-        // aria2c sendiri → bagi dengan jumlah download bersamaan agar
-        // N unduhan paralel tidak N kali lebih cepat dari limit user.
-        format!(
-            "--max-overall-download-limit={}",
-            per_process_speed_limit(config)
-        ),
+                // Limit user adalah TOTAL aplikasi, tapi tiap download = proses aria2c
+        // sendiri. Engine sudah membaginya menurut jumlah unduhan hidup SAAT
+        // proses ini start (v2.3.0 M3, lihat DownloadEngine::spawn_supervised)
+        // — di sini tinggal pakai. "0" = tanpa batas.
+        format!("--max-overall-download-limit={}", config.max_overall_speed),
+
         // check-integrity sengaja TIDAK dimatikan (default aria2 = true):
         // tanpa ini, resume setelah crash bisa menandai file korup sebagai
         // selesai.
@@ -198,8 +206,11 @@ fn run_aria2c(
     tx: mpsc::UnboundedSender<DownloadEvent>,
 ) {
 
+    // process_group(0): child jadi leader group → SIGTERM/SIGKILL via killpg
+    // menjangkau seluruh keturunannya (K4).
     let child = Command::new(&cmd[0])
         .args(&cmd[1..])
+        .process_group(0)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
@@ -270,8 +281,10 @@ fn run_aria2c(
         if matches!(status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
             // B8: Paused → SIGTERM sudah dikirim pause_download(); TUNGGU aria2c
             // menulis control file .aria2 (supaya bisa di-resume), jangan SIGKILL.
-            // Cancelled → paksa kill.
+            // Cancelled → paksa kill, via group (K4) lalu child.kill() sebagai
+            // fallback bila group sudah tidak ada.
             if status == DownloadStatus::Cancelled {
+                super::kill_child_group_hard(child.id());
                 let _ = child.kill();
             }
             // Reap the child so it does not linger as a zombie process
@@ -313,6 +326,7 @@ fn run_aria2c(
                     i.eta = eta;
                     // Bersihkan error lama saat download berjalan lagi (mis. setelah Retry)
                     i.error_msg.clear();
+                                        i.status_detail.clear();
                     let _ = tx.send(DownloadEvent::Progress(i.clone()));
                 });
                 last_update = Instant::now();
@@ -340,6 +354,7 @@ fn run_aria2c(
             i.status = DownloadStatus::Completed;
             i.progress = 100.0;
             i.speed = 0;
+            i.status_detail.clear();
             let _ = tx.send(DownloadEvent::Completed(i.clone()));
         } else {
             let err_detail = stderr_buf.lock().unwrap().clone();
@@ -350,6 +365,7 @@ fn run_aria2c(
             };
             i.status = DownloadStatus::Error;
             i.error_msg = format!("aria2c exit code: {}{}", exit_code, detail);
+            i.status_detail.clear();
             i.speed = 0;
             let _ = tx.send(DownloadEvent::Error(i.clone()));
         }
@@ -368,12 +384,16 @@ fn has_space(dir: &str, needed: u64) -> bool {
 }
 
 /// Limit total user → limit per-proses aria2c ("0" = tanpa batas).
-fn per_process_speed_limit(config: &Config) -> String {
-    let total = parse_speed_setting(&config.max_overall_speed);
-    if total == 0 {
-        return "0".into(); // "0" maupun "0K" = tanpa batas
+/// Limit total user → batas per-proses aria2c. v2.3.0 (M3): pembaginya
+/// adalah jumlah unduhan HIDUP (aktif+antri) saat proses ini start — dihitung
+/// engine — bukan `max_concurrent` statis, sehingga unduhan tunggal kini
+/// memakai limit penuh. "0" (maupun "0K") = tanpa batas → "0".
+pub(crate) fn resolve_speed_limit(total: &str, live_share: usize) -> String {
+    let total_bytes = parse_speed_setting(total);
+    if total_bytes == 0 {
+        return "0".into();
     }
-    let per = total / (usize::from(config.max_concurrent.max(1)) as u64).max(1);
+    let per = total_bytes / (live_share.max(1) as u64);
     if per < 1024 {
         return "1K".into();
     }
@@ -831,38 +851,40 @@ mod tests {
 
     // ── per_process_speed_limit ──
 
-    fn cfg(speed: &str, concurrent: u8) -> Config {
-        Config {
-            download_dir: "/tmp".into(),
-            max_connections: 8,
-            max_concurrent: concurrent,
-            max_overall_speed: speed.into(),
-            retry_count: 3,
-            retry_wait: 2,
-            timeout: 30,
-            disk_cache_size: "16M".into(),
-            file_allocation: "none".into(),
-            auto_file_renaming: true,
-            verify_tls: true,
-        }
+    // ── resolve_speed_limit (M3) ──
+
+    #[test]
+    fn resolve_speed_limit_unlimited() {
+        // "0" = tanpa batas → return "0" berapapun pembaginya
+        assert_eq!(resolve_speed_limit("0", 3), "0");
+        assert_eq!(resolve_speed_limit("0K", 1), "0");
+        assert_eq!(resolve_speed_limit("", 2), "0"); // kosong = tanpa batas
     }
 
     #[test]
-    fn per_process_speed_limit_unlimited() {
-        // "0" = tanpa batas → return "0"
-        assert_eq!(per_process_speed_limit(&cfg("0", 3)), "0");
+    fn resolve_speed_limit_single_download_gets_full_budget() {
+        // M3: dulu ini "341K" (selalu /max_concurrent=3); kini penuh
+        assert_eq!(resolve_speed_limit("1M", 1), "1024K");
     }
 
     #[test]
-    fn per_process_speed_limit_divided_by_concurrent() {
-        // 1M / 2 concurrent = 512K per process
-        assert_eq!(per_process_speed_limit(&cfg("1M", 2)), "512K");
+    fn resolve_speed_limit_divided_by_live() {
+        // 1M / 2 unduhan hidup = 512K per proses
+        assert_eq!(resolve_speed_limit("1M", 2), "512K");
+        assert_eq!(resolve_speed_limit("2M", 4), "512K");
     }
 
     #[test]
-    fn per_process_speed_limit_floor_at_1k() {
-        // Limit kecil / banyak concurrent → minimum 1K
-        assert_eq!(per_process_speed_limit(&cfg("1K", 10)), "1K");
+    fn resolve_speed_limit_floor_at_1k() {
+        // Limit kecil / banyak unduhan → minimum 1K
+        assert_eq!(resolve_speed_limit("1K", 10), "1K");
+        assert_eq!(resolve_speed_limit("512", 1), "1K"); // 512 B/s → floor
+    }
+
+    #[test]
+    fn resolve_speed_limit_zero_share_treated_as_one() {
+        // live_share=0 tidak mungkin (engine selalu ≥1) tapi jangan divide-by-zero
+        assert_eq!(resolve_speed_limit("1M", 0), "1024K");
     }
 
     // ── is_generic_filename ──

@@ -99,10 +99,10 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
             }
         }
 
-        _ => {
-            // Forward to GUI via Unix socket
-            let uid = nix::unistd::getuid();
-            let socket_path = format!("/tmp/fast-dm-{}.sock", uid);
+        _ => {            // Forward to GUI via Unix socket — path privat yang sama dengan
+            // yang di-bind GUI (v2.3.0 K1: tidak lagi /tmp publik).
+            let socket_path = crate::config::Config::ipc_socket_path();
+
 
             match forward_to_gui(&socket_path, &msg) {
                 Ok(resp) => resp,
@@ -180,7 +180,7 @@ fn resolve_gui_path() -> String {
     "/opt/fast-dm/fast-dm".to_string()
 }
 
-fn forward_to_gui(socket_path: &str, msg: &NativeMessage) -> Result<NativeResponse, String> {
+fn forward_to_gui(socket_path: &std::path::Path, msg: &NativeMessage) -> Result<NativeResponse, String> {
     use std::io::BufRead;
     use std::os::unix::net::UnixStream;
 

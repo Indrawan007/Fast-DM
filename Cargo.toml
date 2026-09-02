@@ -1,6 +1,6 @@
 [package]
 name = "fast-dm"
-version = "2.2.5"
+version = "2.3.0"
 edition = "2021"
 authors = ["FastDM Contributors"]
 description = "High-speed download manager with browser integration"
@@ -47,8 +47,14 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Process management
-nix = { version = "0.29", features = ["signal", "process", "user", "fs"] }
+# Process management ("socket" untuk SO_PEERCRED di IPC — K1)
+nix = { version = "0.29", features = [
+    "signal",
+    "process",
+    "user",
+    "fs",
+    "socket",
+] }
 
 # Misc
 chrono = "0.4"
