@@ -56,7 +56,7 @@ fn browser_profile_exists(nmh_dir: &Path) -> bool {
 fn write_manifests(json_str: &str) -> usize {
     let mut written = 0;
     for dir in get_all_nmh_dirs() {
-        if !browser_profile_exists(dir) {
+        if !browser_profile_exists(&dir) {
             continue;
         }
         let manifest = dir.join(format!("{}.json", HOST_NAME));

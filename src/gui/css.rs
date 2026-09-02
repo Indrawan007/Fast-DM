@@ -125,7 +125,6 @@ pub const THEME_CSS: &str = r#"
     font-weight: 500;
 }
 
-
 /* Badges */
 .fast-dm-window .badge {
     font-size: 9px;

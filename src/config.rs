@@ -149,7 +149,6 @@ impl Config {
         removed
     }
 
-
     pub fn config_file() -> PathBuf {
         Self::config_dir().join("config.json")
     }
@@ -317,7 +316,7 @@ mod tests {
         assert!(c.max_concurrent > 0 && c.max_concurrent <= 10);
         assert!(c.timeout > 0);
         assert!(c.verify_tls); // default aman
-assert!(c.auto_resume); // K5: default lanjutkan restore otomatis
+        assert!(c.auto_resume); // K5: default lanjutkan restore otomatis
     }
 
     // ── v2.3.0: path privat (K1/K3) ──

@@ -187,7 +187,7 @@ impl DownloadEngine {
         );
         info.is_youtube = is_yt;
 
-       // v2.3.0 (M11): tolak cepat skema non-download (blob:, data:, javascript:,
+        // v2.3.0 (M11): tolak cepat skema non-download (blob:, data:, javascript:,
         // file:, magnet: dst.) — dulu lolos dan baru gagal lambat di CLI dengan
         // error yang tidak jelas. (magnet bisa didukung via aria2 RPC — roadmap.)
         let scheme_ok = Url::parse(url)
@@ -228,7 +228,6 @@ impl DownloadEngine {
         // (pola promote_next) — dua start yang bersamaan tidak bisa sama-sama
         // lolos batas max_concurrent (double-spawn / over-slot).
         let claimed: Option<(Arc<Mutex<DownloadInfo>>, usize)> = {
-
             let downloads = self.downloads.write().await;
             let Some(info) = downloads.get(id).cloned() else { return };
 
@@ -419,7 +418,7 @@ fn spawn_supervised(
     tx: mpsc::UnboundedSender<DownloadEvent>,
     config: Config,
     dirty: Arc<AtomicBool>,
-        live_share: usize,
+    live_share: usize,
 ) {
     // v2.3.0 (M3): bagi limit total aplikasi menurut jumlah unduhan hidup saat
     // proses ini start, bukan max_concurrent statis — unduhan tunggal kini
@@ -471,7 +470,6 @@ fn spawn_supervised(
         // Status terminal (completed/error) → persist ke session.json
         dirty.store(true, Ordering::SeqCst);
 
-        // Slot bebas → jalankan antrian tertua
         // Slot bebas → jalankan antrian tertua.
         // Pakai promote_config (limit mentah) — lihat komentar M3 (anti double-division).
         promote_next(downloads, tx, promote_config, dirty).await;
@@ -969,7 +967,6 @@ mod tests {
         assert!(!s.contains('/'), "filename tidak boleh ada '/': {:?}", s);
         assert!(!s.contains(".."), "filename tidak boleh ada '..': {:?}", s);
     }
-
 
     // ── parse_session (M5: format berversi + kompatibel legacy) ──
 

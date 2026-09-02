@@ -99,10 +99,10 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
             }
         }
 
-        _ => {            // Forward to GUI via Unix socket — path privat yang sama dengan
+        _ => {
+            // Forward to GUI via Unix socket — path privat yang sama dengan
             // yang di-bind GUI (v2.3.0 K1: tidak lagi /tmp publik).
             let socket_path = crate::config::Config::ipc_socket_path();
-
 
             match forward_to_gui(&socket_path, &msg) {
                 Ok(resp) => resp,

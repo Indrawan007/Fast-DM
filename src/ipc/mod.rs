@@ -37,7 +37,7 @@ struct IpcResponse {
 /// Path lama yang ditinggalkan versi ≤2.2.5 dibersihkan saat start, bila
 /// memang socket milik user kita sendiri (jangan sentuh symlink/sock orang lain).
 fn cleanup_legacy_socket() {
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let old = PathBuf::from(format!(
         "/tmp/fast-dm-{}.sock",
         nix::unistd::getuid().as_raw()
@@ -52,12 +52,13 @@ fn cleanup_legacy_socket() {
 /// Defense-in-depth: terima koneksi HANYA dari proses dengan UID yang sama.
 /// Permission socket 0600 sudah membatasi, tapi bila parent dir pernah salah
 /// mode (mis. hasil versi lama / home di-share), peer-cred tetap menutup celah.
-fn peer_uid_ok(stream: &std::os::unix::net::UnixStream) -> bool {
+fn peer_uid_ok(stream: &tokio::net::UnixStream) -> bool {
     match nix::sys::socket::getsockopt(
         stream,
         nix::sys::socket::sockopt::PeerCredentials,
     ) {
-        Ok(cred) => cred.uid() == nix::unistd::getuid(),
+        // Ucred::uid() mengembalikan uid_t (u32), bukan Uid — bandingkan raw.
+        Ok(cred) => cred.uid() == nix::unistd::getuid().as_raw(),
         Err(_) => false,
     }
 }
@@ -96,6 +97,7 @@ pub async fn start_server(engine: Arc<DownloadEngine>) -> Result<(), Box<dyn std
             drop(stream); // close
             continue;
         }
+
         let engine = engine.clone();
 
         tokio::spawn(async move {
@@ -265,7 +267,6 @@ fn write_cookies_txt(cookie_header: &str, domain: &str) -> Result<(), String> {
     // kredensial basi menumpuk di disk. Cookie session browser memang pendek
     // umurnya, 24 jam lebih dari cukup untuk menyelesaikan unduhan.
     let expires = chrono::Utc::now().timestamp() + 24 * 3600;
-
     let mut out = String::from("# Netscape HTTP Cookie File\n");
     let mut count = 0;
 

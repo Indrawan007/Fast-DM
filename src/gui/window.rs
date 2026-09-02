@@ -645,7 +645,7 @@ pub fn build_window(
         });
     }
 
-        // v2.3.0 (K5): lanjutkan otomatis unduhan yang terputus saat app ditutup
+    // v2.3.0 (K5): lanjutkan otomatis unduhan yang terputus saat app ditutup
     // — klaim README kini ditepati. Antrian/slot tetap diatur engine
     // (max_concurrent tidak jebol); bisa dimatikan di Pengaturan.
     {
@@ -654,6 +654,7 @@ pub fn build_window(
             eng_resume.resume_restored().await;
         });
     }
+
     // ── A1: tutup jendela TIDAK diam-diam mematikan download ──
     // Jika masih ada unduhan aktif/antri, minta konfirmasi dulu.
     let engine_close = engine.clone();
@@ -671,7 +672,6 @@ pub fn build_window(
                 // v2.3.0 (K4): lewat kill_child_pid → SIGTERM ke process group,
                 // anak ffmpeg milik yt-dlp ikut berhenti, bukan cuma parent-nya.
                 crate::downloader::kill_child_pid(d.pid);
-
             }
             return glib::Propagation::Proceed;
         }
@@ -823,13 +823,12 @@ fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
     verify_tls_chk.set_active(cur.verify_tls);
     content.append(&verify_tls_chk);
 
-        // v2.3.0 (K5): toggle auto-resume hasil restore sesi
+    // v2.3.0 (K5): toggle auto-resume hasil restore sesi
     let auto_resume_chk = gtk4::CheckButton::with_label(
         "Lanjutkan otomatis unduhan tertunda saat aplikasi dibuka",
     );
     auto_resume_chk.set_active(cur.auto_resume);
     content.append(&auto_resume_chk);
-
 
     // Buttons
     let btn_box = GtkBox::new(Orientation::Horizontal, 8);
@@ -923,7 +922,6 @@ fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
         cfg.max_overall_speed = speed;
     }
     cfg.verify_tls = verify_tls_chk.is_active();
-        cfg.auto_resume = auto_resume_chk.is_active();
-
+    cfg.auto_resume = auto_resume_chk.is_active();
     Some(cfg)
 }

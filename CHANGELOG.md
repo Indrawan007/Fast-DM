@@ -6,7 +6,6 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 ## [2.3.0] - 2026-09-02
 
 ### Fixed — keamanan (lihat CODE-REVIEW.md)
-
 - **K1** IPC socket pindah dari `/tmp/fast-dm-<uid>.sock` (publik & bisa
   di-preempt user lain) ke `XDG_RUNTIME_DIR/fast-dm/fast-dm.sock` (0700) dengan
   fallback `~/.config/fast-dm/run/`. Koneksi diterima hanya bila `SO_PEERCRED`
@@ -26,7 +25,6 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   (sebelumnya ditulis dengan kedaluwarsa 1 tahun tanpa pembersihan).
 
 ### Changed
-
 - **K5** Unduhan tertunda hasil restore sesi **benar-benar** dilanjutkan
   otomatis saat aplikasi dibuka (README sebelumnya mengklaim begitu padahal
   kode hanya menandai Paused). Dapat dimatikan lewat Pengaturan →
@@ -38,9 +36,8 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   dibackup sebagai `session.json.corrupt-<ts>` alih-alih hilang diam-diam.
 
 ### Added
-
 - Ekstensi yang dikenali untuk jalur-download-cepat (`.exe .msi .dmg .bz2
-.docx …`) diselaraskan dengan daftar intersep browser — URL non-media tak
+  .docx …`) diselaraskan dengan daftar intersep browser — URL non-media tak
   lagi mencoba yt-dlp dulu (hemat 1–3 detik).
 - Deteksi URL YouTube lebih toleran (`/live/`, `/embed/`, `/v/`, query param
   `v=` di posisi mana pun) → dialog kualitas muncul untuk format tersebut.
@@ -53,6 +50,5 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 - Checkbox "Lanjutkan otomatis unduhan tertunda" di dialog Pengaturan.
 
 ## [2.2.5] - sebelumnya
-
 - Perbaikan bug various (lihat riwayat commit), Catppuccin GUI, session
   persist, cookie per-domain, resolver universal yt-dlp + fallback aria2.

@@ -152,12 +152,11 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         "--human-readable=false".into(),
         "--show-console-readout=true".into(),
         "--download-result=full".into(),
-                // Limit user adalah TOTAL aplikasi, tapi tiap download = proses aria2c
+        // Limit user adalah TOTAL aplikasi, tapi tiap download = proses aria2c
         // sendiri. Engine sudah membaginya menurut jumlah unduhan hidup SAAT
         // proses ini start (v2.3.0 M3, lihat DownloadEngine::spawn_supervised)
         // — di sini tinggal pakai. "0" = tanpa batas.
         format!("--max-overall-download-limit={}", config.max_overall_speed),
-
         // check-integrity sengaja TIDAK dimatikan (default aria2 = true):
         // tanpa ini, resume setelah crash bisa menandai file korup sebagai
         // selesai.
@@ -326,7 +325,7 @@ fn run_aria2c(
                     i.eta = eta;
                     // Bersihkan error lama saat download berjalan lagi (mis. setelah Retry)
                     i.error_msg.clear();
-                                        i.status_detail.clear();
+                    i.status_detail.clear();
                     let _ = tx.send(DownloadEvent::Progress(i.clone()));
                 });
                 last_update = Instant::now();
@@ -383,7 +382,6 @@ fn has_space(dir: &str, needed: u64) -> bool {
     }
 }
 
-/// Limit total user → limit per-proses aria2c ("0" = tanpa batas).
 /// Limit total user → batas per-proses aria2c. v2.3.0 (M3): pembaginya
 /// adalah jumlah unduhan HIDUP (aktif+antri) saat proses ini start — dihitung
 /// engine — bukan `max_concurrent` statis, sehingga unduhan tunggal kini
@@ -848,8 +846,6 @@ mod tests {
         assert_eq!(parse_speed_setting("2k"), 2 * 1024);
         assert_eq!(parse_speed_setting("2m"), 2 * 1024 * 1024);
     }
-
-    // ── per_process_speed_limit ──
 
     // ── resolve_speed_limit (M3) ──
 

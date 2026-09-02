@@ -8,7 +8,6 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio::sync::{mpsc, Mutex};
 
-
 static RE_YTDLP_PROGRESS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[download\]\s+(\d+\.?\d*)%\s+of\s+~?\s*(\S+)\s+at\s+(\S+)\s+ETA\s+(\S+)").unwrap());
 static RE_YTDLP_PROGRESS2: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[download\]\s+(\d+\.?\d*)%").unwrap());
 static RE_YTDLP_DEST: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[download\]\s+Destination:\s+(.+)").unwrap());
@@ -341,7 +340,7 @@ pub(crate) fn run_ytdlp(
 
         if matches!(status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
             // B8: Paused → SIGTERM sudah dikirim pause_download(); tunggu proses
-             // berhenti rapi (file .part tetap bisa di-resume). Cancelled → kill
+            // berhenti rapi (file .part tetap bisa di-resume). Cancelled → kill
             // seluruh group (ffmpeg ikut mati, K4) + fallback child.kill().
             if status == DownloadStatus::Cancelled {
                 super::kill_child_group_hard(child.id());
