@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 // ID unik yang tidak akan collide dengan app lain
 const APP_ID: &str = "io.github.fastdm.FastDownloadManager";
 
+#[derive(Default)] // v2.8.1 (clippy): new() fieldless → sediakan Default juga
 pub struct FastDmApp;
 
 impl FastDmApp {

@@ -434,7 +434,7 @@ pub async fn download(
         // sini = forcePause/forceRemove — tanpa pid).
         let user = {
             let i = info.lock().await;
-            i.status.clone()
+            i.status // DownloadStatus: Copy — clone tak perlu (clippy)
         };
         match user {
             DownloadStatus::Paused => {
@@ -591,10 +591,12 @@ mod tests {
 
     #[test]
     fn daemon_args_core_flags() {
-        let mut cfg = Config::default();
-        cfg.proxy_url = "http://127.0.0.1:8118".into();
-        cfg.max_overall_speed = "5M".into();
-        cfg.verify_tls = false;
+        let cfg = Config {
+            proxy_url: "http://127.0.0.1:8118".into(),
+            max_overall_speed: "5M".into(),
+            verify_tls: false,
+            ..Config::default()
+        };
         let a = daemon_args(6800, "sec", &cfg);
         let j = a.join(" ");
         assert!(a[0] == "--enable-rpc" && a[1] == "--rpc-listen-all=false");

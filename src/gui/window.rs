@@ -1295,6 +1295,47 @@ pub(crate) fn wants_quality_dialog(url: &str) -> bool {
     crate::downloader::youtube::is_youtube_url(url) || page_or_stream
 }
 
+// ── v2.4.0 (D1): helper clipboard CLI (tanpa dependensi baru) ────────────
+
+/// Preferensi sesuai sesi: Wayland → wl-paste, X11 → xclip. "Tersedia" =
+/// perintah BISA dijalankan (spawn tidak NotFound); status exit diabaikan
+/// (clipboard kosong pun tetap berarti tool ada).
+fn clipboard_probe() -> Option<&'static str> {
+    let order: &[&'static str] = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        &["wl-paste", "xclip"]
+    } else {
+        &["xclip", "wl-paste"]
+    };
+    for bin in order {
+        let args: &[&str] = if *bin == "wl-paste" {
+            &["--version"]
+        } else {
+            &["-version"]
+        };
+        match std::process::Command::new(*bin).args(args).output() {
+            Ok(_) => return Some(bin),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => continue,
+        }
+    }
+    None
+}
+
+/// Teks clipboard (None = gagal baca / tidak ada pemilik seleksi).
+fn clipboard_text(tool: &'static str) -> Option<String> {
+    let out = match tool {
+        "wl-paste" => std::process::Command::new("wl-paste")
+            .args(["--no-newline"])
+            .output(),
+        _ => std::process::Command::new("xclip")
+            .args(["-o", "-selection", "clipboard"])
+            .output(),
+    };
+    out.ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1349,43 +1390,3 @@ mod tests {
     }
 }
 
-// ── v2.4.0 (D1): helper clipboard CLI (tanpa dependensi baru) ────────────
-
-/// Preferensi sesuai sesi: Wayland → wl-paste, X11 → xclip. "Tersedia" =
-/// perintah BISA dijalankan (spawn tidak NotFound); status exit diabaikan
-/// (clipboard kosong pun tetap berarti tool ada).
-fn clipboard_probe() -> Option<&'static str> {
-    let order: &[&'static str] = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        &["wl-paste", "xclip"]
-    } else {
-        &["xclip", "wl-paste"]
-    };
-    for bin in order {
-        let args: &[&str] = if *bin == "wl-paste" {
-            &["--version"]
-        } else {
-            &["-version"]
-        };
-        match std::process::Command::new(*bin).args(args).output() {
-            Ok(_) => return Some(bin),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => continue,
-        }
-    }
-    None
-}
-
-/// Teks clipboard (None = gagal baca / tidak ada pemilik seleksi).
-fn clipboard_text(tool: &'static str) -> Option<String> {
-    let out = match tool {
-        "wl-paste" => std::process::Command::new("wl-paste")
-            .args(["--no-newline"])
-            .output(),
-        _ => std::process::Command::new("xclip")
-            .args(["-o", "-selection", "clipboard"])
-            .output(),
-    };
-    out.ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-}

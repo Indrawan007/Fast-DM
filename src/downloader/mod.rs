@@ -15,8 +15,13 @@ use types::*;
 use url::Url;
 use uuid::Uuid;
 
+/// v2.8.1 (clippy `type_complexity`): alias utk tipe peta yang berulang di
+/// banyak signature — hanya kosmetik, tipe identik.
+pub(crate) type SharedInfo = Arc<Mutex<DownloadInfo>>;
+pub(crate) type DownloadMap = Arc<RwLock<HashMap<String, SharedInfo>>>;
+
 pub struct DownloadEngine {
-    downloads: Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
+    downloads: DownloadMap,
     event_tx: mpsc::UnboundedSender<DownloadEvent>,
     config: Arc<RwLock<Config>>,
     dirty: Arc<AtomicBool>,
@@ -233,7 +238,7 @@ impl DownloadEngine {
         // B3: hitung slot + klaim status dilakukan dalam SATU write-lock
         // (pola promote_next) — dua start yang bersamaan tidak bisa sama-sama
         // lolos batas max_concurrent (double-spawn / over-slot).
-        let claimed: Option<(Arc<Mutex<DownloadInfo>>, usize)> = {
+        let claimed: Option<(SharedInfo, usize)> = {
             let downloads = self.downloads.write().await;
             let Some(info) = downloads.get(id).cloned() else {
                 return;
@@ -435,8 +440,8 @@ impl DownloadEngine {
 
 /// Jalankan download lalu promote antrian berikutnya saat selesai
 fn spawn_supervised(
-    downloads: Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
-    info: Arc<Mutex<DownloadInfo>>,
+    downloads: DownloadMap,
+    info: SharedInfo,
     tx: mpsc::UnboundedSender<DownloadEvent>,
     config: Config,
     dirty: Arc<AtomicBool>,
@@ -534,7 +539,7 @@ pub fn is_direct_file_url(url: &str) -> bool {
 
 /// Cari download Queued tertua dan jalankan jika ada slot kosong
 async fn promote_next(
-    downloads: Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
+    downloads: DownloadMap,
     tx: mpsc::UnboundedSender<DownloadEvent>,
     config: Config,
     dirty: Arc<AtomicBool>,
@@ -554,7 +559,7 @@ async fn promote_next(
         // v2.3.0 (L4): FIFO deterministik — kunci (created_ms, id); tanpa
         // pembanding kedua, dua download yang dibuat pada waktu sama urutannya
         // acak mengikuti iterasi HashMap.
-        let mut oldest: Option<((i64, String), Arc<Mutex<DownloadInfo>>)> = None;
+        let mut oldest: Option<((i64, String), SharedInfo)> = None;
 
         let mut queued = 0usize;
         for info in map.values() {
@@ -755,7 +760,7 @@ fn load_session() -> Vec<DownloadInfo> {
 
 /// Tulis snapshot session secara atomic (tmp + rename), dibatasi 200 entri terbaru
 async fn flush_session(
-    downloads: &Arc<RwLock<HashMap<String, Arc<Mutex<DownloadInfo>>>>>,
+    downloads: &DownloadMap,
     dirty: &AtomicBool,
 ) {
     if !dirty.swap(false, Ordering::SeqCst) {
