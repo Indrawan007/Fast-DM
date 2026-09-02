@@ -1,11 +1,14 @@
-mod app;
-mod config;
-mod downloader;
-mod gui;
-mod ipc;
-mod native_host;
+//! Fast-DM binary entry point.
+//!
+//! Hanya berisi CLI parsing + dispatch:
+//! - `fast-dm --native` → NMH mode (foreground, exit setelah 1 message)
+//! - `fast-dm`          → GUI mode
+//!
+//! Logika di-share dengan library (`src/lib.rs`) agar integration test
+//! bisa akses modul yang sama tanpa duplikasi.
 
 use clap::Parser;
+use fast_dm::{app, native_host};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -17,7 +20,8 @@ struct Cli {
 }
 
 fn main() {
-    // Init logging (stderr agar tidak mengganggu native messaging stdout)
+    // Init logging ke stderr (stdout dipakai oleh native messaging).
+    // Env var RUST_LOG=fast_dm=debug untuk verbose.
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -30,7 +34,7 @@ fn main() {
 
     let cli = Cli::parse();
 
-    // Auto-setup browser NMH manifests
+    // Auto-setup browser NMH manifests (aman dilakukan di kedua mode)
     if let Err(e) = native_host::setup::check_and_setup() {
         tracing::warn!("NMH setup: {}", e);
     }

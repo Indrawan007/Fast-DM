@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel in-progress runs untuk branch yang sama (hemat CI minutes)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  # Job 1: test + build (PR utama) — gabung agar hemat runner minutes
+  # ────────────────────────────────────────────────────────────────
+  test-and-build:
+    name: Test & Build (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            libgtk-4-dev \
+            aria2 \
+            xvfb  # untuk GUI smoke test (jika ditambah nanti)
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo registry & build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            target
+
+      - name: Check formatting
+        # `cargo fmt --check` mengembalikan non-zero kalau ada diff.
+        # Step ini blocking — biar contributor konsisten sebelum merge.
+        # Kalau Anda ingin advisory dulu, ganti `--check` → `cargo fmt`
+        # (auto-format) atau hapus step ini.
+        run: cargo fmt --all -- --check
+
+      - name: Run all tests (unit + integration)
+        # P0 fix: 97 unit test + integration test di tests/find_cookies.rs.
+        # --no-fail-fast: jalankan semua, jangan stop di error pertama.
+        # --nocapture: tampilkan println!() di test output untuk debugging.
+        run: cargo test --no-fail-fast -- --nocapture
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Smoke test: binary bisa start
+        # Validasi runtime: binary exit code 0 saat start tanpa GUI.
+        # --help selalu exit 0, cocok untuk smoke test tanpa GTK display.
+        run: |
+          ./target/release/fast-dm --version
+          ./target/release/fast-dm --help
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-dm-linux-x86_64
+          path: target/release/fast-dm
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────────
+  # Job 2: extension zip (untuk rilis / Chrome Web Store upload manual)
+  # ────────────────────────────────────────────────────────────────
+  extension:
+    name: Zip browser extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zip extension
+        run: |
+          cd extension
+          zip -r ../fast-dm-extension.zip . \
+            -x "*.DS_Store" \
+            -x "*/.git/*"
+
+      - name: Upload extension zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-dm-extension
+          path: fast-dm-extension.zip
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────────
+  # Job 3: .deb package (full release artifact)
+  # ────────────────────────────────────────────────────────────────
+  deb:
+    name: Build .deb package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            libgtk-4-dev \
+            dpkg-dev
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build .deb
+        run: bash packaging/build-deb.sh
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-dm-deb
+          path: build/*.deb
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────────
+  # Job 4: CI status badge untuk README
+  # ────────────────────────────────────────────────────────────────
+  # (GitHub otomatis generate badge via shields.io URL pattern:
+  #  https://github.com/${{ github.repository }}/actions/workflows/ci.yml/badge.svg)
