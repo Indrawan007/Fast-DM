@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn rpc_secret_is_stable_and_private() {
-        let dir = std::env::temp_dir().join(format!("fast-dm-secret-{}", std::process::pid()));
+        let dir = std::env::temp_dir().join(format!("fast-dm-secret-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let a = Config::rpc_secret_in(&dir);
         let b = Config::rpc_secret_in(&dir);
