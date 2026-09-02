@@ -342,9 +342,7 @@ pub fn build_window(
                 return glib::ControlFlow::Continue(());
             }
             *last_t.borrow_mut() = txt.clone();
-            if txt.len() > 2048
-                || !(txt.starts_with("http://") || txt.starts_with("https://"))
-            {
+            if txt.len() > 2048 || !(txt.starts_with("http://") || txt.starts_with("https://")) {
                 if ban_t.is_visible() {
                     ban_t.set_visible(false);
                 }
