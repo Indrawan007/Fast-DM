@@ -212,11 +212,14 @@ pub fn build_window(
         let rt = rt_add.clone();
 
         // v2.3.2 (M4): mulai unduhan — dipakai dua jalur (dialog kualitas via
-        // callback, atau langsung tanpa dialog).
+        // callback, atau langsung tanpa dialog). url sengaja di-clone dulu:
+        // closure `start` adalah Fn yang bisa dipanggil berkali-kali, jadi
+        // ia memegang SALINAN (url_for_start), bukan url aslinya (E0382).
+        let url_for_start = url.clone();
         let start = move |quality: Option<String>| {
             let eng = eng.clone();
             let rt = rt.clone();
-            let url = url.clone();
+            let url = url_for_start.clone();
             glib::spawn_future_local(async move {
                 let _ = rt
                     .spawn(async move {
@@ -229,11 +232,10 @@ pub fn build_window(
 
         if wants_quality {
             // Cancel/tutup dialog = batal total (dulu lanjut tanpa kualitas).
-            let url_dialog = url.clone();
             youtube_dialog::show_quality_dialog(
                 win_add.upcast_ref(),
                 "Pilih kualitas",
-                &url_dialog,
+                &url,
                 "",
                 move |q| start(Some(q)),
             );
