@@ -3,6 +3,23 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.6.0] - 2026-09-02
+
+### Added — D6: dialog kualitas menampilkan format NYATA dari situs
+- Sebelum dialog terbuka, GUI menjalankan `yt-dlp -J` (simulated extraction,
+  cap 20 dtk, mengikuti proxy & verify_tls + cookies dari config). Hasilnya
+  difilter (buang mhtml/duplikat/cap 24 entri) dan ditambahkan sebagai section
+  "Format lengkap dari situs" di bawah preset yang sudah ada.
+- Id format terpilih (mis. `137+140`) diteruskan ke `--format` dengan fallback
+  `/best` (`quality_args` arm baru) — tetap melewati guard karakter; preset
+  lama tidak berubah perilakunya.
+- Gagal fetch / timeout / yt-dlp tanpa JSON → dialog hanya berisi preset
+  (perilaku ≤2.5.x, tanpa regresi). Jalur "Simpan Sebagai…" sengaja tetap
+  statis (sudah dua dialog).
+- Label dinamis dirender teks biasa (bukan markup Pango) — data dari halaman
+  tidak pernah diinterpretasikan sebagai markup (anti injeksi).
+- +3 unit test (parse JSON, garbage-tolerant, passthrough & guard format id).
+
 ## [2.5.0] - 2026-09-02
 
 ### Added — D2: dialog "Simpan Sebagai…" (IDM-style)

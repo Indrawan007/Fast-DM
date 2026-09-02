@@ -32,6 +32,7 @@
 | D3 proxy global | ✅ v2.4.0 | `Config::proxy_url` → `--all-proxy` (aria2) & `--proxy` (yt-dlp + resolver universal); tervalidasi saat Simpan |
 | D1 clipboard monitor | ✅ v2.4.0 | opt-in via Pengaturan; polling CLI `wl-paste`/`xclip` (tanpa dep crate baru), dedup konten, auto-stop bila tool absen |
 | D2 save-as dialog | ✅ v2.5.0 | tombol "Simpan Sebagai…" → FileDialog save_file (nama dari URL, folder awal = Download); dialog kualitas tetap menyusul; helper on_add diekstrak & diunit-test |
+| D6 format nyata yt-dlp | ✅ v2.6.0 | `fetch_formats` (yt-dlp -J, cap 20s) → section dinamis di dialog; id nyata → passthrough `--format <id>/best`; gagal → fallback preset |
 | M11 skema tak divalidasi | ✅ Fixed || L2 AGENTS.md usang | ✅ Fixed | ditulis ulang v0.2.0 sesuai arsitektur nyata |
 | L10 CI tanpa clippy/audit | ⚠️ Partial | komentar basi dibersihkan; step clippy/deny belum (butuh keputusan policy) |
 | D-x (fitur), B-x (arsitektur RPC) | 📋 Roadmap | lihat §5 dokumen ini |

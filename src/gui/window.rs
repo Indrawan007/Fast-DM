@@ -251,13 +251,39 @@ pub fn build_window(
 
         if wants_quality {
             // Cancel/tutup dialog = batal total (dulu lanjut tanpa kualitas).
-            youtube_dialog::show_quality_dialog(
-                win_add.upcast_ref(),
-                "Pilih kualitas",
-                &url,
-                "",
-                move |q| start(Some(q)),
-            );
+            //
+            // v2.6.0 (D6): ambil format NYATA dulu (yt-dlp -J, cap internal
+            // 20 dtk) — dialog menyusul menampilkannya; fetch gagal → list
+            // kosong → dialog hanya berisi preset (perilaku ≤2.5.x).
+            let engine_q = engine_add.clone();
+            let rt_q = rt_add.clone();
+            let url_q = url.clone();
+            let win_q = win_add.clone();
+            let start_q = start.clone();
+            glib::spawn_future_local(async move {
+                let fmts = {
+                    let eng = engine_q.clone();
+                    let cfg = rt_q
+                        .spawn(async move { eng.get_config().await })
+                        .await
+                        .unwrap_or_default();
+                    let url2 = url_q.clone();
+                    rt_q
+                        .spawn(async move {
+                            crate::downloader::youtube::fetch_formats(&url2, &cfg).await
+                        })
+                        .await
+                        .unwrap_or_default()
+                };
+                youtube_dialog::show_quality_dialog(
+                    win_q.upcast_ref(),
+                    "Pilih kualitas",
+                    &url_q,
+                    "",
+                    fmts,
+                    move |q| start_q(Some(q)),
+                );
+            });
         } else {
             start(None);
         }
@@ -430,11 +456,14 @@ pub fn build_window(
                     };
 
                     if wants_quality_dialog(&url) {
+                        // v2.6.0: jalur save-as memakai preset statis (tanpa
+                        // fetch) — dialog file-nya saja sudah dua langkah.
                         youtube_dialog::show_quality_dialog(
                             win_cb.upcast_ref(),
                             "Pilih kualitas",
                             &url,
                             "",
+                            Vec::new(),
                             move |q| start(Some(q)),
                         );
                     } else {

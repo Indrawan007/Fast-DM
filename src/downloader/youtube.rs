@@ -223,11 +223,166 @@ pub(crate) fn quality_args(quality: Option<&str>) -> Vec<String> {
             "--audio-quality".into(),
             "0".into(),
         ],
+        // v2.6.0 (D6): id format NYATA dari yt-dlp ("137", "137+140") —
+        // diteruskan sebagai selector, dengan fallback /best agar tetap jalan
+        // bila id tidak tersedia saat eksekusi (mis. dialog basi).
+        Some(q) if looks_like_format_id(q) => {
+            vec!["--format".into(), format!("{q}/best")]
+        }
         _ => vec![
             "--format".into(),
             "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best".into(),
         ],
     }
+}
+
+/// v2.6.0 (D6): token terlihat seperti id/selector format yt-dlp — tanpa
+/// whitespace, panjang terbatas, dan karakter ter-batasi whitelist.
+/// (Command API tidak melewati shell, tapi pembatasan ini defense-in-depth
+/// karena string bisa berasal dari data halaman.)
+fn looks_like_format_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '+' | '-' | '.' | '_' | '*' | '[' | ']' | '(' | ')' | '>' | '<' | '^'
+                        | '&' | '|' | '/' | ',' | '=' | '!'
+                )
+        })
+}
+
+/// v2.6.0 (D6): satu opsi pada dialog kualitas. `id` = preset ("1080p",
+/// "audio_mp3", "best_mp4") ATAU id format nyata dari yt-dlp ("137",
+/// "137+140") — `quality_args()` memetakan keduanya.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormatOption {
+    pub id: String,
+    pub label: String,
+    pub desc: String,
+}
+
+#[derive(serde::Deserialize)]
+struct YtFormatJson {
+    #[serde(default)]
+    format_id: String,
+    #[serde(default)]
+    ext: Option<String>,
+    #[serde(default)]
+    height: Option<u32>,
+    #[serde(default)]
+    acodec: Option<String>,
+    #[serde(default)]
+    vcodec: Option<String>,
+    #[serde(default)]
+    filesize: Option<u64>,
+    #[serde(default)]
+    filesize_approx: Option<u64>,
+    #[serde(default)]
+    format_note: Option<String>,
+}
+
+/// Ambil daftar format NYATA untuk sebuah URL via `yt-dlp -J` (simulated
+/// extraction, tanpa download). Gagal dalam bentuk apa pun (tool tidak ada,
+/// timeout 20 dtk, parse error) → Vec KOSONG; pemanggil fallback ke daftar
+/// statis seperti perilaku ≤2.5.x.
+pub async fn fetch_formats(url: &str, config: &Config) -> Vec<FormatOption> {
+    let mut cmd: Vec<String> = vec![
+        "yt-dlp".into(),
+        "-J".into(),
+        "--no-playlist".into(),
+        "--no-warnings".into(),
+        "--retries".into(),
+        "2".into(),
+        "--socket-timeout".into(),
+        "10".into(),
+    ];
+    cmd.extend(cookie_args(url));
+    if !config.proxy_url.trim().is_empty() {
+        cmd.extend(["--proxy".into(), config.proxy_url.trim().to_string()]);
+    }
+    if !config.verify_tls {
+        cmd.push("--no-check-certificates".into());
+    }
+    cmd.push(url.to_string());
+
+    let Ok(mut child) = tokio::process::Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    // Cap 20 dtk: ekstraksi situs tertentu bisa sangat lambat — lebih baik
+    // pakai daftar statis daripada user menunggu tanpa kepastian.
+    let Ok(out) = tokio::time::timeout(std::time::Duration::from_secs(20), child.wait_with_output()).await else {
+        return Vec::new(); // future di-drop → kill_on_drop meracun yt-dlp
+    };
+    let Ok(status) = out else { return Vec::new() };
+    if !status.status.success() {
+        return Vec::new();
+    }
+    parse_formats_json(&String::from_utf8_lossy(&status.stdout))
+}
+
+/// Parse output `yt-dlp -J` (pub(crate) supaya bisa di-unit test).
+pub(crate) fn parse_formats_json(s: &str) -> Vec<FormatOption> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else {
+        return Vec::new();
+    };
+    let Some(arr) = v.get("formats").and_then(|f| f.as_array()) else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<FormatOption> = Vec::new();
+    for f in arr {
+        let Ok(fmt) = serde_json::from_value::<YtFormatJson>(f.clone()) else {
+            continue;
+        };
+        if fmt.format_id.is_empty() {
+            continue;
+        }
+        let ext = fmt.ext.unwrap_or_default();
+        if ext == "mhtml" {
+            continue; // bukan media — sampah dari "-J"
+        }
+        let has_v = !fmt.vcodec.as_deref().map_or(false, |c| c == "none" || c.is_empty());
+        let has_a = !fmt.acodec.as_deref().map_or(false, |c| c == "none" || c.is_empty());
+        let kind = match (has_v, has_a) {
+            (true, true) => "video+audio",
+            (true, false) => "video",
+            (false, true) => "audio",
+            _ => continue, // container tanpa stream? lewati
+        };
+        let label = match fmt.height {
+            Some(h) if h > 0 => format!("{} {}p", ext, h),
+            _ => format!("{} {}", ext, kind),
+        };
+        let mut desc = kind.to_string();
+        if let Some(sz) = fmt.filesize_approx.or(fmt.filesize).filter(|b| *b > 0) {
+            desc = format!("{} · {}", desc, super::types::format_size(sz));
+        }
+        if let Some(note) = fmt.format_note {
+            if !note.is_empty() {
+                desc = format!("{} · {}", desc, note);
+            }
+        }
+        if !seen.insert(fmt.format_id.clone()) {
+            continue;
+        }
+        out.push(FormatOption {
+            id: fmt.format_id,
+            label,
+            desc,
+        });
+        if out.len() >= 24 {
+            break; // dialog sudah panjang; 24 entri lebih dari cukup
+        }
+    }
+    out
 }
 
 pub async fn download(
@@ -669,6 +824,51 @@ mod tests {
     }
 
     // ── quality_args ──
+
+    #[test]
+    fn parse_formats_json_basic() {
+        let j = r#"{"formats":[
+            {"format_id":"251","ext":"webm","acodec":"opus","vcodec":"none","height":null,"filesize_approx":2000000},
+            {"format_id":"137","ext":"mp4","acodec":"none","vcodec":"av01.0.08M.08","height":1080},
+            {"format_id":"137","ext":"mp4","acodec":"none","vcodec":"av01.0.08M.08","height":1080},
+            {"format_id":"18","ext":"mp4","acodec":"mp4a.40.2","vcodec":"avc1.42001E","height":360,"format_note":"low res"},
+            {"format_id":"0","ext":"mhtml","vcodec":"none","acodec":"none"}
+        ]}"#;
+        let v = parse_formats_json(j);
+        assert_eq!(v.len(), 3, "duplikat id & mhtml harus tersaring");
+        assert_eq!(v[0].id, "251");
+        assert_eq!(v[0].label, "webm audio");
+        assert!(v[0].desc.contains("audio"));
+        assert_eq!(v[1].label, "mp4 1080p");
+        assert_eq!(v[2].desc, "video+audio · low res");
+    }
+
+    #[test]
+    fn parse_formats_json_garbage_is_empty() {
+        assert!(parse_formats_json("").is_empty());
+        assert!(parse_formats_json("bukan json").is_empty());
+        assert!(parse_formats_json("{}").is_empty());
+        assert!(parse_formats_json(r#"{"formats": null}"#).is_empty());
+    }
+
+    #[test]
+    fn quality_args_passthrough_real_format_id() {
+        assert_eq!(
+            quality_args(Some("137+140")),
+            vec!["--format".to_string(), "137+140/best".to_string()]
+        );
+        // preset tidak boleh ter-bajak passthrough
+        assert!(quality_args(Some("audio_mp3")).contains(&"--audio-format".to_string()));
+        assert!(quality_args(Some("720p")).iter().any(|a| a.contains("height<=720")));
+        // bukan format id (whitespace dsb.) → tetap default teraman
+        assert_eq!(
+            quality_args(Some("rm -rf /")),
+            vec![
+                "--format".to_string(),
+                "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best".to_string()
+            ]
+        );
+    }
 
     #[test]
     fn quality_args_resolution_p() {

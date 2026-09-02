@@ -74,6 +74,7 @@ pub fn show_quality_dialog<F>(
     title: &str,
     uploader: &str,
     duration_str: &str,
+    formats: Vec<crate::downloader::youtube::FormatOption>,
     on_ok: F,
 ) where
     F: FnOnce(String) + 'static,
@@ -140,39 +141,40 @@ pub fn show_quality_dialog<F>(
     let mut first_btn: Option<CheckButton> = None;
 
     for q in QUALITIES {
-        let radio = match &first_btn {
-            Some(first) => {
-                let r = CheckButton::new();
-                r.set_group(Some(first));
-                r
-            }
-            None => CheckButton::new(),
-        };
-        if first_btn.is_none() {
+        let is_default = first_btn.is_none();
+        let (radio, row) = quality_row(&selected, first_btn.as_ref(), q.id, q.label, q.desc, is_default);
+        if is_default {
             first_btn = Some(radio.clone());
-            radio.set_active(true);
         }
-
-        let label = Label::new(None);
-        label.set_markup(&format!(
-            "<b>{}</b>  <span color='#585b70'>{}</span>",
-            q.label, q.desc
-        ));
-        label.set_halign(gtk4::Align::Start);
-
-        let row = GtkBox::new(Orientation::Horizontal, 8);
-        row.append(&radio);
-        row.append(&label);
-
-        let sel = selected.clone();
-        let qid = q.id.to_string();
-        radio.connect_toggled(move |btn| {
-            if btn.is_active() {
-                *sel.borrow_mut() = qid.clone();
-            }
-        });
-
         quality_box.append(&row);
+    }
+
+    // v2.6.0 (D6): format NYATA dari situs (hasil `yt-dlp -J` yang diambil
+    // window.rs sebelum dialog dibuka). Kosong = fetch gagal/tidak diminta →
+    // dialog persis seperti versi sebelumnya (hanya preset).
+    if !formats.is_empty() {
+        let hdr = Label::new(Some(&format!(
+            "Format lengkap dari situs ({}):",
+            formats.len()
+        )));
+        hdr.set_halign(gtk4::Align::Start);
+        hdr.set_margin_top(8);
+        hdr.add_css_class("detail-label");
+        quality_box.append(&hdr);
+        for f in &formats {
+            let (radio, row) = quality_row(
+                &selected,
+                first_btn.as_ref(),
+                &f.id,
+                &f.label,
+                &f.desc,
+                false,
+            );
+            if first_btn.is_none() {
+                first_btn = Some(radio.clone());
+            }
+            quality_box.append(&row);
+        }
     }
 
     scroll.set_child(Some(&quality_box));
@@ -223,4 +225,46 @@ pub fn show_quality_dialog<F>(
         d.close();
     });
     dialog.show();
+}
+
+/// Satu baris dialog: radio (se-group) + nama + detail. TEKS BIASA, bukan
+/// markup Pango — sejak D6 data label/desc bisa berasal dari output yt-dlp
+/// (data halaman!) dan tidak boleh diinterpretasikan sebagai markup.
+fn quality_row(
+    selected: &std::rc::Rc<std::cell::RefCell<String>>,
+    first: Option<&CheckButton>,
+    id: &str,
+    label_txt: &str,
+    desc: &str,
+    default_active: bool,
+) -> (CheckButton, GtkBox) {
+    let radio = match first {
+        Some(f) => {
+            let r = CheckButton::new();
+            r.set_group(Some(f));
+            r
+        }
+        None => CheckButton::new(),
+    };
+    if default_active {
+        radio.set_active(true);
+    }
+    let row = GtkBox::new(Orientation::Horizontal, 8);
+    let label = Label::new(Some(label_txt));
+    label.set_halign(gtk4::Align::Start);
+    row.append(&radio);
+    row.append(&label);
+    if !desc.is_empty() {
+        let d = Label::new(Some(desc));
+        d.add_css_class("detail-label");
+        row.append(&d);
+    }
+    let sel = selected.clone();
+    let owned = id.to_string();
+    radio.connect_toggled(move |btn| {
+        if btn.is_active() {
+            *sel.borrow_mut() = owned.clone();
+        }
+    });
+    (radio, row)
 }
