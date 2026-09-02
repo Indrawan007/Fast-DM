@@ -84,9 +84,13 @@ Self::cookies_file_for_host(&Self::normalize_host(domain))
         None
     }
 
-    /// "WWW.Example.COM" → "example.com"
+    /// "WWW.Example.COM" → "example.com" (lowercase + strip "www." case-insensitive)
     fn normalize_host(domain: &str) -> String {
-        domain.trim().trim_start_matches("www.").to_ascii_lowercase()
+        // Lowercase dulu, BARU strip "www." — kalau tidak, trim_start_matches
+        // case-sensitive akan skip "WWW." (Bug B1, ditemukan saat menambah
+        // unit test — sebelumnya integration test tidak cover uppercase).
+        let s = domain.trim().to_ascii_lowercase();
+        s.trim_start_matches("www.").to_string()
     }
 
     fn cookies_file_for_host(host: &str) -> PathBuf {
@@ -169,9 +173,13 @@ mod tests {
         // Karakter non-alfanumerik (selain . -) diganti underscore
         let p = Config::cookies_file_for("evil host/name.txt");
         let name = p.file_name().unwrap().to_str().unwrap();
-        // "evil host/name.txt" → "evil_host_name_txt"
-        // (chars ' ', '/' → '_', 'txt' tetap)
-        assert!(name.starts_with("cookies_evil_host_name_txt"));
+        // "evil host/name.txt" → "evil_host_name.txt"
+        // (chars ' ', '/' → '_', '.txt' tetap)
+        assert!(
+            name.starts_with("cookies_evil_host_name.txt"),
+            "got: {:?}",
+            name
+        );
         // Tidak boleh ada karakter terlarang
         assert!(!name.contains(' '));
         assert!(!name.contains('/'));
@@ -180,10 +188,10 @@ mod tests {
     // ── find_cookies_file: parent-domain lookup ──
     //
     // CATATAN: Config::config_dir() baca `dirs::config_dir()` (XDG_CONFIG_HOME
-    // atau ~/.config) yang statis per-proses. Test yang menyentuh filesystem
-    // akan mengotori config user — di-skip. Logika find_cookies_file kita
-    // verifikasi via integration test di `tests/find_cookies.rs` yang pakai
-    // `tempfile` crate + HOME override.
+    // atau ~/.config) yang statis per-proses. Unit test di sini tidak
+    // menyentuh filesystem (akan mengotori config user). Test riil ada di
+    // integration test `tests/find_cookies.rs` yang override XDG_CONFIG_HOME
+    // + pakai std::env::temp_dir() (stdlib-only, tanpa dependency).
 
     #[test]
     fn find_cookies_file_none_when_not_found() {
@@ -237,3 +245,4 @@ mod tests {
         assert!(c.max_connections > 0);
     }
 }
+

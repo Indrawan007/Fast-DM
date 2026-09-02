@@ -655,8 +655,14 @@ mod tests {
 
     #[test]
     fn sanitize_filename_strips_invalid_chars() {
-        // Karakter terlarang diganti underscore
-        assert_eq!(sanitize_filename("a<b>c:d\"e/f\\g|h?i*.txt"), "a_b_c_d_e_f_g_h_i_.txt");
+        // Karakter terlarang diganti underscore.
+        // CATATAN: sanitize_filename() juga strip query (?...) dan fragment (#...)
+        // di awal — jadi kita pakai input TANPA '?' / '#' untuk isolasi test ini.
+        // (Lihat sanitize_filename_strips_query_and_fragment untuk '?'/'#' behavior.)
+        assert_eq!(
+            sanitize_filename("a<b>c:d\"e/f\\g|h@i*.txt"),
+            "a_b_c_d_e_f_g_h@i_.txt"
+        );
     }
 
     #[test]
@@ -723,10 +729,18 @@ mod tests {
 
     #[test]
     fn extract_filename_url_encoded() {
-        // %20 harus decode jadi spasi, lalu jadi underscore (invalid char)
+        // %20 di-decode jadi spasi (satu karakter). Spasi BUKAN karakter
+        // invalid di regex sanitize_filename ([<>:"/\\|?*\x00-\x1f]) —
+        // sengaja dibiarkan karena:
+        //   - Linux filesystem mendukung spasi di filename
+        //   - yt-dlp & aria2 handle nama file ber-spasi dengan baik
+        //   - strip spasi akan kehilangan info (mis. "My Video.mp4"
+        //     jadi "My_Video.mp4" — kelihatan aneh di file manager)
+        // Lihat sanitize_filename_strips_invalid_chars untuk karakter
+        // yang benar-benar di-replace.
         assert_eq!(
             extract_filename_from_url("https://example.com/my%20file.zip"),
-            "my_file.zip"
+            "my file.zip"
         );
     }
 

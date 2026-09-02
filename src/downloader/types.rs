@@ -164,8 +164,11 @@ mod tests {
 
     #[test]
     fn format_size_bytes() {
-        assert_eq!(format_size(512), "512 B");
-        assert_eq!(format_size(1023), "1023 B");
+        // format_size pakai "{:.1} {unit}" untuk konsistensi visual.
+        // Byte di bawah 1KB ditampilkan sebagai "512.0 B" (bukan "512 B")
+        // — dipilih seragam dengan KB/MB/GB yang memang butuh desimal.
+        assert_eq!(format_size(512), "512.0 B");
+        assert_eq!(format_size(1023), "1023.0 B");
     }
 
     #[test]
@@ -245,7 +248,9 @@ mod tests {
         info.eta = 30;
         assert_eq!(info.total_size_fmt(), "2.0 KB");
         assert_eq!(info.downloaded_fmt(), "1.0 KB");
-        assert_eq!(info.speed_fmt(), "512 B/s");
+        // speed_fmt pakai format_size → "512.0 B/s" (bukan "512 B/s")
+        // untuk konsistensi dengan format_size_bytes test di atas.
+        assert_eq!(info.speed_fmt(), "512.0 B/s");
         assert_eq!(info.eta_fmt(), "30s");
     }
 
@@ -255,7 +260,8 @@ mod tests {
             "x".into(), "u".into(), "f".into(), "/tmp".into(),
             Default::default(), None,
         );
-        // speed=0 → "0 B/s" (bukan kosong)
+        // speed=0 → "0 B/s" (special case di speed_fmt, BUKAN format_size
+        // yang return "0.0 B" — lihat types.rs)
         assert_eq!(info.speed_fmt(), "0 B/s");
     }
 
