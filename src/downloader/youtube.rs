@@ -243,6 +243,10 @@ pub(crate) fn quality_args(quality: Option<&str>) -> Vec<String> {
 fn looks_like_format_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 32
+        // id format yt-dlp selalu mengandung digit ("137", "137+140",
+        // "251"); kata bebas ("unknown", "high") bukan id → default teraman,
+        // bukan "--format unknown/best".
+        && s.chars().any(|c| c.is_ascii_digit())
         && s.chars().all(|c| {
             c.is_ascii_alphanumeric()
                 || matches!(
@@ -307,7 +311,7 @@ pub async fn fetch_formats(url: &str, config: &Config) -> Vec<FormatOption> {
     }
     cmd.push(url.to_string());
 
-    let Ok(mut child) = tokio::process::Command::new(&cmd[0])
+    let Ok(child) = tokio::process::Command::new(&cmd[0])
         .args(&cmd[1..])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -903,18 +907,21 @@ mod tests {
 
     #[test]
     fn quality_args_default() {
-        // None atau unknown → best MP4 default
+        // None atau string non-sens → default "best MP4" dengan fallback
+        // berjenjang (/best di akhir → video AV1/VP9-only tetap terunduh).
         let args = quality_args(None);
         assert!(args.contains(&"--format".to_string()));
         assert!(args[1].contains("mp4"));
 
+        // v2.6.1: kata bebas BUKAN id format (tak mengandung digit) → default,
+        // bukan "--format unknown/best" (bug guard D6 yang test ini tangkap).
         let args = quality_args(Some("unknown"));
         assert!(args[1].contains("mp4"));
     }
 
     #[test]
     fn quality_args_non_numeric_p_ignored() {
-        // "abc" tidak berakhir dengan "p" digit → default
+        // "high" tidak berakhir digit+"p" dan tanpa digit → default
         let args = quality_args(Some("high"));
         assert!(args[1].contains("mp4")); // default fallback
     }

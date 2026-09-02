@@ -3,6 +3,17 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.6.1] - 2026-09-03
+
+### Fixed
+- Guard passthrough D6 (`looks_like_format_id`) keliru menerima kata bebas
+  tanpa digit: quality basi ("unknown", "high") terkirim sebagai
+  `--format unknown/best` alih-alih jatuh ke default. Kini wajib minimal satu
+  digit ASCII (id format yt-dlp selalu numerik) — test `quality_args_default`
+  dan `quality_args_non_numeric_p_ignored` (yang benar) kembali hijau.
+- Warning `unused_mut` di `fetch_formats` (Child::wait_with_output mengonsumsi
+  self, binding `mut` tidak diperlukan).
+
 ## [2.6.0] - 2026-09-02
 
 ### Added — D6: dialog kualitas menampilkan format NYATA dari situs
