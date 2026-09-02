@@ -208,23 +208,37 @@ pub fn build_window(
                 PAGE_OR_STREAM_EXTS.iter().any(|e| path_lower.ends_with(e)) || no_ext;
             crate::downloader::youtube::is_youtube_url(&url) || page_or_stream
         };
-        let quality = if wants_quality {
-            youtube_dialog::show_quality_dialog(win_add.upcast_ref(), "Pilih kualitas", &url, "")
-        } else {
-            None
-        };
-
         let eng = engine_add.clone();
         let rt = rt_add.clone();
 
-        glib::spawn_future_local(async move {
-            let _ = rt
-                .spawn(async move {
+        // v2.3.2 (M4): mulai unduhan — dipakai dua jalur (dialog kualitas via
+        // callback, atau langsung tanpa dialog).
+        let start = move |quality: Option<String>| {
+            let eng = eng.clone();
+            let rt = rt.clone();
+            let url = url.clone();
+            glib::spawn_future_local(async move {
+                let _ = rt.spawn(async move {
                     eng.add_download(&url, None, None, true, Default::default(), quality)
                         .await
                 })
                 .await;
-        });
+            });
+        };
+
+        if wants_quality {
+            // Cancel/tutup dialog = batal total (dulu lanjut tanpa kualitas).
+            let url_dialog = url.clone();
+            youtube_dialog::show_quality_dialog(
+                win_add.upcast_ref(),
+                "Pilih kualitas",
+                &url_dialog,
+                "",
+                move |q| start(Some(q)),
+            );
+        } else {
+            start(None);
+        }
     };
 
     let on_add_clone = on_add.clone();
@@ -260,8 +274,9 @@ pub fn build_window(
             return false; // tidak ada URL → jangan klaim drop
         }
 
-        // Tunda ke idle: on_add bisa memunculkan dialog modal (YouTube),
-        // jangan jalankan nested main loop di tengah sinyal drop.
+        // Tunda ke idle: on_add bisa memunculkan dialog modal (YouTube) —
+        // tetap ditunda agar sinyal drop selesai cepat (v2.3.2/M4: nested
+        // main loop sudah dihapus, tapi defer untuk daftar URL multi tetap baik).
         let entry = entry_drop.clone();
         let add = on_add_drop.clone();
         glib::idle_add_local_once(move || {
@@ -376,27 +391,30 @@ pub fn build_window(
         let eng = engine_settings.clone();
         let cur = rt_settings.block_on(async move { eng.get_config().await });
 
-        let Some(cfg) = show_settings_dialog(win_settings.upcast_ref(), &cur) else {
-            return;
-        };
-
-        // Simpan ke disk + apply live; tampilkan feedback (termasuk kalau validasi gagal)
+        // v2.3.2 (M4): dialog kini event-driven — aksi simpan berjalan dari
+        // callback saat user menekan "Simpan" (bukan setelah nested loop).
+        // Simpan ke disk + apply live; tampilkan feedback (termasuk kalau
+        // validasi engine menolak) — semuanya di dalam on_ok.
         let eng2 = engine_settings.clone();
-        let handle = rt_settings.spawn(async move { eng2.update_config(cfg).await });
-        let btn_feedback = settings_btn_h.clone();
-        glib::spawn_future_local(async move {
-            match handle.await {
-                Ok(Ok(())) => btn_feedback.set_label("✓ Tersimpan"),
-                Ok(Err(e)) => {
-                    tracing::warn!("Settings rejected: {}", e);
-                    btn_feedback.set_label("✕ Gagal Simpan");
+        let rt2 = rt_settings.clone();
+        let btn_feedback_src = settings_btn_h.clone();
+        show_settings_dialog(win_settings.upcast_ref(), &cur, move |cfg| {
+            let handle = rt2.spawn(async move { eng2.update_config(cfg).await });
+            let btn_feedback = btn_feedback_src.clone();
+            glib::spawn_future_local(async move {
+                match handle.await {
+                    Ok(Ok(())) => btn_feedback.set_label("✓ Tersimpan"),
+                    Ok(Err(e)) => {
+                        tracing::warn!("Settings rejected: {}", e);
+                        btn_feedback.set_label("✕ Gagal Simpan");
+                    }
+                    Err(_) => btn_feedback.set_label("✕ Gagal"),
                 }
-                Err(_) => btn_feedback.set_label("✕ Gagal"),
-            }
-            let btn = btn_feedback.clone();
-            glib::timeout_add_local(std::time::Duration::from_millis(1500), move || {
-                btn.set_label("Pengaturan");
-                glib::ControlFlow::Break
+                let btn = btn_feedback.clone();
+                glib::timeout_add_local(std::time::Duration::from_millis(1500), move || {
+                    btn.set_label("Pengaturan");
+                    glib::ControlFlow::Break
+                });
             });
         });
     });
@@ -754,8 +772,16 @@ fn settings_row(label: &str, widget: &impl IsA<gtk4::Widget>) -> GtkBox {
 
 /// Dialog settings — perubahan berlaku untuk download baru tanpa restart.
 /// Validasi INLINE (A2) sebelum dialog ditutup; folder bisa dipilih via dialog (C1).
+///
+/// v2.3.2 (M4): `on_ok(Config)` dipanggil dari sinyal `response` saat user
+/// menekan "Simpan" dan validasi inline lolos. Pola lama (return
+/// `Option<Config>` + `while dialog.is_visible() { main_context.iteration }`)
+/// adalah nested main loop — rawan reentrancy dan tidak perlu.
 #[allow(deprecated)] // gtk4::Dialog deprecated sejak 4.10 — pola sama seperti youtube_dialog.rs
-fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
+fn show_settings_dialog<F>(parent: &gtk4::Window, cur: &Config, on_ok: F)
+where
+    F: FnOnce(Config) + 'static,
+{
     let dialog = gtk4::Dialog::with_buttons(
         Some("Pengaturan"),
         Some(parent),
@@ -889,52 +915,40 @@ fn show_settings_dialog(parent: &gtk4::Window, cur: &Config) -> Option<Config> {
     btn_box.append(&save_btn);
     content.append(&btn_box);
 
-    dialog.show();
-
-    // Pola nested main loop yang sama dengan youtube_dialog.rs
-    let main_context = glib::MainContext::default();
-    let response = std::rc::Rc::new(std::cell::RefCell::new(gtk4::ResponseType::Cancel));
-    let responded_flg = std::rc::Rc::new(std::cell::RefCell::new(false));
-
-    let rv = response.clone();
-    let rf = responded_flg.clone();
+    // v2.3.2 (M4): bangun config & panggil on_ok dari sinyal response —
+    // tanpa nested main loop. Cancel/tutup jendela = tidak ada aksi (tidak ada
+    // loop yang bisa menggantung, jadi guard close_request pola lama hilang).
+    let cfg_base = cur.clone();
+    let on_ok = std::rc::Rc::new(std::cell::RefCell::new(Some(on_ok)));
+    let (fe, cs, cc, se, vt, ar) = (
+        folder_entry.clone(),
+        conn_spin.clone(),
+        conc_spin.clone(),
+        speed_entry.clone(),
+        verify_tls_chk.clone(),
+        auto_resume_chk.clone(),
+    );
     dialog.connect_response(move |d, resp| {
-        *rv.borrow_mut() = resp;
-        *rf.borrow_mut() = true;
+        if resp == gtk4::ResponseType::Ok {
+            let mut cfg = cfg_base.clone();
+            let dir = fe.text().trim().to_string();
+            if !dir.is_empty() {
+                cfg.download_dir = dir;
+            }
+            cfg.max_connections = cs.value() as u8;
+            cfg.max_concurrent = cc.value() as u8;
+            // Normalisasi: "2m" → "2M", "10g" → "10G"
+            let speed = se.text().trim().to_uppercase();
+            if !speed.is_empty() {
+                cfg.max_overall_speed = speed;
+            }
+            cfg.verify_tls = vt.is_active();
+            cfg.auto_resume = ar.is_active();
+            if let Some(f) = on_ok.borrow_mut().take() {
+                f(cfg);
+            }
+        }
         d.close();
     });
-
-    // Jangan menggantung kalau dialog ditutup lewat tombol close window
-    let rv2 = response.clone();
-    let rf2 = responded_flg.clone();
-    dialog.connect_close_request(move |_| {
-        if !*rf2.borrow() {
-            *rv2.borrow_mut() = gtk4::ResponseType::Cancel;
-        }
-        glib::Propagation::Proceed
-    });
-
-    while dialog.is_visible() {
-        main_context.iteration(true);
-    }
-
-    if *response.borrow() != gtk4::ResponseType::Ok {
-        return None;
-    }
-
-    let mut cfg = cur.clone();
-    let dir = folder_entry.text().trim().to_string();
-    if !dir.is_empty() {
-        cfg.download_dir = dir;
-    }
-    cfg.max_connections = conn_spin.value() as u8;
-    cfg.max_concurrent = conc_spin.value() as u8;
-    // Normalisasi: "2m" → "2M", "10g" → "10G"
-    let speed = speed_entry.text().trim().to_uppercase();
-    if !speed.is_empty() {
-        cfg.max_overall_speed = speed;
-    }
-    cfg.verify_tls = verify_tls_chk.is_active();
-    cfg.auto_resume = auto_resume_chk.is_active();
-    Some(cfg)
+    dialog.show();
 }

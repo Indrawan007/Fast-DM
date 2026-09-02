@@ -3,6 +3,21 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.3.2] - 2026-09-02
+
+### Changed — M4: dialog GUI jadi event-driven (tanpa nested main loop)
+- `show_settings_dialog` & `show_quality_dialog` tidak lagi memblokir dengan
+  `while dialog.is_visible() { main_context.iteration(true) }` — pola nested
+  main loop berisiko reentrancy (event diproses ganda, dua dialog bisa saling
+  spin). Keduanya kini menerima callback `FnOnce` yang dipanggil dari sinyal
+  `response`: "Simpan"/"Unduh" → aksi, "Batal"/tutup → tidak ada aksi.
+- Guard `connect_close_request` (anti loop menggantung) dihapus — tidak ada
+  loop lagi.
+
+### Fixed
+- Dialog kualitas YouTube: menekan **Batal** dulu tetap memulai download
+  (hasil `None` diperlakukan "tanpa kualitas"); kini batal sungguh membatalkan.
+
 ## [2.3.1] - 2026-09-02
 
 ### Changed — M1: proses anak downloader jadi async penuh (`tokio::process`)

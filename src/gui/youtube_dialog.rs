@@ -60,13 +60,24 @@ pub const QUALITIES: &[QualityOption] = &[
     },
 ];
 
+/// Dialog pemilihan kualitas ala IDM.
+///
+/// v2.3.2 (M4): pola callback event-driven — `on_ok(String)` dipanggil dari
+/// sinyal `response` saat user menekan "Unduh"; "Batal"/tutup = tidak ada
+/// aksi. Pola lama (`-> Option<String>` + `while dialog.is_visible() {
+/// main_context.iteration(true) }`) adalah NESTED main loop: berisiko
+/// reentrancy, dan punya bug nyata — dialog di-Cancel tetap melanjutkan
+/// download (return None dianggap "tanpa kualitas"), kini dibatalkan benar.
 #[allow(dead_code)]
-pub fn show_quality_dialog(
+pub fn show_quality_dialog<F>(
     parent: &Window,
     title: &str,
     uploader: &str,
     duration_str: &str,
-) -> Option<String> {
+    on_ok: F,
+) where
+    F: FnOnce(String) + 'static,
+{
     let dialog = Dialog::with_buttons(
         Some("Pilih Kualitas Video"),
         Some(parent),
@@ -197,42 +208,19 @@ pub fn show_quality_dialog(
     btn_box.append(&dl_btn);
     content.append(&btn_box);
 
-    dialog.show();
-
-    // GTK4 uses async dialogs differently — blocking approach via nested main loop
+    // v2.3.2 (M4): tanpa nested main loop — keputusan user ditangani sinyal
+    // `response`; tidak ada loop yang bisa menggantung, jadi guard
+    // connect_close_request pola lama tidak diperlukan lagi.
     let sel_result = selected.clone();
-    let main_context = glib::MainContext::default();
-    let response_val = std::rc::Rc::new(std::cell::RefCell::new(ResponseType::Cancel));
-    let responded_flg = std::rc::Rc::new(std::cell::RefCell::new(false));
-
-    let rv = response_val.clone();
-    let rf = responded_flg.clone();
+    let on_ok = std::rc::Rc::new(std::cell::RefCell::new(Some(on_ok)));
     dialog.connect_response(move |d, resp| {
-        *rv.borrow_mut() = resp;
-        *rf.borrow_mut() = true;
+        if resp == ResponseType::Ok {
+            let q = sel_result.borrow().clone();
+            if let Some(f) = on_ok.borrow_mut().take() {
+                f(q);
+            }
+        }
         d.close();
     });
-
-    // Kalau user menutup lewat tombol close window (bukan tombol dialog),
-    // GTK4 tidak selalu emit response → loop bisa menggantung. Beri nilai
-    // Cancel kalau belum ada response, supaya dialog pasti selesai.
-    let rv2 = response_val.clone();
-    let rf2 = responded_flg.clone();
-    dialog.connect_close_request(move |_| {
-        if !*rf2.borrow() {
-            *rv2.borrow_mut() = ResponseType::Cancel;
-        }
-        glib::Propagation::Proceed
-    });
-
-    // Block until dialog closes
-    while dialog.is_visible() {
-        main_context.iteration(true);
-    }
-
-    if *response_val.borrow() == ResponseType::Ok {
-        Some(sel_result.borrow().clone())
-    } else {
-        None
-    }
+    dialog.show();
 }
