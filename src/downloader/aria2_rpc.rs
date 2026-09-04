@@ -1,26 +1,34 @@
 //! v2.7.0 (B2.1): klien JSON-RPC aria2 — daemon bersama + magnet/torrent.
+//! v2.9.0 (B2.2): http/https/ftp juga bermigrasi ke daemon (migrasi penuh).
 //!
 //! Mengapa daemon: jalur proses-per-unduh (`aria2.rs`) tidak bisa mengubah
 //! limit setelah proses lahir, dan tidak dapat magnet sama sekali. Melalui
 //! `aria2.addUri`/`changeGlobalOption`:
 //! - limit total di-tegakkan LIVE oleh daemon (satu budget global untuk semua
 //!   unduhan aktif — bukan pembagian statis per-proses ala M3);
-//! - `magnet:?xt=urn:btih:…` akhirnya bisa diunduh;
-//! - pause/resume = forcePause/unpause (state & file parsial utuh di daemon).
+//! - `magnet:?xt=urn:btih:…` bisa diunduh;
+//! - pause/resume = forcePause/unpause (state & file parsial utuh di daemon);
+//! - koneksi/DNS di-reuse antar-unduhan satu daemon.
 //!
 //! Keamanan RPC: bind loopback (`--rpc-listen-all=false`) + secret acak
 //! per-installasi di `~/.config/fast-dm/rpc.secret` (mode 600) — daemon yatim
 //! dari sesi app sebelumnya tetap bisa dipakai (secret sama → probe cocok)
 //! dan tidak bisa dikendalikan proses lain.
 //!
-//! GATEWAY BATCH INI: hanya magnet. http/https langsung tetap lewat
-//! `aria2.rs` (perilaku lama, nol regresi); migrasi penuh = B2.2.
+//! PERILAKU B2.2: http/https/ftp melewati pipeline `aria2.rs` (resolve
+//! filename + tolak HTML/non-2xx + pre-check disk) SEBELUM `addUri`, lalu
+//! cookie per-domain & header (mis. Referer) dikirim sebagai OPSI PER-URI
+//! (`cookie`/`header`) — daemon global tidak menyentuh domain lain. Bila
+//! daemon tak tersedia (mis. `rpc_port` bentrok) atau `addUri` ditolak
+//! SEBELUM unduhan berjalan, `download` return `RpcOutcome::Fallback` dan
+//! pemanggil boleh jatuh ke jalur per-proses lama. Magnet tetap RPC-only.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::sync::{mpsc, Mutex};
 
 use super::aria2;
@@ -32,6 +40,19 @@ static RPC_ID: AtomicU64 = AtomicU64::new(1);
 /// Deteksi awal magnet (trim + case-insensitive). Hanya awalan `magnet:`.
 pub fn is_magnet(url: &str) -> bool {
     url.trim_start().to_ascii_lowercase().starts_with("magnet:")
+}
+
+/// Hasil `download` — keputusan Fallback ada di TANGAN pemanggil
+/// (`spawn_supervised`), karena hanya dia yang tahu jalur per-proses tersedia.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpcOutcome {
+    /// Jalur RPC menangani unduhan sampai terminal — Completed/Error sudah
+    /// dikirim, atau user pause/cancel. Pemanggil tidak perlu aksi lain.
+    Done,
+    /// Daemon tak tersedia ATAU `addUri` ditolak, SEMUA sebelum unduhan
+    /// berjalan — pemanggil boleh fallback ke jalur per-proses (http/ftp
+    /// saja; magnet tidak pernah menghasilkan variant ini).
+    Fallback,
 }
 
 #[derive(Clone)]
@@ -196,6 +217,54 @@ pub(crate) fn daemon_args(port: u16, secret: &str, cfg: &Config) -> Vec<String> 
     v
 }
 
+/// B2.2: opsi per-URI untuk `aria2.addUri` — murni, teruji.
+///
+/// Mirror flag per-proses `aria2.rs` yang valid sebagai "URI option"
+/// (lihat manual aria2). `pause` selalu "true" dulu; pemanggil memanggil
+/// `unpause` setelah `addUri` (pola B2.1 — hindari balapan "sudah jalan"
+/// sebelum tick pertama). `min-split-size`/`piece-length` mengikuti jalur
+/// per-proses; koneksi-per-server memakai nilai GLOBAL daemon (daemon_args).
+pub(crate) fn adduri_options(
+    save_dir: &str,
+    filename: Option<&str>,
+    cookie: Option<&str>,
+    headers: &HashMap<String, String>,
+    cfg: &Config,
+) -> Value {
+    let mut o: Map<String, Value> = Map::new();
+    o.insert("dir".into(), json!(save_dir));
+    o.insert("pause".into(), json!("true"));
+    o.insert("continue".into(), json!("true"));
+    // `out` hanya bermakna untuk http/ftp — magnet: nama dari metadata torrent.
+    if let Some(f) = filename.filter(|f| !f.is_empty()) {
+        o.insert("out".into(), json!(f));
+    }
+    // Cookie per-domain (walk-up dari file extension) — daemon global tidak
+    // boleh memakai cookie domain lain untuk URI ini.
+    if let Some(c) = cookie.map(str::trim).filter(|c| !c.is_empty()) {
+        o.insert("cookie".into(), json!(c));
+    }
+    // Header (mis. Referer) — strip \r\n anti injeksi, sama dengan jalur CLI.
+    let hs: Vec<String> = headers
+        .iter()
+        .map(|(k, v)| (k.replace(['\r', '\n'], ""), v.replace(['\r', '\n'], "")))
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+        .map(|(k, v)| format!("{k}: {v}"))
+        .collect();
+    if !hs.is_empty() {
+        o.insert("header".into(), json!(hs));
+    }
+    o.insert("timeout".into(), json!(cfg.timeout.to_string()));
+    o.insert("connect-timeout".into(), json!("15"));
+    o.insert("max-tries".into(), json!(cfg.retry_count.to_string()));
+    o.insert("retry-wait".into(), json!(cfg.retry_wait.to_string()));
+    o.insert("min-split-size".into(), json!("1M"));
+    o.insert("piece-length".into(), json!("1M"));
+    // Auto-rename (default ON) → JANGAN overwrite: tabrakan jadi "file (1).ext".
+    o.insert("allow-overwrite".into(), json!((!cfg.auto_file_renaming).to_string()));
+    Value::Object(o)
+}
+
 /// Pastikan daemon RPC siap: reuse milik sendiri (probe ber-token sukses),
 /// atau spawn `aria2c` baru. Err = pesan siap-tampil.
 async fn ensure_daemon(cfg: &Config) -> Result<Rpc, String> {
@@ -341,37 +410,76 @@ async fn forget(rpc: &Rpc, gid: &str) {
     let _ = rpc.call("removeDownloadResult", vec![json!(gid)]).await;
 }
 
-/// Jalur unduh magnet/torrent via daemon RPC.
+/// Jalur unduh via daemon RPC — v2.7.0 (B2.1) magnet; v2.9.0 (B2.2)
+/// http/https/ftp juga (dengan pipeline resolve `aria2.rs` sebelum `addUri`).
 pub async fn download(
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
     cfg: &Config,
-) {
+) -> RpcOutcome {
     // Guard ala aria2.rs: user bisa cancel/pause sebelum daemon lahir
     // (pid tak ada — kill_child_pid adalah no-op).
     {
         let i = info.lock().await;
         if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-            return;
+            return RpcOutcome::Done;
+        }
+    }
+
+    let (url, save_dir) = {
+        let i = info.lock().await;
+        (i.url.clone(), i.save_dir.clone())
+    };
+    let is_mag = is_magnet(&url);
+
+    // B2.2: http/https/ftp — resolve filename + tolak halaman HTML +
+    // pre-check disk (identik dengan pipeline per-proses; tanpa ini "file
+    // .php" bisa masuk antrean RPC dan nama Content-Disposition/redirect
+    // terlewat).
+    if !is_mag {
+        if let Err(msg) = aria2::resolve_filename(&info, cfg.verify_tls).await {
+            fail(&info, &tx, msg).await;
+            return RpcOutcome::Done;
+        }
+        let (size, dir) = {
+            let i = info.lock().await;
+            (i.total_size, i.save_dir.clone())
+        };
+        if size > 0 && !aria2::has_space(&dir, size) {
+            fail(
+                &info,
+                &tx,
+                format!("Ruang disk tidak cukup — butuh {}", super::types::format_size(size)),
+            )
+            .await;
+            return RpcOutcome::Done;
+        }
+        // User bisa pause/cancel selama resolve (±10 dtk) — hormati.
+        {
+            let i = info.lock().await;
+            if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
+                return RpcOutcome::Done;
+            }
         }
     }
 
     let rpc = match ensure_daemon(cfg).await {
         Ok(r) => r,
         Err(e) => {
-            fail(&info, &tx, format!("Aria2 RPC: {e}")).await;
-            return;
+            if is_mag {
+                fail(&info, &tx, format!("Aria2 RPC: {e}")).await;
+                return RpcOutcome::Done;
+            }
+            // B2.2: http/ftp — biarkan pemanggil coba jalur per-proses lama.
+            tracing::warn!("B2.2: daemon RPC tak tersedia — fallback per-proses: {e}");
+            return RpcOutcome::Fallback;
         }
-    };
-
-    let (url, save_dir) = {
-        let i = info.lock().await;
-        (i.url.clone(), i.save_dir.clone())
     };
 
     // B2 inti: limit total diterapkan GLOBAL ke daemon dan berubah live
     // setiap unduhan baru start (daemon yang membagi ke semua yang aktif —
-    // tidak perlu pembagian statis per-proses lagi untuk jalur ini).
+    // tidak perlu pembagian statis per-proses lagi; B2.2 menjadikannya
+    // berlaku untuk SEMUA unduhan http/ftp juga).
     let limit = if cfg.max_overall_speed.is_empty() {
         "0".to_string()
     } else {
@@ -384,15 +492,25 @@ pub async fn download(
         )
         .await; // best-effort
 
+    // B2.2: opsi per-URI — cookie per-domain + header (mis. Referer) +
+    // timeout/retry mengikuti Pengaturan. `out` hanya untuk http/ftp.
+    let (out, cookie, headers) = {
+        let i = info.lock().await;
+        (
+            if is_mag {
+                None
+            } else {
+                Some(i.filename.clone())
+            },
+            aria2::cookie_header_for(&url),
+            i.headers.clone(),
+        )
+    };
+    let options = adduri_options(&save_dir, out.as_deref(), cookie.as_deref(), &headers, cfg);
+
     // pause-true dulu: hindari balapan "sudah jalan" sebelum tick pertama.
     let gid = match rpc
-        .call(
-            "addUri",
-            vec![
-                json!([url]),
-                json!({"dir": save_dir, "pause": "true", "continue": "true"}),
-            ],
-        )
+        .call("addUri", vec![json!([url]), json!(options)])
         .await
     {
         Ok(Value::String(g)) => g,
@@ -403,13 +521,20 @@ pub async fn download(
             .unwrap_or_default()
             .to_string(),
         Err(e) => {
-            fail(&info, &tx, format!("addUri: {e}")).await;
-            return;
+            if is_mag {
+                fail(&info, &tx, format!("addUri: {e}")).await;
+                return RpcOutcome::Done;
+            }
+            tracing::warn!("B2.2: addUri ditolak daemon — fallback per-proses: {e}");
+            return RpcOutcome::Fallback;
         }
     };
     if gid.is_empty() {
-        fail(&info, &tx, "addUri: gid kosong dari aria2".into()).await;
-        return;
+        if is_mag {
+            fail(&info, &tx, "addUri: gid kosong dari aria2".into()).await;
+            return RpcOutcome::Done;
+        }
+        return RpcOutcome::Fallback;
     }
     // GID baru tidak pernah pause → unpause mungkin error; abaikan (loop
     // tetap mem-poll dan file terus jalan walau error ini muncul).
@@ -419,7 +544,7 @@ pub async fn download(
         let mut i = info.lock().await;
         if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
             forget(&rpc, &gid).await;
-            return;
+            return RpcOutcome::Done;
         }
         i.status = DownloadStatus::Downloading;
         i.error_msg.clear();
@@ -439,11 +564,11 @@ pub async fn download(
         match user {
             DownloadStatus::Paused => {
                 let _ = rpc.call("forcePause", vec![json!(gid.as_str())]).await;
-                return; // resume → engine start_download → addUri gid lama
+                return RpcOutcome::Done; // resume → engine start_download → addUri gid lama
             }
             DownloadStatus::Cancelled => {
                 forget(&rpc, &gid).await; // parsial dibiarkan (sama dgn proses path)
-                return;
+                return RpcOutcome::Done;
             }
             _ => {}
         }
@@ -460,7 +585,7 @@ pub async fn download(
                 // GID hilang (daemon di-restart/manual) → tak ada yang
                 // bisa di-resume; laporkan apa adanya.
                 fail(&info, &tx, format!("tellStatus: {e}")).await;
-                return;
+                return RpcOutcome::Done;
             }
         };
         let p = patch_from_status(&st);
@@ -489,7 +614,7 @@ pub async fn download(
                 let _ = rpc
                     .call("removeDownloadResult", vec![json!(gid.as_str())])
                     .await;
-                return;
+                return RpcOutcome::Done;
             }
             "error" | "removed" => {
                 let mut i = info.lock().await;
@@ -507,7 +632,7 @@ pub async fn download(
                 let _ = rpc
                     .call("removeDownloadResult", vec![json!(gid.as_str())])
                     .await;
-                return;
+                return RpcOutcome::Done;
             }
             _ => {
                 let mut i = info.lock().await;
@@ -536,9 +661,12 @@ pub async fn download(
                 } else {
                     0.0
                 };
-                i.status_detail =
-                    format!("seeders: {} · peers: {}", p.seeders, p.peers);
-                i.connections = p.peers.min(255) as u8;
+                // seeders/peers hanya bermakna untuk torrent — http/ftp biarkan
+                // kosong (tellStatus tidak punya field koneksi aktif).
+                if is_mag {
+                    i.status_detail = format!("seeders: {} · peers: {}", p.seeders, p.peers);
+                    i.connections = p.peers.min(255) as u8;
+                }
                 let _ = tx.send(DownloadEvent::Progress(i.clone()));
             }
         }
@@ -612,6 +740,73 @@ mod tests {
         assert!(!j2.contains("--max-overall-download-limit"));
         assert!(!j2.contains("--all-proxy"));
         assert!(!j2.contains("--check-certificate"));
+    }
+
+    // ── B2.2: adduri_options ──
+
+    #[test]
+    fn adduri_options_base_flags() {
+        let o = adduri_options("/dl", None, None, &HashMap::new(), &Config::default());
+        assert_eq!(o["dir"], "/dl");
+        assert_eq!(o["pause"], "true");
+        assert_eq!(o["continue"], "true");
+        // Default Config::default(): timeout 30, retry 5, wait 3, renaming ON.
+        assert_eq!(o["timeout"], "30");
+        assert_eq!(o["connect-timeout"], "15");
+        assert_eq!(o["max-tries"], "5");
+        assert_eq!(o["retry-wait"], "3");
+        assert_eq!(o["min-split-size"], "1M");
+        assert_eq!(o["piece-length"], "1M");
+        assert_eq!(o["allow-overwrite"], "false"); // auto_file_renaming default true
+        // Tanpa field opsional (magnet: tidak ada out/cookie/header).
+        assert!(o.get("out").is_none());
+        assert!(o.get("cookie").is_none());
+        assert!(o.get("header").is_none());
+    }
+
+    #[test]
+    fn adduri_options_http_adds_out_cookie_header() {
+        let mut headers = HashMap::new();
+        headers.insert("Referer".to_string(), "https://site.com/page".to_string());
+        let o = adduri_options(
+            "/dl",
+            Some("video.mp4"),
+            Some("a=1; b=2"),
+            &headers,
+            &Config::default(),
+        );
+        assert_eq!(o["out"], "video.mp4");
+        assert_eq!(o["cookie"], "a=1; b=2");
+        assert_eq!(o["header"], json!(["Referer: https://site.com/page"]));
+    }
+
+    #[test]
+    fn adduri_options_strips_crlf_and_skips_empty() {
+        let mut headers = HashMap::new();
+        headers.insert("Evil\r\nX-Inject".to_string(), "y".to_string());
+        headers.insert("Empty".to_string(), String::new());
+        let o = adduri_options("/dl", None, None, &headers, &Config::default());
+        assert_eq!(o["header"], json!(["X-Inject: y"]));
+        // Cookie kosong/whitespace saja tidak dikirim.
+        let o2 = adduri_options("/dl", None, Some("   "), &HashMap::new(), &Config::default());
+        assert!(o2.get("cookie").is_none());
+        // `out` kosong juga tidak dikirim.
+        let o3 = adduri_options("/dl", Some(""), None, &HashMap::new(), &Config::default());
+        assert!(o3.get("out").is_none());
+    }
+
+    #[test]
+    fn adduri_options_follows_user_settings() {
+        let mut cfg = Config::default();
+        cfg.auto_file_renaming = false;
+        cfg.timeout = 60;
+        cfg.retry_count = 9;
+        cfg.retry_wait = 7;
+        let o = adduri_options("/dl", None, None, &HashMap::new(), &cfg);
+        assert_eq!(o["allow-overwrite"], "true");
+        assert_eq!(o["timeout"], "60");
+        assert_eq!(o["max-tries"], "9");
+        assert_eq!(o["retry-wait"], "7");
     }
 
     #[test]

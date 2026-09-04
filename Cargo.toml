@@ -1,6 +1,6 @@
 [package]
 name = "fast-dm"
-version = "2.8.1"
+version = "2.9.0"
 edition = "2021"
 authors = ["FastDM Contributors"]
 description = "High-speed download manager with browser integration"

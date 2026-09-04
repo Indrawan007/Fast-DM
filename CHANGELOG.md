@@ -3,6 +3,36 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.9.0] - 2026-09-04
+
+### Added — B2.2: migrasi HTTP/HTTPS/FTP ke daemon RPC (selesainya jalur B2)
+- Unduhan **file langsung** (http/https/ftp) kini berjalan lewat **daemon
+  `aria2c --enable-rpc`** yang sama dengan magnet (B2.1) — bukan lagi proses
+  `aria2c` per-unduhan:
+  - **Limit total global benar-benar live untuk semua unduhan** — daemon
+    membagi ulang ke semua yang aktif seketika (`changeGlobalOption`),
+    menutup celah M3 sisa: proses lama yang tidak pernah di-recalculate;
+  - **Pause/resume native** (`forcePause`/`unpause`) — parsian & state utuh
+    di daemon; resume lintas sesi via deteksi GID + control file
+    (`--auto-save-interval=20`);
+  - Koneksi/DNS di-reuse antar-unduhan satu daemon (tanpa spawn proses baru);
+  - `status_detail` "seeders/peers" kini hanya untuk torrent (http/ftp
+    tidak menampilkannya lagi).
+- **Nol regresi perilaku**: pipeline `aria2.rs` tetap dijalankan SEBELUM
+  `addUri` — resolve filename (Content-Disposition/redirect/ekstensi),
+  penolakan HTML & non-2xx, dan pre-check ruang disk. Cookie per-domain
+  (walk-up) & header (mis. Referer) dikirim sebagai **opsi per-URI**
+  `cookie`/`header` — daemon global tidak menyentuh domain lain. Opsi
+  `timeout`/`max-tries`/`retry-wait`/`min-split-size`/`piece-length`/
+  `allow-overwrite` mengikuti Pengaturan (builder `adduri_options` murni).
+- **Fallback zero-regresi**: bila daemon tak bisa dipakai (mis. `rpc_port`
+  bentrok) atau `addUri` ditolak SEBELUM unduhan berjalan, http/ftp otomatis
+  jatuh ke jalur per-proses lama — unduhan tetap jalan. Magnet tetap
+  RPC-only (error jelas bila daemon tak tersedia). Fallback resolver
+  universal (yt-dlp gagal → aria2) tidak berubah (per-proses).
+- +4 unit test (`adduri_options`: flag dasar, out/cookie/header, strip CRLF
+  & skip kosong, mengikuti settings).
+
 ## [2.8.1] - 2026-09-03
 
 ### Changed — kebersihan kode + gerbang lint CI (roadmap "CI clippy")

@@ -19,16 +19,23 @@ fast-dm --native  ──1 baris JSON──►  Unix socket (Config::ipc_socket_p
    │  (spawn GUI bila mati)          peer-cred uid, 0600)  ►  DownloadEngine (tokio)
                                         │ spawn_supervised: pilih backend per URL
                                         ▼
-                          aria2c (subprocess, stdout di-parse regex)
+                          aria2c daemon RPC (magnet + http/ftp: limit global live,
+                            pause/resume native; fallback per-proses bila daemon
+                            tak tersedia — B2.1/B2.2)
+                          aria2c per-proses (fallback daemon & resolver universal;
+                            stdout di-parse regex)
                           yt-dlp (subprocess universal resolver, fallback: aria2c)
 ```
 
-- **Bukan** JSON-RPC: setiap unduhan = proses `aria2c`/`yt-dlp` sendiri; kontrol
-  dilakukan via sinyal (SIGTERM ke process group → resume-friendly) + parsing
-  stdout (`--console-log-level`, throttle UI 5 fps).
-- `src/downloader/` = `aria2.rs` (spawn+parse aria2c), `youtube.rs`
-  (argumen yt-dlp + runner), `universal.rs` (resolver non-YouTube + fallback),
-  `mod.rs` (engine, antrian, sesi), `types.rs` (model).
+- **Bukan** JSON-RPC penuh: unduhan http/ftp & magnet = **daemon aria2c
+  `--enable-rpc`** (satu per sesi, `aria2_rpc.rs`); unduhan YouTube & fallback
+  universal = proses `yt-dlp`/`aria2c` sendiri (kontrol via sinyal SIGTERM ke
+  process group → resume-friendly + parsing stdout, throttle UI 5 fps).
+- `src/downloader/` = `aria2.rs` (jalur per-proses + pipeline resolve filename;
+  fallback saat daemon RPC tak tersedia), `aria2_rpc.rs` (klien daemon RPC +
+  `adduri_options`), `youtube.rs` (argumen yt-dlp + runner), `universal.rs`
+  (resolver non-YouTube + fallback), `mod.rs` (engine, antrian, sesi),
+  `types.rs` (model).
 - `src/ipc/mod.rs` = server socket (download/ping/pause/resume/cancel/list/register).
 - `src/native_host/` = jembatan stdio ⇄ socket + setup manifest NMH multi-browser.
 - `src/gui/` = GTK4 window/dialog; state GUI disinkronkan via `mpsc::Unbounded<DownloadEvent>`.
