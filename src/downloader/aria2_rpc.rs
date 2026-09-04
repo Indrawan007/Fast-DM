@@ -642,7 +642,7 @@ pub async fn download(
     // simpan. Resume = unpause GID yang SAMA; addUri baru akan menduplikat
     // task (GID paused lama macet di daemon + potensi dua penulis file).
     let mut gid: Option<String> = info.lock().await.rpc_gid.clone();
-     // Origin menjadi Reused hanya bila GID lama BENAR-BENAR berhasil
+    // Origin menjadi Reused hanya bila GID lama BENAR-BENAR berhasil
     // di-unpause. Bila GID stale lalu addUri membuat pengganti, origin tetap
     // Added sehingga task baru (pause=true) wajib di-unpause.
     let mut gid_origin = GidOrigin::Added;
@@ -664,7 +664,6 @@ pub async fn download(
             // pause-true dulu: hindari balapan "sudah jalan" sebelum tick
             // pertama; unpause menyusul setelah addUri.
             match rpc.call("addUri", vec![json!([url]), json!(options)]).await {
-
                 Ok(Value::String(g)) => g,
                 Ok(other) => other
                     .as_array()
@@ -772,7 +771,6 @@ pub async fn download(
 
         let st = match rpc
             .call("tellStatus", vec![json!(gid.as_str()), json!(STATUS_KEYS)])
-
             .await
         {
             Ok(v) => v,
@@ -788,7 +786,6 @@ pub async fn download(
             "complete" => {
                 let mut i = info.lock().await;
                 if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-
                     continue; // aksi user diproses tick berikutnya
                 }
                 i.rpc_gid = None; // hasil dihapus dari daftar daemon
@@ -837,7 +834,6 @@ pub async fn download(
             _ => {
                 let mut i = info.lock().await;
                 if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-
                     continue;
                 }
                 if !matches!(i.status, DownloadStatus::Downloading) {
@@ -892,7 +888,6 @@ mod tests {
         assert!(GidOrigin::Added.needs_initial_unpause());
         assert!(!GidOrigin::Reused.needs_initial_unpause());
     }
-
 
     #[test]
     fn build_request_prefixes_token() {

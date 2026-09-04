@@ -3,6 +3,19 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Crate kembali dapat dikompilasi** — commit sebelumnya kehilangan dua baris
+  di accept loop IPC (`tokio::spawn` + `stream.into_split()`), menyisakan blok
+  `close_request` yang terduplikasi dan terpotong di `gui/window.rs`, serta
+  satu karakter `/` nyasar di test `youtube.rs`. Ketiganya membuat
+  `cargo build`/`cargo test` gagal parse.
+- `cargo fmt --all -- --check` (gate CI) kembali hijau: indentasi dan baris
+  kosong nyasar di `config.rs`, `downloader/mod.rs`, `aria2_rpc.rs`,
+  `gui/window.rs` dirapikan. Tidak ada perubahan perilaku.
+
 ## [2.9.2] - 2026-09-04
 
 ### Fixed
