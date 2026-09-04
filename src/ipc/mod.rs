@@ -124,6 +124,8 @@ pub async fn start_server(engine: Arc<DownloadEngine>) -> Result<(), Box<dyn std
         }
 
         let engine = engine.clone();
+        tokio::spawn(async move {
+            let (reader, mut writer) = stream.into_split();
 
             let line = match read_request_line(reader, MAX_REQUEST_LINE).await {
                 Ok(RequestLine::Value(line)) => line,

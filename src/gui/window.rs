@@ -937,7 +937,6 @@ pub fn build_window(
         });
     }
 
-
     // ── A1: tutup jendela TIDAK diam-diam mematikan download ──
     // Jika masih ada unduhan aktif/antri, minta konfirmasi dulu.
     let engine_close = engine.clone();
@@ -967,39 +966,6 @@ pub fn build_window(
                         | DownloadStatus::Queued
                 )
             })
-            .count();
-
-
-        });
-    }
-
-    // Jaring pengaman untuk exit selain tombol close (mis. session logout).
-    // `DownloadEngine::shutdown` idempotent, jadi aman bila close handler di
-    // bawah sudah memanggilnya lebih dulu.
-    {
-        let engine_shutdown = engine.clone();
-        let rt_shutdown = rt.clone();
-        app.connect_shutdown(move |_| {
-            let eng = engine_shutdown.clone();
-            rt_shutdown.block_on(async move { eng.shutdown().await });
-        });
-    }
-
-    // ── A1: tutup jendela TIDAK diam-diam mematikan download ──
-    // Jika masih ada unduhan aktif/antri, minta konfirmasi dulu.
-    let engine_close = engine.clone();
-    let close_confirmed = Rc::new(Cell::new(false));
-    let close_confirmed_cb = close_confirmed.clone();
-    window.connect_close_request(move |_| {
-        // Putaran kedua: user sudah konfirmasi → hentikan subprocess DAN
-        // daemon RPC, tulis snapshot final, lalu tutup. Engine memakai SIGTERM
-        // / forcePause agar file parsial tetap resumable.
-        if close_confirmed_cb.get() {
-            let eng = engine_close.clone();
-            rt_close.block_on(async move { eng.shutdown().await });
-            return glib::Propagation::Proceed;
-        }
-
             .count();
 
         if active == 0 {

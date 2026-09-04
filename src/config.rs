@@ -598,7 +598,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-         let m = std::fs::metadata(dir.join("rpc.secret"))
+            let m = std::fs::metadata(dir.join("rpc.secret"))
                 .unwrap()
                 .permissions()
                 .mode();

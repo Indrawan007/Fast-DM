@@ -62,7 +62,7 @@ impl DownloadEngine {
 
         let dirty = Arc::new(AtomicBool::new(false));
 
-                let session_io = Arc::new(Mutex::new(()));
+        let session_io = Arc::new(Mutex::new(()));
         let shutting_down = Arc::new(AtomicBool::new(false));
 
         // Flusher: tulis session.json maks 1x/2 detik, hanya jika ada perubahan.
@@ -986,7 +986,6 @@ async fn flush_session(
         // karena disk sementara penuh/read-only.
         dirty.store(true, Ordering::SeqCst);
         tracing::warn!("Gagal menulis session.json: {}", e);
-
     }
 }
 
@@ -1114,7 +1113,6 @@ mod tests {
             "magnet:?xt=urn:btih:aaaabbbbccccdddd&dn=ubuntu"
         ));
         assert!(is_supported_scheme("  MAGNET:?xt=urn:btih:deadbeef")); // trim + case-insensitive
-
     }
 
     #[test]
