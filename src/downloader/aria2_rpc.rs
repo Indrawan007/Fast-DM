@@ -786,7 +786,10 @@ mod tests {
         headers.insert("Evil\r\nX-Inject".to_string(), "y".to_string());
         headers.insert("Empty".to_string(), String::new());
         let o = adduri_options("/dl", None, None, &headers, &Config::default());
-        assert_eq!(o["header"], json!(["X-Inject: y"]));
+        // CRLF di-strip per karakter — fragmen menyambung (perilaku sama dengan
+        // jalur CLI): yang penting tidak ada CR/LF tersisa, sehingga header
+        // baru tidak bisa disisipkan lewat nama header palsu.
+        assert_eq!(o["header"], json!(["EvilX-Inject: y"]));
         // Cookie kosong/whitespace saja tidak dikirim.
         let o2 = adduri_options("/dl", None, Some("   "), &HashMap::new(), &Config::default());
         assert!(o2.get("cookie").is_none());
