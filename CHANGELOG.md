@@ -3,6 +3,38 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.9.2] - 2026-09-04
+
+### Fixed
+
+- **Resume RPC setelah daemon/GID hilang tidak lagi macet** — hasil `addUri`
+  pengganti sekarang selalu di-`unpause`; kegagalan unpause membersihkan task
+  sebelum fallback, sehingga UI tidak terjebak pada status Mengunduh dengan
+  task daemon yang sebenarnya masih paused.
+- **Cancel/Hapus item RPC yang sudah dijeda benar-benar membersihkan daemon** —
+  engine kini memanggil `forceRemove` langsung karena supervisor polling item
+  paused sudah berhenti dan tidak dapat melakukan cleanup lagi.
+- **“Hentikan & Tutup” mencakup daemon RPC** — shutdown mem-pause task,
+  mematikan/reap daemon aria2, menghentikan process group subprocess, dan
+  menulis snapshot session final secara terserialisasi. Status aktif tetap
+  restorable untuk auto-resume, sedangkan PID/GID daemon mati tidak disimpan.
+- **Batas request IPC 1 MB kini diterapkan saat membaca**, bukan setelah
+  `read_line` mengalokasikan seluruh payload; peer tidak dapat menumbuhkan
+  buffer tanpa batas sebelum validasi.
+- **GitHub Actions kembali valid** — nama step yang mengandung titik dua
+  sekarang dikutip dan step Clippy duplikat sebelum instalasi toolchain
+  dihapus. Komentar jumlah test yang sudah basi juga dinetralkan.
+- Sinkronisasi dokumentasi: README tidak lagi mengklaim memakai crate
+  `tempfile`; path runtime, status CI, dan klaim jumlah test di
+  `CODE-REVIEW.md` kini sesuai implementasi aktif (bagian historis tetap
+  ditandai jelas).
+
+### Changed
+
+- `session.json` kini ditulis dengan permission `0600`; kegagalan flush
+  periodik dicoba ulang pada tick berikutnya.
+- Versi package, lockfile, dan browser extension disinkronkan ke `2.9.2`.
+
 ## [2.9.1] - 2026-09-04
 
 ### Fixed — perbaikan pasca-migrasi daemon RPC (B2)

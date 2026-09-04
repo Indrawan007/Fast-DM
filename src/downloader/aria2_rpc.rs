@@ -55,6 +55,20 @@ pub enum RpcOutcome {
     Fallback,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GidOrigin {
+    /// GID lama sudah berhasil di-unpause.
+    Reused,
+    /// GID baru dari addUri lahir dengan opsi pause=true.
+    Added,
+}
+
+impl GidOrigin {
+    fn needs_initial_unpause(self) -> bool {
+        self == Self::Added
+    }
+}
+
 #[derive(Clone)]
 struct Rpc {
     port: u16,
@@ -98,8 +112,8 @@ impl Rpc {
             .text()
             .await
             .map_err(|e| format!("aria2 RPC read: {e}"))?;
-        let v: Value =
-            serde_json::from_str(&txt).map_err(|e| format!("aria2 RPC JSON: {e}"))?;
+        let v: Value = serde_json::from_str(&txt).map_err(|e| format!("aria2 RPC JSON: {e}"))?;
+
         parse_response(v)
     }
 
@@ -261,7 +275,10 @@ pub(crate) fn adduri_options(
     o.insert("min-split-size".into(), json!("1M"));
     o.insert("piece-length".into(), json!("1M"));
     // Auto-rename (default ON) → JANGAN overwrite: tabrakan jadi "file (1).ext".
-    o.insert("allow-overwrite".into(), json!((!cfg.auto_file_renaming).to_string()));
+    o.insert(
+        "allow-overwrite".into(),
+        json!((!cfg.auto_file_renaming).to_string()),
+    );
     Value::Object(o)
 }
 
@@ -405,9 +422,117 @@ async fn fail(
     let _ = tx.send(DownloadEvent::Error(i.clone()));
 }
 
-async fn forget(rpc: &Rpc, gid: &str) {
-    let _ = rpc.call("forceRemove", vec![json!(gid)]).await;
-    let _ = rpc.call("removeDownloadResult", vec![json!(gid)]).await;
+async fn forget(rpc: &Rpc, gid: &str) -> Result<(), String> {
+    let remove = rpc.call("forceRemove", vec![json!(gid)]).await;
+    let cleanup = rpc.call("removeDownloadResult", vec![json!(gid)]).await;
+
+    // Idempotent terhadap race dengan supervisor lain: bila salah satu
+    // operasi berhasil, task tidak lagi dapat berjalan/meninggalkan result.
+    if remove.is_ok() || cleanup.is_ok() {
+        Ok(())
+    } else {
+        Err(format!(
+            "forceRemove: {}; removeDownloadResult: {}",
+            remove.unwrap_err(),
+            cleanup.unwrap_err()
+        ))
+    }
+}
+
+/// Hapus task RPC berdasarkan GID tanpa men-spawn daemon baru. Ini penting
+/// untuk Cancel/Hapus pada item yang sudah Paused: supervisor polling-nya
+/// sudah selesai, jadi tidak ada task lain yang akan memanggil forceRemove.
+pub(crate) async fn remove_gid(gid: &str, cfg: &Config) -> Result<(), String> {
+    let rpc = Rpc::new(cfg.rpc_port, Config::rpc_secret());
+    // Langsung lakukan operasi dengan timeout Rpc::call. Probe terpisah dapat
+    // memberi false-negative ketika daemon sedang sibuk dan justru melewatkan
+    // satu-satunya kesempatan membersihkan task paused.
+    forget(&rpc, gid).await
+}
+
+/// Pause seluruh GID lalu matikan daemon milik Fast-DM secara graceful.
+/// Daemon yang di-spawn proses ini juga di-reap; bila tidak merespons dalam
+/// timeout terbatas, process group diakhiri agar tidak menjadi orphan.
+pub(crate) async fn shutdown_daemon(gids: &[String], cfg: &Config) -> Result<(), String> {
+    let rpc = Rpc::new(cfg.rpc_port, Config::rpc_secret());
+
+    // Satu RPC menghentikan seluruh task daemon, termasuk task paused yatim
+    // yang tidak lagi punya DownloadInfo. Ini juga menghindari timeout serial
+    // hingga ratusan GID saat session penuh.
+    let pause_all =
+        tokio::time::timeout(Duration::from_secs(2), rpc.call("forcePauseAll", vec![])).await;
+    // Error method tidak selalu berarti daemon mati (misalnya respons JSON-RPC
+    // ditolak setelah request mencapai daemon). Probe hanya pada jalur error;
+    // jangan lewatkan shutdown daemon yang sebenarnya masih terautentikasi.
+    let reachable = matches!(pause_all, Ok(Ok(_))) || rpc.probe().await.is_ok();
+    let mut shutdown_error = None;
+
+    if reachable {
+        let graceful =
+            tokio::time::timeout(Duration::from_secs(2), rpc.call("shutdown", vec![])).await;
+        if !matches!(graceful, Ok(Ok(_))) {
+            // `shutdown` normal seharusnya cukup setelah forcePauseAll. Gunakan
+            // forceShutdown sebagai jaring pengaman bila ada task daemon lain.
+            let force =
+                tokio::time::timeout(Duration::from_secs(2), rpc.call("forceShutdown", vec![]))
+                    .await;
+            if !matches!(force, Ok(Ok(_))) {
+                shutdown_error = Some(format!(
+                    "shutdown gagal untuk {} GID yang dikenal",
+                    gids.len()
+                ));
+            }
+        }
+    }
+
+    // Child hanya Some bila daemon dibuat proses ini. Daemon yatim yang
+    // berhasil di-reuse tidak punya Child handle, tetapi sudah menerima RPC
+    // shutdown di atas.
+    let child = { DAEMON.lock().await.take() };
+    if let Some(mut child) = child {
+        let pid = child.id();
+        if !matches!(
+            tokio::time::timeout(Duration::from_secs(3), child.wait()).await,
+            Ok(Ok(_))
+        ) {
+            if let Some(pid) = pid {
+                super::kill_child_group_hard(pid);
+            }
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        return Ok(());
+    }
+
+    if !reachable {
+        // Tanpa GID tidak ada pekerjaan RPC yang perlu dipertahankan. Jika ada
+        // GID, jangan menganggapnya stale hanya karena probe dua detik gagal:
+        // simpan GID agar start berikutnya masih bisa mencoba unpause.
+        return if gids.is_empty() {
+            Ok(())
+        } else {
+            Err("daemon tidak merespons forcePauseAll".into())
+        };
+    }
+
+    // Untuk daemon yatim/reuse kita tidak memiliki Child handle. Konfirmasi
+    // port terautentikasi benar-benar berhenti sebelum caller menghapus GID
+    // dari snapshot; respons "OK" dapat tiba sebelum proses selesai exit.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut consecutive_misses = 0;
+    while tokio::time::Instant::now() < deadline {
+        if rpc.probe().await.is_err() {
+            consecutive_misses += 1;
+            if consecutive_misses >= 2 {
+                return Ok(());
+            }
+        } else {
+            consecutive_misses = 0;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    Err(shutdown_error.unwrap_or_else(|| "daemon masih hidup setelah shutdown".into()))
 }
 
 /// Jalur unduh via daemon RPC — v2.7.0 (B2.1) magnet; v2.9.0 (B2.2)
@@ -449,7 +574,10 @@ pub async fn download(
             fail(
                 &info,
                 &tx,
-                format!("Ruang disk tidak cukup — butuh {}", super::types::format_size(size)),
+                format!(
+                    "Ruang disk tidak cukup — butuh {}",
+                    super::types::format_size(size)
+                ),
             )
             .await;
             return RpcOutcome::Done;
@@ -514,7 +642,10 @@ pub async fn download(
     // simpan. Resume = unpause GID yang SAMA; addUri baru akan menduplikat
     // task (GID paused lama macet di daemon + potensi dua penulis file).
     let mut gid: Option<String> = info.lock().await.rpc_gid.clone();
-    let reused_gid = gid.is_some();
+     // Origin menjadi Reused hanya bila GID lama BENAR-BENAR berhasil
+    // di-unpause. Bila GID stale lalu addUri membuat pengganti, origin tetap
+    // Added sehingga task baru (pause=true) wajib di-unpause.
+    let mut gid_origin = GidOrigin::Added;
     if let Some(ref g) = gid {
         // Task yang dijeda pasti state paused → unpause cukup.
         if let Err(e) = rpc.call("unpause", vec![json!(g.as_str())]).await {
@@ -523,6 +654,8 @@ pub async fn download(
             tracing::warn!("RPC: GID {g} tak bisa di-unpause ({e}) — addUri ulang");
             info.lock().await.rpc_gid = None;
             gid = None;
+        } else {
+            gid_origin = GidOrigin::Reused;
         }
     }
     let gid = match gid {
@@ -530,10 +663,8 @@ pub async fn download(
         None => {
             // pause-true dulu: hindari balapan "sudah jalan" sebelum tick
             // pertama; unpause menyusul setelah addUri.
-            match rpc
-                .call("addUri", vec![json!([url]), json!(options)])
-                .await
-            {
+            match rpc.call("addUri", vec![json!([url]), json!(options)]).await {
+
                 Ok(Value::String(g)) => g,
                 Ok(other) => other
                     .as_array()
@@ -559,31 +690,54 @@ pub async fn download(
         }
         return RpcOutcome::Fallback;
     }
-    if !reused_gid {
-        // GID baru lahir dalam keadaan paused (opsi `pause:true`) →
-        // unpause; error diabaikan (loop tetap mem-poll dan file jalan).
-        let _ = rpc.call("unpause", vec![json!(gid.as_str())]).await;
+    if gid_origin.needs_initial_unpause() {
+        // GID baru lahir dalam keadaan paused (opsi `pause:true`) → wajib
+        // berhasil di-unpause. Kalau gagal, bersihkan task sebelum fallback;
+        // membiarkannya akan membuat UI "Downloading" pada task paused abadi.
+        if let Err(e) = rpc.call("unpause", vec![json!(gid.as_str())]).await {
+            let _ = forget(&rpc, &gid).await;
+            info.lock().await.rpc_gid = None;
+            if is_mag {
+                fail(&info, &tx, format!("unpause: {e}")).await;
+                return RpcOutcome::Done;
+            }
+            tracing::warn!("B2.2: unpause GID baru gagal — fallback per-proses: {e}");
+            return RpcOutcome::Fallback;
+        }
     }
 
-    {
+    // Putuskan state secara atomik di bawah Mutex, tetapi jangan pegang
+    // Mutex DownloadInfo selama network await: tombol pause/cancel harus
+    // tetap responsif ketika RPC sedang lambat.
+    let aborted = {
         let mut i = info.lock().await;
         if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-            // Semboyan pause/cancel yang datang saat kita menyiapkan daemon
-            // (unpause sudah terlanjur) — forcePause lagi supaya state daemon
-            // konsisten dengan keputusan user; GID tetap tersimpan untuk
-            // resume native berikutnya.
             if i.status == DownloadStatus::Paused {
-                let _ = rpc.call("forcePause", vec![json!(gid.as_str())]).await;
-            } else {
-                forget(&rpc, &gid).await;
-                i.rpc_gid = None;
+                // Publish GID sebelum network await agar Cancel/Hapus yang
+                // menyusul dapat forceRemove task ini sendiri.
+                i.rpc_gid = Some(gid.clone());
             }
-            return RpcOutcome::Done;
+            Some(i.status)
+        } else {
+            i.rpc_gid = Some(gid.clone());
+            i.status = DownloadStatus::Downloading;
+            i.error_msg.clear();
+            let _ = tx.send(DownloadEvent::Progress(i.clone()));
+            None
         }
-        i.rpc_gid = Some(gid.clone());
-        i.status = DownloadStatus::Downloading;
-        i.error_msg.clear();
-        let _ = tx.send(DownloadEvent::Progress(i.clone()));
+    };
+    if let Some(user_status) = aborted {
+        // Semboyan pause/cancel yang datang saat kita menyiapkan daemon
+        // (unpause sudah terlanjur) — forcePause lagi supaya state daemon
+        // konsisten dengan keputusan user; GID tetap tersimpan untuk
+        // resume native berikutnya.
+        if user_status == DownloadStatus::Paused {
+            let _ = rpc.call("forcePause", vec![json!(gid.as_str())]).await;
+        } else {
+            let _ = forget(&rpc, &gid).await;
+            info.lock().await.rpc_gid = None;
+        }
+        return RpcOutcome::Done;
     }
 
     let mut tick = tokio::time::interval(Duration::from_millis(600));
@@ -608,7 +762,8 @@ pub async fn download(
             DownloadStatus::Cancelled => {
                 // Task dilepas dari daemon (parsial dibiarkan, sama seperti
                 // jalur proses) — GID tak valid lagi untuk resume.
-                forget(&rpc, &gid).await;
+                let _ = forget(&rpc, &gid).await;
+
                 info.lock().await.rpc_gid = None;
                 return RpcOutcome::Done;
             }
@@ -616,10 +771,8 @@ pub async fn download(
         }
 
         let st = match rpc
-            .call(
-                "tellStatus",
-                vec![json!(gid.as_str()), json!(STATUS_KEYS)],
-            )
+            .call("tellStatus", vec![json!(gid.as_str()), json!(STATUS_KEYS)])
+
             .await
         {
             Ok(v) => v,
@@ -634,8 +787,8 @@ pub async fn download(
         match p.status.as_str() {
             "complete" => {
                 let mut i = info.lock().await;
-                if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused)
-                {
+                if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
+
                     continue; // aksi user diproses tick berikutnya
                 }
                 i.rpc_gid = None; // hasil dihapus dari daftar daemon
@@ -661,17 +814,17 @@ pub async fn download(
             }
             "error" | "removed" => {
                 let mut i = info.lock().await;
-                if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused)
-                {
+                if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
                     continue;
                 }
-            // "error" yang disebabkan forceRemove hasil cancel user
+                // "error" yang disebabkan forceRemove hasil cancel user
                 // sudah dibersihkan di cabang Cancelled di atas; di sini
                 // task benar-benar mati → GID tak bisa di-resume.
                 i.rpc_gid = None;
                 i.status = DownloadStatus::Error;
-                i.error_msg =
-                    p.error.unwrap_or_else(|| "aria2: download berhenti (error)".into());
+                i.error_msg = p
+                    .error
+                    .unwrap_or_else(|| "aria2: download berhenti (error)".into());
                 i.speed = 0;
                 i.status_detail.clear();
                 let _ = tx.send(DownloadEvent::Error(i.clone()));
@@ -683,8 +836,8 @@ pub async fn download(
             }
             _ => {
                 let mut i = info.lock().await;
-                if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused)
-                {
+                if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
+
                     continue;
                 }
                 if !matches!(i.status, DownloadStatus::Downloading) {
@@ -733,6 +886,15 @@ mod tests {
     }
 
     #[test]
+    fn only_added_gid_needs_initial_unpause() {
+        // Regresi v2.9.2: GID saved yang gagal dipakai lalu diganti addUri
+        // harus diperlakukan Added, bukan Reused hanya karena awalnya Some.
+        assert!(GidOrigin::Added.needs_initial_unpause());
+        assert!(!GidOrigin::Reused.needs_initial_unpause());
+    }
+
+
+    #[test]
     fn build_request_prefixes_token() {
         let mut p = vec![json!(["magnet:?x"])];
         let r = build_request("addUri", &mut p, "s3cr3t");
@@ -759,8 +921,8 @@ mod tests {
     fn parse_response_shapes() {
         assert_eq!(parse_response(json!({"result": 5})).unwrap(), json!(5));
         assert_eq!(parse_response(json!({})).unwrap(), Value::Null);
-        let e =
-            parse_response(json!({"error": {"code": 1, "message": "Unauthorized"}}));
+        let e = parse_response(json!({"error": {"code": 1, "message": "Unauthorized"}}));
+
         assert!(e.unwrap_err().contains("Unauthorized"));
     }
 
@@ -805,7 +967,6 @@ mod tests {
         assert_eq!(o["min-split-size"], "1M");
         assert_eq!(o["piece-length"], "1M");
         assert_eq!(o["allow-overwrite"], "false"); // auto_file_renaming default true
-        // Tanpa field opsional (magnet: tidak ada out/cookie/header).
         assert!(o.get("out").is_none());
         assert!(o.get("cookie").is_none());
         assert!(o.get("header").is_none());
@@ -838,7 +999,13 @@ mod tests {
         // baru tidak bisa disisipkan lewat nama header palsu.
         assert_eq!(o["header"], json!(["EvilX-Inject: y"]));
         // Cookie kosong/whitespace saja tidak dikirim.
-        let o2 = adduri_options("/dl", None, Some("   "), &HashMap::new(), &Config::default());
+        let o2 = adduri_options(
+            "/dl",
+            None,
+            Some("   "),
+            &HashMap::new(),
+            &Config::default(),
+        );
         assert!(o2.get("cookie").is_none());
         // `out` kosong juga tidak dikirim.
         let o3 = adduri_options("/dl", Some(""), None, &HashMap::new(), &Config::default());
@@ -886,8 +1053,8 @@ mod tests {
         assert_eq!(p.first_file.as_deref(), Some("ubuntu.iso"));
         assert!(p.error.is_none());
 
-        let err =
-            json!({"status": "error", "errorCode": "5", "errorMessage": "Broken pipe"});
+        let err = json!({"status": "error", "errorCode": "5", "errorMessage": "Broken pipe"});
+
         let p = patch_from_status(&err);
         assert!(p.error.unwrap().contains("Broken pipe"));
     }

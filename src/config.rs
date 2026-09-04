@@ -115,14 +115,13 @@ impl Config {
             }
         }
         let fresh = uuid::Uuid::new_v4().simple().to_string()[..16].to_string();
-        if fs::create_dir_all(dir).is_ok()
-            && fs::write(&p, &fresh).is_ok() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
-                }
+        if fs::create_dir_all(dir).is_ok() && fs::write(&p, &fresh).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
             }
+        }
         fresh
     }
 
@@ -147,7 +146,8 @@ impl Config {
         let f = dir.join("fast-dm.desktop");
         if enable {
             fs::create_dir_all(dir).map_err(|e| format!("mkdir autostart: {e}"))?;
-            fs::write(&f, Self::desktop_entry_for(exe)).map_err(|e| format!("tulis .desktop: {e}"))?;
+            fs::write(&f, Self::desktop_entry_for(exe))
+                .map_err(|e| format!("tulis .desktop: {e}"))?;
             Ok(())
         } else {
             match fs::remove_file(&f) {
@@ -598,7 +598,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let m = std::fs::metadata(dir.join("rpc.secret")).unwrap().permissions().mode();
+         let m = std::fs::metadata(dir.join("rpc.secret"))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(m & 0o777, 0o600, "secret tidak boleh terbaca group/other");
         }
         let _ = std::fs::remove_dir_all(&dir);

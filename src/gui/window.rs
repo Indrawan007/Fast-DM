@@ -925,6 +925,19 @@ pub fn build_window(
         });
     }
 
+    // Jaring pengaman untuk exit selain tombol close (mis. session logout).
+    // `DownloadEngine::shutdown` idempotent, jadi aman bila close handler di
+    // bawah sudah memanggilnya lebih dulu.
+    {
+        let engine_shutdown = engine.clone();
+        let rt_shutdown = rt.clone();
+        app.connect_shutdown(move |_| {
+            let eng = engine_shutdown.clone();
+            rt_shutdown.block_on(async move { eng.shutdown().await });
+        });
+    }
+
+
     // ── A1: tutup jendela TIDAK diam-diam mematikan download ──
     // Jika masih ada unduhan aktif/antri, minta konfirmasi dulu.
     let engine_close = engine.clone();
@@ -933,16 +946,12 @@ pub fn build_window(
     let close_confirmed = Rc::new(Cell::new(false));
     let close_confirmed_cb = close_confirmed.clone();
     window.connect_close_request(move |_| {
-        // Putaran kedua: user sudah konfirmasi → hentikan proses (SIGTERM agar
-        // aria2 sempat menulis .aria2 control file untuk resume) lalu tutup.
+        // Putaran kedua: user sudah konfirmasi → hentikan subprocess DAN
+        // daemon RPC, tulis snapshot final, lalu tutup. Engine memakai SIGTERM
+        // / forcePause agar file parsial tetap resumable.
         if close_confirmed_cb.get() {
             let eng = engine_close.clone();
-            let all = rt_close.block_on(async move { eng.get_all_downloads().await });
-            for d in all {
-                // v2.3.0 (K4): lewat kill_child_pid → SIGTERM ke process group,
-                // anak ffmpeg milik yt-dlp ikut berhenti, bukan cuma parent-nya.
-                crate::downloader::kill_child_pid(d.pid);
-            }
+            rt_close.block_on(async move { eng.shutdown().await });
             return glib::Propagation::Proceed;
         }
 
@@ -960,7 +969,44 @@ pub fn build_window(
             })
             .count();
 
+
+        });
+    }
+
+    // Jaring pengaman untuk exit selain tombol close (mis. session logout).
+    // `DownloadEngine::shutdown` idempotent, jadi aman bila close handler di
+    // bawah sudah memanggilnya lebih dulu.
+    {
+        let engine_shutdown = engine.clone();
+        let rt_shutdown = rt.clone();
+        app.connect_shutdown(move |_| {
+            let eng = engine_shutdown.clone();
+            rt_shutdown.block_on(async move { eng.shutdown().await });
+        });
+    }
+
+    // ── A1: tutup jendela TIDAK diam-diam mematikan download ──
+    // Jika masih ada unduhan aktif/antri, minta konfirmasi dulu.
+    let engine_close = engine.clone();
+    let close_confirmed = Rc::new(Cell::new(false));
+    let close_confirmed_cb = close_confirmed.clone();
+    window.connect_close_request(move |_| {
+        // Putaran kedua: user sudah konfirmasi → hentikan subprocess DAN
+        // daemon RPC, tulis snapshot final, lalu tutup. Engine memakai SIGTERM
+        // / forcePause agar file parsial tetap resumable.
+        if close_confirmed_cb.get() {
+            let eng = engine_close.clone();
+            rt_close.block_on(async move { eng.shutdown().await });
+            return glib::Propagation::Proceed;
+        }
+
+            .count();
+
         if active == 0 {
+            // Termasuk membersihkan daemon idle / task RPC paused yang tidak
+            // dihitung sebagai aktif oleh dialog konfirmasi.
+            let eng = engine_close.clone();
+            rt_close.block_on(async move { eng.shutdown().await });
             return glib::Propagation::Proceed;
         }
 
@@ -1389,4 +1435,3 @@ mod tests {
         assert!(wants_quality_dialog("https://example.com/page.php"));
     }
 }
-

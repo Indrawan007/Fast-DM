@@ -3,7 +3,7 @@ use crate::downloader::DownloadEngine;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
 #[derive(Deserialize)]
@@ -32,6 +32,34 @@ struct IpcResponse {
     message: Option<String>,
 }
 
+const MAX_REQUEST_LINE: usize = 1024 * 1024;
+
+#[derive(Debug, PartialEq, Eq)]
+enum RequestLine {
+    Eof,
+    Value(String),
+    TooLarge,
+}
+
+/// Baca maksimal `limit + 1` byte. Berbeda dari `read_line` langsung, batas
+/// ini diterapkan SAAT membaca sehingga peer tidak dapat memaksa Vec tumbuh
+/// tanpa batas sebelum pemeriksaan ukuran dijalankan.
+async fn read_request_line<R>(reader: R, limit: usize) -> std::io::Result<RequestLine>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut limited = BufReader::new(reader).take(limit.saturating_add(1) as u64);
+    let mut line = String::new();
+    let read = limited.read_line(&mut line).await?;
+    if read == 0 {
+        Ok(RequestLine::Eof)
+    } else if line.len() > limit {
+        Ok(RequestLine::TooLarge)
+    } else {
+        Ok(RequestLine::Value(line))
+    }
+}
+
 /// v2.3.0 (K1): socket pindah dari /tmp publik ke direktori privat
 /// (`XDG_RUNTIME_DIR/fast-dm` bila valid, fallback `~/.config/fast-dm/run`).
 /// Path lama yang ditinggalkan versi ≤2.2.5 dibersihkan saat start, bila
@@ -53,7 +81,6 @@ fn cleanup_legacy_socket() {
 /// Permission socket 0600 sudah membatasi, tapi bila parent dir pernah salah
 /// mode (mis. hasil versi lama / home di-share), peer-cred tetap menutup celah.
 fn peer_uid_ok(stream: &tokio::net::UnixStream) -> bool {
-
     match nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials) {
         // Ucred::uid() mengembalikan uid_t (u32), bukan Uid — bandingkan raw.
         Ok(cred) => cred.uid() == nix::unistd::getuid().as_raw(),
@@ -98,31 +125,22 @@ pub async fn start_server(engine: Arc<DownloadEngine>) -> Result<(), Box<dyn std
 
         let engine = engine.clone();
 
-        tokio::spawn(async move {
-            let (reader, mut writer) = stream.into_split();
-            let mut buf_reader = BufReader::new(reader);
-            let mut line = String::new();
-
-            match buf_reader.read_line(&mut line).await {
-                Ok(0) | Err(_) => return,
-                Ok(_) => {}
-            }
-
-            // read_line tanpa batas → klien jahat bisa mengirim baris giga-
-            // bytean dan OOM-kan app. Tolak di atas 1 MB (native host sendiri
-            // juga membatasi message di 1 MB).
-            if line.len() > 1024 * 1024 {
-                let response = IpcResponse {
-                    success: false,
-                    id: None,
-                    error: Some("Request terlalu besar".into()),
-                    message: None,
-                };
-                let json = serde_json::to_string(&response).unwrap_or_default();
-                let _ = writer.write_all(json.as_bytes()).await;
-                let _ = writer.write_all(b"\n").await;
-                return;
-            }
+            let line = match read_request_line(reader, MAX_REQUEST_LINE).await {
+                Ok(RequestLine::Value(line)) => line,
+                Ok(RequestLine::Eof) | Err(_) => return,
+                Ok(RequestLine::TooLarge) => {
+                    let response = IpcResponse {
+                        success: false,
+                        id: None,
+                        error: Some("Request terlalu besar".into()),
+                        message: None,
+                    };
+                    let json = serde_json::to_string(&response).unwrap_or_default();
+                    let _ = writer.write_all(json.as_bytes()).await;
+                    let _ = writer.write_all(b"\n").await;
+                    return;
+                }
+            };
 
             let response = match serde_json::from_str::<IpcMessage>(&line) {
                 Ok(msg) => handle_message(msg, &engine).await,
@@ -339,4 +357,30 @@ fn write_cookies_txt(cookie_header: &str, domain: &str) -> Result<(), String> {
     let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn request_line_accepts_value_within_limit() {
+        let input = std::io::Cursor::new(b"{\"action\":\"ping\"}\n".to_vec());
+        let got = read_request_line(input, 64).await.unwrap();
+        assert_eq!(got, RequestLine::Value("{\"action\":\"ping\"}\n".into()));
+    }
+
+    #[tokio::test]
+    async fn request_line_rejects_before_unbounded_growth() {
+        let input = std::io::Cursor::new(vec![b'x'; 65]);
+        let got = read_request_line(input, 64).await.unwrap();
+        assert_eq!(got, RequestLine::TooLarge);
+    }
+
+    #[tokio::test]
+    async fn request_line_reports_clean_eof() {
+        let input = std::io::Cursor::new(Vec::<u8>::new());
+        let got = read_request_line(input, 64).await.unwrap();
+        assert_eq!(got, RequestLine::Eof);
+    }
 }

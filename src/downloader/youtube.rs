@@ -322,7 +322,9 @@ pub async fn fetch_formats(url: &str, config: &Config) -> Vec<FormatOption> {
     };
     // Cap 20 dtk: ekstraksi situs tertentu bisa sangat lambat — lebih baik
     // pakai daftar statis daripada user menunggu tanpa kepastian.
-    let Ok(out) = tokio::time::timeout(std::time::Duration::from_secs(20), child.wait_with_output()).await else {
+    let Ok(out) =
+        tokio::time::timeout(std::time::Duration::from_secs(20), child.wait_with_output()).await
+    else {
         return Vec::new(); // future di-drop → kill_on_drop meracun yt-dlp
     };
     let Ok(status) = out else { return Vec::new() };
@@ -353,8 +355,14 @@ pub(crate) fn parse_formats_json(s: &str) -> Vec<FormatOption> {
         if ext == "mhtml" {
             continue; // bukan media — sampah dari "-J"
         }
-        let has_v = !fmt.vcodec.as_deref().is_some_and(|c| c == "none" || c.is_empty());
-        let has_a = !fmt.acodec.as_deref().is_some_and(|c| c == "none" || c.is_empty());
+        let has_v = !fmt
+            .vcodec
+            .as_deref()
+            .is_some_and(|c| c == "none" || c.is_empty());
+        let has_a = !fmt
+            .acodec
+            .as_deref()
+            .is_some_and(|c| c == "none" || c.is_empty());
         let kind = match (has_v, has_a) {
             (true, true) => "video+audio",
             (true, false) => "video",
@@ -870,7 +878,10 @@ mod tests {
         );
         // preset tidak boleh ter-bajak passthrough
         assert!(quality_args(Some("audio_mp3")).contains(&"--audio-format".to_string()));
-        assert!(quality_args(Some("720p")).iter().any(|a| a.contains("height<=720")));
+        assert!(quality_args(Some("720p"))
+            .iter()
+            .any(|a| a.contains("height<=720")));
+        /
         // bukan format id (whitespace dsb.) → tetap default teraman
         assert_eq!(
             quality_args(Some("rm -rf /")),

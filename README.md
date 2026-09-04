@@ -70,7 +70,7 @@ bash packaging/build-deb.sh
 - `src/native_host/` — Chrome Native Messaging wrapper
 - `src/gui/` — GTK4 window & dialog
 - `extension/` — Manifest V3 extension (background, content, sniffer, popup)
-- `tests/` — integration test (filesystem terisolasi via `tempfile`)
+- `tests/` — integration test (filesystem terisolasi via `std::env::temp_dir()` + override XDG)
 
 Lihat [CHANGELOG.md](CHANGELOG.md) untuk history rilis.
 

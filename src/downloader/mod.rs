@@ -25,6 +25,11 @@ pub struct DownloadEngine {
     event_tx: mpsc::UnboundedSender<DownloadEvent>,
     config: Arc<RwLock<Config>>,
     dirty: Arc<AtomicBool>,
+    /// Serialisasi semua penulisan session.json. Shutdown mengambil lock ini
+    /// agar flusher periodik tidak menimpa snapshot final dengan state antara.
+    session_io: Arc<Mutex<()>>,
+    /// Menghentikan flusher dan membuat shutdown idempotent.
+    shutting_down: Arc<AtomicBool>,
     /// v2.3.0 (K5): id hasil restore sesi — di-auto-resume sekali saat start
     /// bila config.auto_resume; bukan untuk item yang user pause manual.
     restored_ids: Arc<Mutex<Vec<String>>>,
@@ -57,13 +62,29 @@ impl DownloadEngine {
 
         let dirty = Arc::new(AtomicBool::new(false));
 
-        // Flusher: tulis session.json maks 1x/2 detik, hanya jika ada perubahan
+                let session_io = Arc::new(Mutex::new(()));
+        let shutting_down = Arc::new(AtomicBool::new(false));
+
+        // Flusher: tulis session.json maks 1x/2 detik, hanya jika ada perubahan.
+        // Penulisan diserialisasi dengan shutdown agar snapshot final tidak
+        // tertimpa state runtime yang sengaja di-pause saat proses berhenti.
         let downloads_flush = downloads.clone();
         let dirty_flush = dirty.clone();
+        let session_io_flush = session_io.clone();
+        let shutting_down_flush = shutting_down.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                flush_session(&downloads_flush, &dirty_flush).await;
+                if shutting_down_flush.load(Ordering::SeqCst) {
+                    break;
+                }
+                flush_session(
+                    &downloads_flush,
+                    &dirty_flush,
+                    &session_io_flush,
+                    &shutting_down_flush,
+                )
+                .await;
             }
         });
 
@@ -72,6 +93,8 @@ impl DownloadEngine {
             event_tx,
             config: Arc::new(RwLock::new(Config::load().clone())),
             dirty,
+            session_io,
+            shutting_down,
             restored_ids: Arc::new(Mutex::new(restored_ids)),
         }
     }
@@ -110,6 +133,70 @@ impl DownloadEngine {
 
     fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// Hentikan seluruh pekerjaan sebelum aplikasi benar-benar keluar.
+    ///
+    /// State runtime diubah ke Paused agar supervisor tidak menulis Error saat
+    /// child/daemon dihentikan. Snapshot disk tetap menyimpan status aktif
+    /// aslinya sehingga mekanisme `resume_restored()` dapat melanjutkannya pada
+    /// start berikutnya. Daemon RPC juga dimatikan; karena itu GID dibuang hanya
+    /// setelah shutdown daemon terkonfirmasi.
+    pub async fn shutdown(&self) {
+        if self.shutting_down.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        // Urutan lock: session_io -> downloads -> item. Flusher memakai urutan
+        // yang sama, sehingga snapshot final tidak dapat beradu/deadlock.
+        let _session_guard = self.session_io.lock().await;
+        let config = self.config.read().await.clone();
+        let (pids, gids, mut snapshot) = {
+            let downloads = self.downloads.read().await;
+            let mut pids = Vec::new();
+            let mut gids = Vec::new();
+            let mut snapshot = Vec::with_capacity(downloads.len());
+            for info in downloads.values() {
+                let mut i = info.lock().await;
+                if let Some(pid) = i.pid {
+                    pids.push(pid);
+                }
+                if let Some(gid) = i.rpc_gid.clone() {
+                    gids.push(gid);
+                }
+                snapshot.push(prepare_shutdown_snapshot(&mut i));
+            }
+            (pids, gids, snapshot)
+        };
+
+        for pid in pids {
+            kill_child_pid(Some(pid));
+        }
+
+        let daemon_stopped = match aria2_rpc::shutdown_daemon(&gids, &config).await {
+            Ok(()) => true,
+            Err(e) => {
+                // Pertahankan GID di session agar task yang berhasil di-pause
+                // masih dapat di-unpause pada start berikutnya.
+                tracing::warn!("Gagal mematikan daemon aria2 RPC: {}", e);
+                false
+            }
+        };
+
+        if daemon_stopped {
+            for d in &mut snapshot {
+                d.rpc_gid = None;
+            }
+            let downloads = self.downloads.read().await;
+            for info in downloads.values() {
+                info.lock().await.rpc_gid = None;
+            }
+        }
+
+        if let Err(e) = write_session_snapshot(snapshot) {
+            tracing::warn!("Gagal menulis snapshot session saat shutdown: {}", e);
+        }
+        self.dirty.store(false, Ordering::SeqCst);
     }
 
     pub async fn get_config(&self) -> Config {
@@ -206,7 +293,9 @@ impl DownloadEngine {
         // tidak bisa diparse Url — ditangani is_magnet() lebih dulu.
         if !is_supported_scheme(url) {
             info.status = DownloadStatus::Error;
-            info.error_msg = "Skema URL tidak didukung — http, https, ftp, atau magnet.".to_string();
+            info.error_msg =
+                "Skema URL tidak didukung — http, https, ftp, atau magnet.".to_string();
+
             let _ = self.event_tx.send(DownloadEvent::Error(info.clone()));
             self.downloads
                 .write()
@@ -395,28 +484,64 @@ impl DownloadEngine {
     }
 
     pub async fn cancel_download(&self, id: &str) {
-        let downloads = self.downloads.read().await;
-        if let Some(info) = downloads.get(id) {
-            let mut i = info.lock().await;
-            kill_child_pid(i.pid);
-            i.status = DownloadStatus::Cancelled;
-            i.speed = 0;
-            let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
+        // Ambil handle kontrol lalu lepas semua lock SEBELUM RPC await.
+        // Khusus item RPC yang sudah Paused, supervisor polling sudah selesai;
+        // karena itu engine sendiri wajib forceRemove GID-nya dari daemon.
+        let target = {
+            let downloads = self.downloads.read().await;
+            match downloads.get(id) {
+                Some(info) => {
+                    let mut i = info.lock().await;
+                    let target = (i.pid.take(), i.rpc_gid.take());
+                    i.status = DownloadStatus::Cancelled;
+                    i.speed = 0;
+                    let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
+                    Some(target)
+                }
+                None => None,
+            }
+        };
+
+        if let Some((pid, gid)) = target {
+            kill_child_pid(pid);
+            if let Some(gid) = gid {
+                let config = self.config.read().await.clone();
+                if let Err(e) = aria2_rpc::remove_gid(&gid, &config).await {
+                    tracing::warn!("RPC cancel GID {}: {}", gid, e);
+                }
+            }
             self.mark_dirty();
         }
     }
 
     pub async fn clear_download(&self, id: &str) {
-        // Cancel dulu supaya background task (aria2/yt-dlp) berhenti
-        let downloads = self.downloads.read().await;
-        if let Some(info) = downloads.get(id) {
-            let mut i = info.lock().await;
-            kill_child_pid(i.pid);
-            i.status = DownloadStatus::Cancelled;
-            i.speed = 0;
-        }
-        drop(downloads);
+        // Cancel dulu supaya background task (aria2/yt-dlp) berhenti. Tidak
+        // mengirim event agar row yang baru dihapus GUI tidak dibuat kembali.
+        let target = {
+            let downloads = self.downloads.read().await;
+            match downloads.get(id) {
+                Some(info) => {
+                    let mut i = info.lock().await;
+                    let target = (i.pid.take(), i.rpc_gid.take());
+                    i.status = DownloadStatus::Cancelled;
+                    i.speed = 0;
+                    Some(target)
+                }
+                None => None,
+            }
+        };
+
         self.downloads.write().await.remove(id);
+
+        if let Some((pid, gid)) = target {
+            kill_child_pid(pid);
+            if let Some(gid) = gid {
+                let config = self.config.read().await.clone();
+                if let Err(e) = aria2_rpc::remove_gid(&gid, &config).await {
+                    tracing::warn!("RPC remove GID {}: {}", gid, e);
+                }
+            }
+        }
         self.mark_dirty();
     }
 
@@ -517,7 +642,6 @@ fn spawn_supervised(
         // Status terminal (completed/error) → persist ke session.json
         dirty.store(true, Ordering::SeqCst);
 
-        // Slot bebas → jalankan antrian tertua
         // Slot bebas → jalankan antrian tertua.
         // Pakai promote_config (limit mentah) — lihat komentar M3 (anti double-division).
         promote_next(downloads, tx, promote_config, dirty).await;
@@ -537,7 +661,6 @@ pub fn is_supported_scheme(url: &str) -> bool {
         .map(|u| matches!(u.scheme(), "http" | "https" | "ftp"))
         .unwrap_or(false)
 }
-
 
 /// URL file langsung (punya ekstensi file/media) → langsung ke aria2 tanpa
 /// lewat yt-dlp. HLS/DASH (m3u8/mpd) tetap ke yt-dlp agar di-merge benar.
@@ -787,24 +910,28 @@ fn load_session() -> Vec<DownloadInfo> {
     }
 }
 
-/// Tulis snapshot session secara atomic (tmp + rename), dibatasi 200 entri terbaru
-async fn flush_session(
-    downloads: &DownloadMap,
-    dirty: &AtomicBool,
-) {
-    if !dirty.swap(false, Ordering::SeqCst) {
-        return;
+/// Buat snapshot final tanpa kehilangan semantik auto-resume. State runtime
+/// aktif di-pause agar supervisor berhenti tenang; salinan untuk disk tetap
+/// memakai status aktif/queued asli dan tidak pernah menyimpan PID proses.
+fn prepare_shutdown_snapshot(info: &mut DownloadInfo) -> DownloadInfo {
+    let mut snapshot = info.clone();
+    snapshot.pid = None;
+
+    info.pid = None;
+    if matches!(
+        info.status,
+        DownloadStatus::Downloading | DownloadStatus::Resolving | DownloadStatus::Queued
+    ) {
+        info.status = DownloadStatus::Paused;
+        info.speed = 0;
+        info.eta = 0;
     }
 
-    let mut all: Vec<DownloadInfo> = {
-        let map = downloads.read().await;
-        let mut v = Vec::with_capacity(map.len());
-        for info in map.values() {
-            v.push(info.lock().await.clone());
-        }
-        v
-    };
+    snapshot
+}
 
+/// Tulis satu snapshot session secara atomik, dibatasi 200 entri terbaru.
+fn write_session_snapshot(mut all: Vec<DownloadInfo>) -> Result<(), String> {
     // urut (created_ms, id) — konsisten dengan promote_next (L4)
     all.sort_by_key(|d| (d.created, d.id.clone()));
     if all.len() > 200 {
@@ -815,12 +942,51 @@ async fn flush_session(
         version: 1,
         downloads: all,
     };
-    if let Ok(json) = serde_json::to_string(&wrapped) {
-        let path = session_file();
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
+    let json = serde_json::to_string(&wrapped).map_err(|e| e.to_string())?;
+    let path = session_file();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Flusher periodik. Lock I/O diambil sebelum memeriksa dirty supaya shutdown
+/// selalu menjadi penulis terakhir dan tidak mungkin ditimpa task yang telat.
+async fn flush_session(
+    downloads: &DownloadMap,
+    dirty: &AtomicBool,
+    session_io: &Mutex<()>,
+    shutting_down: &AtomicBool,
+) {
+    let _session_guard = session_io.lock().await;
+    if shutting_down.load(Ordering::SeqCst) || !dirty.swap(false, Ordering::SeqCst) {
+        return;
+    }
+
+    let all: Vec<DownloadInfo> = {
+        let map = downloads.read().await;
+        let mut v = Vec::with_capacity(map.len());
+        for info in map.values() {
+            v.push(info.lock().await.clone());
         }
+        v
+    };
+
+    if let Err(e) = write_session_snapshot(all) {
+        // Coba lagi pada tick berikutnya; jangan kehilangan perubahan hanya
+        // karena disk sementara penuh/read-only.
+        dirty.store(true, Ordering::SeqCst);
+        tracing::warn!("Gagal menulis session.json: {}", e);
+
     }
 }
 
@@ -947,15 +1113,16 @@ mod tests {
         assert!(is_supported_scheme(
             "magnet:?xt=urn:btih:aaaabbbbccccdddd&dn=ubuntu"
         ));
-        assert!(is_supported_scheme(
-            "  MAGNET:?xt=urn:btih:deadbeef"
-        )); // trim + case-insensitive
+        assert!(is_supported_scheme("  MAGNET:?xt=urn:btih:deadbeef")); // trim + case-insensitive
+
     }
 
     #[test]
     fn supported_scheme_rejects_non_download_schemes() {
         assert!(!is_supported_scheme("blob:https://site/abc"));
-        assert!(!is_supported_scheme("data:application/octet-stream;base64,AAAA"));
+        assert!(!is_supported_scheme(
+            "data:application/octet-stream;base64,AAAA"
+        ));
         assert!(!is_supported_scheme("javascript:alert(1)"));
         assert!(!is_supported_scheme("file:///home/user/a.zip"));
         assert!(!is_supported_scheme("not a url at all"));
@@ -1148,6 +1315,55 @@ mod tests {
             parse_session("{bukan json").is_none(),
             "korup → None (caller bikin backup)"
         );
+    }
+
+    // ── v2.9.2: shutdown snapshot ──
+
+    #[test]
+    fn shutdown_snapshot_pauses_runtime_but_preserves_restore_status() {
+        let mut info = DownloadInfo::new(
+            "dl_shutdown".into(),
+            "https://example.com/file.zip".into(),
+            "file.zip".into(),
+            "/tmp".into(),
+            Default::default(),
+            None,
+        );
+        info.status = DownloadStatus::Downloading;
+        info.speed = 42_000;
+        info.eta = 12;
+        info.pid = Some(1234);
+        info.rpc_gid = Some("gid-1".into());
+
+        let snapshot = prepare_shutdown_snapshot(&mut info);
+
+        // Supervisor melihat Paused dan berhenti tanpa menulis Error.
+        assert_eq!(info.status, DownloadStatus::Paused);
+        assert_eq!(info.speed, 0);
+        assert_eq!(info.eta, 0);
+        assert!(info.pid.is_none());
+        // Disk tetap menandai item sebagai aktif agar load_session memasukkannya
+        // ke restored_ids; PID tidak boleh pernah dipersistensikan.
+        assert_eq!(snapshot.status, DownloadStatus::Downloading);
+        assert!(snapshot.pid.is_none());
+        assert_eq!(snapshot.rpc_gid.as_deref(), Some("gid-1"));
+    }
+
+    #[test]
+    fn shutdown_snapshot_keeps_manual_pause_manual() {
+        let mut info = DownloadInfo::new(
+            "dl_paused".into(),
+            "https://example.com/file.zip".into(),
+            "file.zip".into(),
+            "/tmp".into(),
+            Default::default(),
+            None,
+        );
+        info.status = DownloadStatus::Paused;
+
+        let snapshot = prepare_shutdown_snapshot(&mut info);
+        assert_eq!(info.status, DownloadStatus::Paused);
+        assert_eq!(snapshot.status, DownloadStatus::Paused);
     }
 
     // ── v2.3.1 (M1): ChildLines — pembaca baris cancellation-safe ──

@@ -95,7 +95,7 @@ impl DownloadInfo {
             headers,
             quality,
             pid: None,
-                        rpc_gid: None,
+            rpc_gid: None,
             created: chrono::Utc::now().timestamp_millis(),
         }
     }

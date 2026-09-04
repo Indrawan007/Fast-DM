@@ -30,12 +30,6 @@ jobs:
             libgtk-4-dev \
             aria2 \
             xvfb  # untuk GUI smoke test (jika ditambah nanti)
-      - name: Clippy (advisory dulu — see note)
-        # Kalau `cargo clippy --all-targets -- -D warnings` sudah hijau di
-        # mesin dev, HAPUS continue-on-error untuk menjadikannya gate blocking.
-        continue-on-error: true
-        run: cargo clippy --all-targets -- -D warnings
-
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -50,9 +44,8 @@ jobs:
 
       - name: Check formatting
         # `cargo fmt --check` mengembalikan non-zero kalau ada diff.
-        # Step ini blocking — biar contributor konsisten sebelum merge.
-        # Kalau Anda ingin advisory dulu, ganti `--check` → `cargo fmt`
-        # (auto-format) atau hapus step ini.
+        # Step ini blocking — contributor harus menjalankan rustfmt sebelum merge.
+
         run: cargo fmt --all -- --check
 
       - name: Clippy (advisory dulu — see note)
@@ -64,7 +57,8 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Run all tests (unit + integration)
-        # P0 fix: 97 unit test + integration test di tests/find_cookies.rs.
+        # Jalankan seluruh unit test dan integration test di tests/.
+
         # --no-fail-fast: jalankan semua, jangan stop di error pertama.
         # --nocapture: tampilkan println!() di test output untuk debugging.
         run: cargo test --no-fail-fast -- --nocapture
@@ -72,7 +66,7 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked
 
-      - name: Smoke test: binary bisa start
+      - name: "Smoke test: binary bisa start"
         # Validasi runtime: binary exit code 0 saat start tanpa GUI.
         # --help selalu exit 0, cocok untuk smoke test tanpa GTK display.
         run: |

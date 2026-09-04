@@ -60,11 +60,10 @@ fn write_manifests(json_str: &str) -> usize {
             continue;
         }
         let manifest = dir.join(format!("{}.json", HOST_NAME));
-        if fs::create_dir_all(dir).is_ok()
-            && fs::write(&manifest, json_str).is_ok() {
-                written += 1;
-                tracing::debug!("Manifest: {}", manifest.display());
-            }
+        if fs::create_dir_all(dir).is_ok() && fs::write(&manifest, json_str).is_ok() {
+            written += 1;
+            tracing::debug!("Manifest: {}", manifest.display());
+        }
     }
     written
 }
@@ -94,7 +93,6 @@ pub fn check_and_setup() -> Result<usize, Box<dyn std::error::Error>> {
             continue;
         }
 
-
         // Cek apakah perlu update (bandingkan konten penuh, bukan hanya path).
         // Karena origin register ikut disertakan, manifest tidak lagi ditimpa
         // secara tidak sengaja oleh check_and_setup.
@@ -107,12 +105,11 @@ pub fn check_and_setup() -> Result<usize, Box<dyn std::error::Error>> {
             true
         };
 
-        if need_update
-            && fs::create_dir_all(dir).is_ok()
-                && fs::write(&manifest, &json_str).is_ok() {
-                    created += 1;
-                    tracing::debug!("Setup: {}", manifest.display());
-                }
+        if need_update && fs::create_dir_all(dir).is_ok() && fs::write(&manifest, &json_str).is_ok()
+        {
+            created += 1;
+            tracing::debug!("Setup: {}", manifest.display());
+        }
     }
 
     if created > 0 {
@@ -175,9 +172,9 @@ pub fn resolve_native_path() -> String {
             let in_target = parent
                 .file_name()
                 .is_some_and(|p| p == "debug" || p == "release")
-                && parent.parent().is_some_and(|p| {
-                    p.file_name() == Some(std::ffi::OsStr::new("target"))
-                });
+                && parent
+                    .parent()
+                    .is_some_and(|p| p.file_name() == Some(std::ffi::OsStr::new("target")));
             if in_target {
                 let _ = fs::write(
                     &candidate,
