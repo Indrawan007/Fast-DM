@@ -1,0 +1,63 @@
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            libgtk-4-dev \
+            dpkg-dev \
+            zip
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build Debian package
+        run: bash packaging/build-deb.sh
+
+      - name: Build extension zip
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cd extension
+          zip -r "../build/fast-dm-extension-v${VERSION}.zip" . \
+            -x "*.DS_Store" \
+            -x "*/.git/*"
+
+      - name: Generate checksums
+        run: |
+          sha256sum build/*.deb build/*.zip > build/SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            build/*.deb \
+            build/*.zip \
+            build/SHA256SUMS \
+            --generate-notes
