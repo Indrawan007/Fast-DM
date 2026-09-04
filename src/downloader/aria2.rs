@@ -31,6 +31,11 @@ static RE_CD_UNQUOTED: LazyLock<Regex> =
 
 pub(crate) const CHROME_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+/// Jalur unduhan per-proses (`aria2c` sebagai subprocess).
+///
+/// v2.9.0 (B2.2): file langsung (http/https/ftp) UTAMA kini lewat daemon RPC
+/// (`aria2_rpc.rs`); jalur ini tetap dipakai sebagai (a) FALBACK saat daemon
+/// RPC tak tersedia, dan (b) fallback resolver universal (yt-dlp gagal).
 pub async fn download(
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
@@ -397,7 +402,8 @@ async fn run_aria2c(
 }
 
 /// Cek ruang disk tersedia untuk direktori tujuan. Gagal cek → izinkan (jangan blokir).
-fn has_space(dir: &str, needed: u64) -> bool {
+/// `pub(crate)`: dipakai jalur RPC (`aria2_rpc.rs`, B2.2) sebelum `addUri`.
+pub(crate) fn has_space(dir: &str, needed: u64) -> bool {
     match nix::sys::statvfs::statvfs(std::path::Path::new(dir)) {
         Ok(stat) => {
             let avail = stat.blocks_available() * stat.block_size();
@@ -499,7 +505,14 @@ fn resolve_client(verify_tls: bool) -> Option<&'static reqwest::Client> {
     slot.get()
 }
 
-async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) -> Result<(), String> {
+/// Resolve filename + ukuran + tolak HTML/non-2xx.
+/// `pub(crate)`: v2.9.0 (B2.2) dipanggil jalur RPC SEBELUM `addUri` supaya
+/// pipeline (Content-Disposition, redirect, ekstensi, pre-check) identik
+/// dengan jalur per-proses — tanpa ini "file .php" bisa masuk antrean RPC.
+pub(crate) async fn resolve_filename(
+    info: &Arc<Mutex<DownloadInfo>>,
+    verify_tls: bool,
+) -> Result<(), String> {
     let (url, headers) = {
         let i = info.lock().await;
         (i.url.clone(), i.headers.clone())
@@ -656,7 +669,9 @@ async fn resolve_filename(info: &Arc<Mutex<DownloadInfo>>, verify_tls: bool) -> 
 
 /// Baca cookies.txt (Netscape) untuk domain URL → header "Cookie: ...".
 /// Supaya resolve & aria2 memakai sesi login yang sama dengan browser.
-fn cookie_header_for(url: &str) -> Option<String> {
+/// `pub(crate)`: v2.9.0 (B2.2) juga dipakai jalur RPC sebagai opsi per-URI
+/// `cookie` di `addUri` (daemon global tidak boleh menyentuh domain lain).
+pub(crate) fn cookie_header_for(url: &str) -> Option<String> {
     let host = url::Url::parse(url)
         .ok()?
         .host_str()?

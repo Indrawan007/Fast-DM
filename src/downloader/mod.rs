@@ -450,9 +450,10 @@ fn spawn_supervised(
 ) {
     // v2.3.0 (M3): bagi limit total aplikasi menurut jumlah unduhan hidup saat
     // proses ini start, bukan max_concurrent statis — unduhan tunggal kini
-    // memakai limit penuh. Batas lama pada proses yang sudah berjalan tidak
-    // di-recalculate (butuh aria2 RPC — lihat roadmap CODE-REVIEW.md B2);
-    // pembagian ulang terjadi saat proses berikutnya start/promote.
+    // memakai limit penuh. v2.9.0 (B2.2): bagian per-proses ini kini hanya
+    // dipakai jalur per-proses (fallback daemon RPC + fallback universal) —
+    // jalur daemon RPC menegakkan limit total LIVE secara global
+    // (changeGlobalOption), jadi memakai limit mentah (lihat di bawah).
     //
     // PENTING: `promote_config` harus tetap config ASLI (limit user mentah) —
     // kalau pakai yang sudah dibagi, rantai promote akan membagi ulang limit
@@ -472,17 +473,29 @@ fn spawn_supervised(
         if is_yt {
             // YouTube: yt-dlp dengan dialog kualitas (behavior lama)
             youtube::download(info.clone(), tx.clone(), &config).await;
-        } else if aria2_rpc::is_magnet(&url) {
-            // v2.7.0 (B2.1): magnet/torrent → daemon RPC aria2. Limit total
-            // di sini ditegakkan GLOBAL oleh daemon (changeGlobalOption),
-            // jadi `config.max_overall_speed` yang terbagi per-proses dari
-            // M3 sengaja TIDAK dipakai ulang (daemon tidak butuh bagian).
+        } else if aria2_rpc::is_magnet(&url) || is_direct_file_url(&url) {
+            // v2.7.0 (B2.1): magnet/torrent → daemon RPC aria2.
+            // v2.9.0 (B2.2): http/https/ftp file langsung juga ke daemon RPC —
+            // limit total ditegakkan GLOBAL & LIVE oleh daemon (changeGlobalOption,
+            // daemon membagi ulang ke semua unduhan aktif), pause/resume native.
+            // Karena itu limit MENTAH yang dipakai, BUKAN hasil pembagian
+            // per-proses M3 (juga anti double-division).
+            let is_mag = aria2_rpc::is_magnet(&url);
             let mut cfg = config.clone();
             cfg.max_overall_speed = promote_config.max_overall_speed.clone();
-            aria2_rpc::download(info.clone(), tx.clone(), &cfg).await;
-        } else if is_direct_file_url(&url) {
-            // File langsung (mp4/zip/dll): aria2 tanpa resolve — cepat
-            aria2::download(info.clone(), tx.clone(), &config).await;
+            let outcome = aria2_rpc::download(info.clone(), tx.clone(), &cfg).await;
+            // B2.2: daemon tak tersedia / addUri ditolak SEBELUM unduhan jalan
+            // → http/ftp jatuh ke jalur per-proses lama (nol regresi). Magnet
+            // RPC-only — tidak pernah Fallback.
+            if matches!(outcome, aria2_rpc::RpcOutcome::Fallback) && !is_mag {
+                let aborted = {
+                    let i = info.lock().await;
+                    matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused)
+                };
+                if !aborted {
+                    aria2::download(info.clone(), tx.clone(), &config).await;
+                }
+            }
         } else {
             // Semua URL lain (halaman video, TikTok/IG/FB/X/Vimeo, m3u8, dll):
             // coba yt-dlp dulu (resolver universal, gaya IDM); kalau situs

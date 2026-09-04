@@ -5,7 +5,7 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 
 ## Fitur
 
-- 🚀 **Download accelerator** via `aria2c` (multi-connection, segment, resume)
+- 🚀 **Download accelerator** via `aria2c` (multi-connection, segment, resume, limit global live via daemon RPC)
 - 🎬 **YouTube & 1800+ situs** via `yt-dlp` (TikTok, IG, FB, X, Vimeo, HLS/DASH)
 - 🔌 **Browser extension** (Chrome/Chromium/Brave/Edge/Opera/Vivaldi) dengan Native Messaging
 - 🎯 **Overlay IDM-like** di YouTube player — klik ⚡ pilih kualitas
@@ -65,7 +65,7 @@ bash packaging/build-deb.sh
 
 - `src/lib.rs` — library crate (semua module publik)
 - `src/main.rs` — binary entry point (CLI dispatch: GUI / NMH)
-- `src/downloader/` — `aria2`, `youtube`, `universal` (resolver), `mod` (engine)
+- `src/downloader/` — `aria2` (jalur per-proses + pipeline resolve), `aria2_rpc` (daemon RPC: magnet & http/ftp), `youtube`, `universal` (resolver), `mod` (engine)
 - `src/ipc/` — Unix socket server untuk browser → GUI
 - `src/native_host/` — Chrome Native Messaging wrapper
 - `src/gui/` — GTK4 window & dialog
