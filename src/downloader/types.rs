@@ -54,6 +54,12 @@ pub struct DownloadInfo {
     pub quality: Option<String>,
     #[serde(default)]
     pub pid: Option<u32>,
+    /// v2.9.1: GID unduhan di daemon aria2 RPC. Disimpan agar pause/resume
+    /// native (`forcePause`/`unpause`) memakai task yang SAMA — bukan
+    /// addUri baru yang menduplikasi task di daemon. `None` = bukan jalur
+    /// RPC / task sudah lepas dari daemon (selesai/error/di-restart daemon).
+    #[serde(default)]
+    pub rpc_gid: Option<String>,
     /// epoch MILLISECONDS (v2.3.0, L4 — dulu detik sehingga antrian FIFO tidak
     /// deterministik bila dua download dibuat pada detik yang sama)
 
@@ -89,6 +95,7 @@ impl DownloadInfo {
             headers,
             quality,
             pid: None,
+                        rpc_gid: None,
             created: chrono::Utc::now().timestamp_millis(),
         }
     }

@@ -93,11 +93,6 @@ function registerExtensionId() {
 // Register saat extension di-load
 registerExtensionId();
 
-// Register ulang saat Chrome restart
-chrome.runtime.onStartup.addListener(() => {
-  registerExtensionId();
-});
-
 // Register saat pertama kali install
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === "install" || details.reason === "update") {
@@ -128,12 +123,10 @@ chrome.runtime.onInstalled.addListener((details) => {
   });
 });
 
+// Register ulang saat browser restart (deduplikasi internal:
+// registerExtensionId cek storage & di-skip bila ID sudah terdaftar)
 chrome.runtime.onStartup.addListener(() => {
-  chrome.storage.local.get("registered_id", (result) => {
-    if (!result.registered_id) {
-      registerExtensionId();
-    }
-  });
+  registerExtensionId();
 });
 
 // ═══════════════════════════════════════════════

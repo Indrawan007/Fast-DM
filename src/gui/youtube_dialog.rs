@@ -15,8 +15,8 @@ pub struct QualityOption {
 pub const QUALITIES: &[QualityOption] = &[
     QualityOption {
         id: "best_mp4",
-        label: "Best Quality (MP4)",
-        desc: "Highest resolution",
+        label: "Kualitas Terbaik (MP4)",
+        desc: "Resolusi tertinggi",
     },
     QualityOption {
         id: "2160p",
@@ -45,13 +45,13 @@ pub const QUALITIES: &[QualityOption] = &[
     },
     QualityOption {
         id: "360p",
-        label: "360p Low",
+        label: "360p Rendah",
         desc: "640x360",
     },
     QualityOption {
         id: "audio_best",
         label: "Audio M4A",
-        desc: "Best quality",
+        desc: "Kualitas terbaik",
     },
     QualityOption {
         id: "audio_mp3",

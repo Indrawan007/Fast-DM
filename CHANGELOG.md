@@ -3,9 +3,41 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.9.1] - 2026-09-04
+
+### Fixed — perbaikan pasca-migrasi daemon RPC (B2)
+
+- **Magnet kembali bisa ditambahkan** — gate skema di `add_download` masih
+  hanya mengizinkan http/https/ftp (sisa komentar "magnet = roadmap"),
+  sehingga `magnet:?xt=…` dari GUI/ekstensi ditolak "Skema URL tidak
+  didukung" sebelum sempat mencapai daemon RPC. Kini `magnet:` diterima
+  (fungsi murni `is_supported_scheme`, +2 unit test).
+- **Pause/resume RPC benar-benar native** — task daemon yang dijeda kini
+  dipertahankan: GID disimpan di field baru `DownloadInfo.rpc_gid`
+  (serde default, kompatibel dengan session.json lama), resume memanggil
+  `unpause` pada GID yang SAMA. Sebelumnya resume memanggil `addUri`
+  baru sementara task paused lama tertinggal macet di daemon (duplikat
+  task + dua penulis potensial untuk file yang sama). GID yang hilang
+  (daemon di-restart) otomatis jatuh ke `addUri` ulang; GID dibersihkan
+  saat selesai/error/cancel.
+- **Batas kecepatan total kini berlaku juga untuk jalur yt-dlp** (YouTube
+  & resolver universal) lewat `--limit-rate` — sebelumnya flag limit di
+  Pengaturan hanya diteruskan ke aria2.
+
+### Changed — kebersihan & konsistensi
+
+- Dialog kualitas (GTK + overlay ekstensi) memakai Bahasa Indonesia
+  konsisten dengan seluruh UI ("Kualitas Terbaik", "Rendah", dst.) —
+  sebelumnya berbahasa Inggris.
+- Ekstensi: dua listener `chrome.runtime.onStartup` duplikat digabung
+  jadi satu; fungsi mati `sendDownload` di content.js dihapus (permintaan
+  unduhan dikirim inline dari handler).
+- `native_host/setup.rs`: komentar terduplikasi/rusak dirapikan.
+
 ## [2.9.0] - 2026-09-04
 
 ### Added — B2.2: migrasi HTTP/HTTPS/FTP ke daemon RPC (selesainya jalur B2)
+
 - Unduhan **file langsung** (http/https/ftp) kini berjalan lewat **daemon
   `aria2c --enable-rpc`** yang sama dengan magnet (B2.1) — bukan lagi proses
   `aria2c` per-unduhan:
@@ -36,6 +68,7 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 ## [2.8.1] - 2026-09-03
 
 ### Changed — kebersihan kode + gerbang lint CI (roadmap "CI clippy")
+
 - `cargo clippy --fix` menyapu lint mekanis (map_or ×10, collapsible-if ×4,
   useless_conversion, redundant_closure, dsb.).
 - Manual: alias tipe `SharedInfo`/`DownloadMap` (type_complexity, 7
@@ -52,6 +85,7 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 ## [2.8.0] - 2026-09-03
 
 ### Added — D8.1: minimize-to-close & autostart (tanpa dependensi baru)
+
 - **`minimize_to_close`** (default OFF, opt-in di Pengaturan): menutup jendela
   saat masih ada unduhan aktif/antri → jendela disembunyikan, engine tetap
   jalan; dialog "Hentikan & Tutup" lama tidak muncul. Membuka lagi cukup
@@ -72,6 +106,7 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 ## [2.7.0] - 2026-09-03
 
 ### Added — B2.1: daemon RPC aria2 + unduh magnet/torrent
+
 - Modul baru `downloader/aria2_rpc.rs`: klien JSON-RPC 2.0 (reqwest, tanpa
   dependensi baru) + supervisor daemon `aria2c --enable-rpc` — spawn sekali
   per sesi, `kill_on_drop`, reuse daemon yatim milik sendiri via probe
@@ -99,6 +134,7 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 ## [2.6.1] - 2026-09-03
 
 ### Fixed
+
 - Guard passthrough D6 (`looks_like_format_id`) keliru menerima kata bebas
   tanpa digit: quality basi ("unknown", "high") terkirim sebagai
   `--format unknown/best` alih-alih jatuh ke default. Kini wajib minimal satu
@@ -110,6 +146,7 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 ## [2.6.0] - 2026-09-02
 
 ### Added — D6: dialog kualitas menampilkan format NYATA dari situs
+
 - Sebelum dialog terbuka, GUI menjalankan `yt-dlp -J` (simulated extraction,
   cap 20 dtk, mengikuti proxy & verify_tls + cookies dari config). Hasilnya
   difilter (buang mhtml/duplikat/cap 24 entri) dan ditambahkan sebagai section
@@ -127,6 +164,7 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 ## [2.5.0] - 2026-09-02
 
 ### Added — D2: dialog "Simpan Sebagai…" (IDM-style)
+
 - Tombol baru di toolbar: membuka `gtk4::FileDialog::save_file` dengan nama
   terduga dari URL + folder awal = Download dari Pengaturan; unduhan dimulai
   ke path pilihan user (engine tetap men-sanitasi nama & membuat folder).
@@ -143,6 +181,7 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 ## [2.4.0] - 2026-09-02
 
 ### Added — fitur D1 & D3 (roadmap CODE-REVIEW.md)
+
 - **D3 Dukungan proxy global** — satu kolom di Pengaturan (`proxy_url`)
   diterapkan ke SEMUA engine: aria2c via `--all-proxy=`, yt-dlp (jalur YouTube
   dan resolver universal) via `--proxy`. Mendukung `http://`, `https://`,
@@ -161,6 +200,7 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 ## [2.3.2] - 2026-09-02
 
 ### Changed — M4: dialog GUI jadi event-driven (tanpa nested main loop)
+
 - `show_settings_dialog` & `show_quality_dialog` tidak lagi memblokir dengan
   `while dialog.is_visible() { main_context.iteration(true) }` — pola nested
   main loop berisiko reentrancy (event diproses ganda, dua dialog bisa saling
@@ -170,12 +210,14 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   loop lagi.
 
 ### Fixed
+
 - Dialog kualitas YouTube: menekan **Batal** dulu tetap memulai download
   (hasil `None` diperlakukan "tanpa kualitas"); kini batal sungguh membatalkan.
 
 ## [2.3.1] - 2026-09-02
 
 ### Changed — M1: proses anak downloader jadi async penuh (`tokio::process`)
+
 - `aria2.rs` + `youtube.rs`: pola `std::process` di dalam `spawn_blocking` +
   `Handle::current().block_on` per baris output diganti reader baris async
   (`ChildLines`, cancellation-safe), **ticker 500 ms** untuk cek pause/cancel
@@ -187,6 +229,7 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   sendiri) tidak mungkin lagi terjadi bila proses sudah selesai.
 
 ### Fixed
+
 - `universal.rs`: dua pemanggilan `Handle::current().block_on` **dari dalam
   konteks async** (jalur yt-dlp-missing dan reset-fallback) — keduanya panic
   "Cannot block the current thread from within a runtime" saat tereksekusi;

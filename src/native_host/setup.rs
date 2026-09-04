@@ -89,7 +89,7 @@ pub fn check_and_setup() -> Result<usize, Box<dyn std::error::Error>> {
     for dir in &dirs {
         let manifest = dir.join(format!("{}.json", HOST_NAME));
 
-        // M8: lewati browser yang tidak ter-install (profil         // M8: lewati browser yang tidak ter-install (profil tidak ada)
+        // M8: lewati browser yang tidak ter-install (profil tidak ada)
         if !browser_profile_exists(dir) {
             continue;
         }

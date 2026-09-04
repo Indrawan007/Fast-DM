@@ -26,14 +26,14 @@
   ];
 
   const QUALITIES = [
-    { id: "best_mp4", label: "Best Quality", icon: "🎬", desc: "MP4" },
+    { id: "best_mp4", label: "Kualitas Terbaik", icon: "🎬", desc: "MP4" },
     { id: "2160p", label: "4K Ultra HD", icon: "📺", desc: "2160p" },
     { id: "1440p", label: "2K QHD", icon: "📺", desc: "1440p" },
     { id: "1080p", label: "Full HD", icon: "📺", desc: "1080p" },
     { id: "720p", label: "HD", icon: "📺", desc: "720p" },
     { id: "480p", label: "SD", icon: "📺", desc: "480p" },
-    { id: "360p", label: "Low", icon: "📺", desc: "360p" },
-    { id: "audio_best", label: "Audio M4A", icon: "🎵", desc: "Best" },
+    { id: "360p", label: "Rendah", icon: "📺", desc: "360p" },
+    { id: "audio_best", label: "Audio M4A", icon: "🎵", desc: "Terbaik" },
     { id: "audio_mp3", label: "Audio MP3", icon: "🎵", desc: "320kbps" },
   ];
 
@@ -68,26 +68,11 @@
     return "https://www.youtube.com/watch?v=" + videoId;
   }
 
-  function sendDownload(url, quality) {
-    // Jangan kirim document.cookie: cookie login YouTube (SID/HSID/__Secure-*)
-    // adalah HttpOnly sehingga TIDAK ada di document.cookie. Biarkan background
-    // mengambilnya lewat chrome.cookies.getAll() (bisa akses HttpOnly).
-    chrome.runtime.sendMessage(
-      {
-        action: "download",
-        url: url,
-        headers: {},
-        quality: quality || "best_mp4",
-      },
-      (response) => {
-        if (chrome.runtime.lastError || !response || !response.success) {
-          showToast("Gagal mengirim ke Fast DM");
-        } else {
-          showToast("Terkirim ke Fast DM — " + (quality || "best_mp4"));
-        }
-      },
-    );
-  }
+  // Catatan: permintaan unduhan dikirim via chrome.runtime.sendMessage
+  // langsung dari handler (overlay & tombol video non-YouTube). Cookie
+  // TIDAK pernah diambil dari document.cookie — cookie login YouTube
+  // (SID/HSID/__Secure-*) HttpOnly, sehingga background mengambilnya
+  // lewat chrome.cookies.getAll().
 
   // ═══════════════════════════════════════════════
   // Styles (injected once)
