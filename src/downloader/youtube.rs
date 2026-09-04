@@ -436,6 +436,13 @@ pub async fn download(
 
     cmd.extend(cookie_args(&url));
 
+    // v2.9.1: batas kecepatan total yang dibagi per unduhan hidup (engine
+    // M3) — yt-dlp menerima satuan K/M yang sama dengan aria2. Sebelumnya
+    // flag ini tidak ada sehingga limit Pengaturan diabaikan jalur yt-dlp.
+    if !config.max_overall_speed.is_empty() && config.max_overall_speed != "0" {
+        cmd.extend(["--limit-rate".into(), config.max_overall_speed.clone()]);
+    }
+
     // v2.4.0 (D3): proxy dari Pengaturan — yt-dlp & ffmpeg turunannya ikut.
     if !config.proxy_url.trim().is_empty() {
         cmd.extend(["--proxy".into(), config.proxy_url.trim().to_string()]);

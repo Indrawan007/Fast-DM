@@ -100,6 +100,13 @@ pub async fn download(
     // Cookies (dari cookies.txt / browser) + Referer & header kustom extension
     cmd.extend(cookie_args(&url));
 
+    // v2.9.1: batas kecepatan total per unduhan hidup (pembagian M3 dari
+    // engine) — sama seperti jalur YouTube; sebelumnya limit Pengaturan
+    // tidak berlaku untuk yt-dlp.
+    if !config.max_overall_speed.is_empty() && config.max_overall_speed != "0" {
+        cmd.extend(["--limit-rate".into(), config.max_overall_speed.clone()]);
+    }
+
     // v2.4.0 (D3): proxy juga untuk jalur resolver universal
     if !config.proxy_url.trim().is_empty() {
         cmd.extend(["--proxy".into(), config.proxy_url.trim().to_string()]);

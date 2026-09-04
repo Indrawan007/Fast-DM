@@ -3,6 +3,35 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.9.1] - 2026-09-04
+
+### Fixed — perbaikan pasca-migrasi daemon RPC (B2)
+- **Magnet kembali bisa ditambahkan** — gate skema di `add_download` masih
+  hanya mengizinkan http/https/ftp (sisa komentar "magnet = roadmap"),
+  sehingga `magnet:?xt=…` dari GUI/ekstensi ditolak "Skema URL tidak
+  didukung" sebelum sempat mencapai daemon RPC. Kini `magnet:` diterima
+  (fungsi murni `is_supported_scheme`, +2 unit test).
+- **Pause/resume RPC benar-benar native** — task daemon yang dijeda kini
+  dipertahankan: GID disimpan di field baru `DownloadInfo.rpc_gid`
+  (serde default, kompatibel dengan session.json lama), resume memanggil
+  `unpause` pada GID yang SAMA. Sebelumnya resume memanggil `addUri`
+  baru sementara task paused lama tertinggal macet di daemon (duplikat
+  task + dua penulis potensial untuk file yang sama). GID yang hilang
+  (daemon di-restart) otomatis jatuh ke `addUri` ulang; GID dibersihkan
+  saat selesai/error/cancel.
+- **Batas kecepatan total kini berlaku juga untuk jalur yt-dlp** (YouTube
+  & resolver universal) lewat `--limit-rate` — sebelumnya flag limit di
+  Pengaturan hanya diteruskan ke aria2.
+
+### Changed — kebersihan & konsistensi
+- Dialog kualitas (GTK + overlay ekstensi) memakai Bahasa Indonesia
+  konsisten dengan seluruh UI ("Kualitas Terbaik", "Rendah", dst.) —
+  sebelumnya berbahasa Inggris.
+- Ekstensi: dua listener `chrome.runtime.onStartup` duplikat digabung
+  jadi satu; fungsi mati `sendDownload` di content.js dihapus (permintaan
+  unduhan dikirim inline dari handler).
+- `native_host/setup.rs`: komentar terduplikasi/rusak dirapikan.
+
 ## [2.9.0] - 2026-09-04
 
 ### Added — B2.2: migrasi HTTP/HTTPS/FTP ke daemon RPC (selesainya jalur B2)

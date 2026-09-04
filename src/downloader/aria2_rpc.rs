@@ -508,25 +508,47 @@ pub async fn download(
     };
     let options = adduri_options(&save_dir, out.as_deref(), cookie.as_deref(), &headers, cfg);
 
-    // pause-true dulu: hindari balapan "sudah jalan" sebelum tick pertama.
-    let gid = match rpc
-        .call("addUri", vec![json!([url]), json!(options)])
-        .await
-    {
-        Ok(Value::String(g)) => g,
-        Ok(other) => other
-            .as_array()
-            .and_then(|a| a.first())
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        Err(e) => {
-            if is_mag {
-                fail(&info, &tx, format!("addUri: {e}")).await;
-                return RpcOutcome::Done;
+    // v2.9.1: pause/resume NATIVE — bila unduhan ini sebelumnya dijeda
+    // (forcePause), task-nya masih hidup di daemon dengan GID yang kita
+    // simpan. Resume = unpause GID yang SAMA; addUri baru akan menduplikat
+    // task (GID paused lama macet di daemon + potensi dua penulis file).
+    let mut gid: Option<String> = info.lock().await.rpc_gid.clone();
+    let reused_gid = gid.is_some();
+    if let Some(ref g) = gid {
+        // Task yang dijeda pasti state paused → unpause cukup.
+        if let Err(e) = rpc.call("unpause", vec![json!(g.as_str())]).await {
+            // GID hilang (daemon di-restart/manual di-reset) → buang GID
+            // basi dan tambah task baru dari nol (addUri di bawah).
+            tracing::warn!("RPC: GID {g} tak bisa di-unpause ({e}) — addUri ulang");
+            info.lock().await.rpc_gid = None;
+            gid = None;
+        }
+    }
+    let gid = match gid {
+        Some(g) => g,
+        None => {
+            // pause-true dulu: hindari balapan "sudah jalan" sebelum tick
+            // pertama; unpause menyusul setelah addUri.
+            match rpc
+                .call("addUri", vec![json!([url]), json!(options)])
+                .await
+            {
+                Ok(Value::String(g)) => g,
+                Ok(other) => other
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                Err(e) => {
+                    if is_mag {
+                        fail(&info, &tx, format!("addUri: {e}")).await;
+                        return RpcOutcome::Done;
+                    }
+                    tracing::warn!("B2.2: addUri ditolak daemon — fallback per-proses: {e}");
+                    return RpcOutcome::Fallback;
+                }
             }
-            tracing::warn!("B2.2: addUri ditolak daemon — fallback per-proses: {e}");
-            return RpcOutcome::Fallback;
         }
     };
     if gid.is_empty() {
@@ -536,16 +558,28 @@ pub async fn download(
         }
         return RpcOutcome::Fallback;
     }
-    // GID baru tidak pernah pause → unpause mungkin error; abaikan (loop
-    // tetap mem-poll dan file terus jalan walau error ini muncul).
-    let _ = rpc.call("unpause", vec![json!(gid.clone())]).await;
+    if !reused_gid {
+        // GID baru lahir dalam keadaan paused (opsi `pause:true`) →
+        // unpause; error diabaikan (loop tetap mem-poll dan file jalan).
+        let _ = rpc.call("unpause", vec![json!(gid.as_str())]).await;
+    }
 
     {
         let mut i = info.lock().await;
         if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-            forget(&rpc, &gid).await;
+            // Semboyan pause/cancel yang datang saat kita menyiapkan daemon
+            // (unpause sudah terlanjur) — forcePause lagi supaya state daemon
+            // konsisten dengan keputusan user; GID tetap tersimpan untuk
+            // resume native berikutnya.
+            if i.status == DownloadStatus::Paused {
+                let _ = rpc.call("forcePause", vec![json!(gid.as_str())]).await;
+            } else {
+                forget(&rpc, &gid).await;
+                i.rpc_gid = None;
+            }
             return RpcOutcome::Done;
         }
+        i.rpc_gid = Some(gid.clone());
         i.status = DownloadStatus::Downloading;
         i.error_msg.clear();
         let _ = tx.send(DownloadEvent::Progress(i.clone()));
@@ -563,11 +597,18 @@ pub async fn download(
         };
         match user {
             DownloadStatus::Paused => {
+                // v2.9.1: task dibiarkan hidup di daemon dalam keadaan
+                // paused; GID sudah tersimpan di info.rpc_gid sehingga
+                // resume (start_download → download() lagi) tinggal
+                // unpause GID yang sama — bukan addUri duplikat.
                 let _ = rpc.call("forcePause", vec![json!(gid.as_str())]).await;
-                return RpcOutcome::Done; // resume → engine start_download → addUri gid lama
+                return RpcOutcome::Done;
             }
             DownloadStatus::Cancelled => {
-                forget(&rpc, &gid).await; // parsial dibiarkan (sama dgn proses path)
+                // Task dilepas dari daemon (parsial dibiarkan, sama seperti
+                // jalur proses) — GID tak valid lagi untuk resume.
+                forget(&rpc, &gid).await;
+                info.lock().await.rpc_gid = None;
                 return RpcOutcome::Done;
             }
             _ => {}
@@ -596,6 +637,7 @@ pub async fn download(
                 {
                     continue; // aksi user diproses tick berikutnya
                 }
+                i.rpc_gid = None; // hasil dihapus dari daftar daemon
                 if let Some(f) = p.first_file.as_deref() {
                     if aria2::is_generic_filename(&i.filename) {
                         i.filename = f.to_string();
@@ -622,6 +664,10 @@ pub async fn download(
                 {
                     continue;
                 }
+                // "error" yang disebabkan forceRemove hasil cancel user
+                // sudah dibersihkan di cabang Cancelled di atas; di sini
+                // task benar-benar mati → GID tak bisa di-resume.
+                i.rpc_gid = None;
                 i.status = DownloadStatus::Error;
                 i.error_msg =
                     p.error.unwrap_or_else(|| "aria2: download berhenti (error)".into());

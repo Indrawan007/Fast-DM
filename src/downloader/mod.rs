@@ -199,14 +199,14 @@ impl DownloadEngine {
         info.is_youtube = is_yt;
 
         // v2.3.0 (M11): tolak cepat skema non-download (blob:, data:, javascript:,
-        // file:, magnet: dst.) — dulu lolos dan baru gagal lambat di CLI dengan
-        // error yang tidak jelas. (magnet bisa didukung via aria2 RPC — roadmap.)
-        let scheme_ok = Url::parse(url)
-            .map(|u| matches!(u.scheme(), "http" | "https" | "ftp"))
-            .unwrap_or(false);
-        if !scheme_ok {
+        // file:, dll.) — dulu lolos dan baru gagal lambat di CLI dengan error
+        // yang tidak jelas.
+        // v2.9.1: `magnet:` DI-IZINKAN (didukung daemon aria2 RPC sejak B2.1;
+        // gate http/https/ftp lama keliru menolaknya). Magnet tanpa `://`
+        // tidak bisa diparse Url — ditangani is_magnet() lebih dulu.
+        if !is_supported_scheme(url) {
             info.status = DownloadStatus::Error;
-            info.error_msg = "Skema URL tidak didukung — hanya http, https, dan ftp.".to_string();
+            info.error_msg = "Skema URL tidak didukung — http, https, ftp, atau magnet.".to_string();
             let _ = self.event_tx.send(DownloadEvent::Error(info.clone()));
             self.downloads
                 .write()
@@ -522,6 +522,20 @@ fn spawn_supervised(
         // Pakai promote_config (limit mentah) — lihat komentar M3 (anti double-division).
         promote_next(downloads, tx, promote_config, dirty).await;
     });
+}
+
+/// Skema yang engine tahu cara mengunduhnya: http/https/ftp (aria2) dan
+/// `magnet:` (daemon RPC aria2, B2.1). `magnet:?xt=…` tidak punya `//`
+/// sehingga `url::Url` tetap bisa memparse-nya, tapi cek string awalan
+/// dipakai sebagai jalur cepat yang tahan terhadap variasi penulisan.
+/// Yang ditolak: `blob:`, `data:`, `javascript:`, `file:`, `about:`, dll.
+pub fn is_supported_scheme(url: &str) -> bool {
+    if aria2_rpc::is_magnet(url) {
+        return true;
+    }
+    Url::parse(url)
+        .map(|u| matches!(u.scheme(), "http" | "https" | "ftp"))
+        .unwrap_or(false)
 }
 
 /// URL file langsung (punya ekstensi file/media) → langsung ke aria2 tanpa
@@ -920,6 +934,30 @@ mod tests {
         assert!(!is_direct_file_url("https://x.com/api/resource"));
         assert!(!is_direct_file_url("https://youtube.com/watch?v=xxx"));
         assert!(!is_direct_file_url("https://x.com/"));
+    }
+
+    // ── is_supported_scheme (v2.9.1: magnet wajib lolos gate add_download) ──
+
+    #[test]
+    fn supported_scheme_accepts_http_ftp_magnet() {
+        assert!(is_supported_scheme("https://example.com/file.zip"));
+        assert!(is_supported_scheme("http://example.com/a"));
+        assert!(is_supported_scheme("ftp://server/pub/file.iso"));
+        assert!(is_supported_scheme(
+            "magnet:?xt=urn:btih:aaaabbbbccccdddd&dn=ubuntu"
+        ));
+        assert!(is_supported_scheme(
+            "  MAGNET:?xt=urn:btih:deadbeef"
+        )); // trim + case-insensitive
+    }
+
+    #[test]
+    fn supported_scheme_rejects_non_download_schemes() {
+        assert!(!is_supported_scheme("blob:https://site/abc"));
+        assert!(!is_supported_scheme("data:application/octet-stream;base64,AAAA"));
+        assert!(!is_supported_scheme("javascript:alert(1)"));
+        assert!(!is_supported_scheme("file:///home/user/a.zip"));
+        assert!(!is_supported_scheme("not a url at all"));
     }
 
     // ── is_valid_speed_limit ──
