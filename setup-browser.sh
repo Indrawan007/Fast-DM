@@ -61,6 +61,7 @@ done
 HOST_JSON=$(cat <<JSON
 {
   "name": "$HOST_NAME",
+  "description": "Fast Download Manager Native Host",
   "path": "$NATIVE_PATH",
   "type": "stdio",
   "allowed_origins": [
@@ -87,6 +88,7 @@ write_manifest() {
   mkdir -p "$dir"
   printf '%s\n' "$HOST_JSON" > "$dir/$HOST_NAME.json"
   echo "✓ $dir/$HOST_NAME.json"
+}
 
 echo "Setting up Native Messaging Hosts..."
 
