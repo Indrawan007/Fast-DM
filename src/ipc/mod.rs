@@ -62,6 +62,23 @@ const MAX_REQUEST_LINE: usize = 1024 * 1024;
 /// Lapisan kedua tetap ada: `downloader::redact_for_persist` membuang header
 /// sensitif dari snapshot session (membersihkan `session.json` warisan
 /// ≤2.9.4), dan tiap runner men-strip `\r\n` sebelum membentuk argumen CLI.
+///
+/// v2.10.0 (B1/B4): `Cookie`, `Authorization`, dan `Proxy-Authorization`
+/// DIHAPUS dari daftar. Alasannya dua:
+/// 1. **Tidak ada pemakainya.** Extension hanya pernah mengirim `Referer`
+///    (`background.js`, `content.js`, `popup.js`). Cookie sudah punya jalur
+///    sendiri yang lebih aman: field `cookies`+`domain` → file Netscape
+///    per-domain 0600 (`write_cookies_txt`) → `--load-cookies`/`--cookies`/
+///    opsi per-URI `cookie`. Lewat header, cookie justru berakhir di argv
+///    proses (terbaca di `/proc/<pid>/cmdline`) dan — sebelum v2.10.0 — ikut
+///    tertulis ke `session.json`.
+/// 2. **Kredensial tidak perlu menempuh jalur ini sama sekali**, jadi
+///    permukaan injeksi untuk proses lokal se-UID menyempit tanpa mengubah
+///    satu pun perilaku yang dipakai.
+///
+/// Lapisan kedua tetap ada: `downloader::redact_for_persist` membuang header
+/// sensitif dari snapshot session (membersihkan `session.json` warisan
+/// ≤2.9.4), dan tiap runner men-strip `\r\n` sebelum membentuk argumen CLI.
 pub(crate) const HEADER_ALLOWLIST: &[&str] =
     &["referer", "origin", "accept-language", "user-agent"];
 

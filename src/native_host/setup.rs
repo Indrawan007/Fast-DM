@@ -196,7 +196,14 @@ fn is_newly_granted_origin(ext_id: &str) -> bool {
 fn new_origin_notice(ext_id: &str) -> (String, String) {
     let registry = Config::config_dir().join(REGISTRY_FILE);
     let summary = "Fast DM: ekstensi browser baru diizinkan".to_string();
-    let body = format!("ID {ext_id} kini boleh memanggil native host. Cabut: {registry}");
+    // v2.10.0: `PathBuf` tidak mengimplementasi `Display`, jadi `{registry}`
+    // inline tidak terkompilasi (E0277) — crate v2.9.4 ternyata tidak bisa
+    // di-build sama sekali. `.display()` mencetak path apa adanya, tanpa
+    // tanda kutip `{:?}`, sehingga isi pesan tidak berubah.
+    let body = format!(
+        "ID {ext_id} kini boleh memanggil native host. Cabut: {}",
+        registry.display()
+    );
     (summary, body)
 }
 
@@ -226,7 +233,10 @@ fn notify_new_extension_id(ext_id: &str) {
     use std::os::unix::process::CommandExt; // process_group()
 
     let registry = Config::config_dir().join(REGISTRY_FILE);
-    tracing::warn!("Extension ID BARU di allowed_origins: {ext_id} (cabut: {registry})");
+    tracing::warn!(
+        "Extension ID BARU di allowed_origins: {ext_id} (cabut: {})",
+        registry.display()
+    );
 
     let (summary, body) = new_origin_notice(ext_id);
     let spawned = std::process::Command::new("notify-send")
@@ -248,7 +258,10 @@ fn notify_new_extension_id(ext_id: &str) {
         // loop pesan native host / accept IPC). Reap di thread terpisah: pemanggil
         // tidak pernah terblokir, dan anak tidak menjadi zombie karena `Child`
         // yang di-drop TIDAK di-reap oleh Rust.
-        Ok(child) => {
+        // v2.10.0: `mut` wajib — `Child::wait(&mut self)`. Tanpa ini crate
+        // tidak terkompilasi (E0596); salah satu dari dua error warisan 2.9.4
+        // yang membuat rilis itu tidak pernah bisa di-build.
+        Ok(mut child) => {
             std::thread::spawn(move || {
                 let _ = child.wait();
             });

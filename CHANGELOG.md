@@ -47,6 +47,14 @@ Label butir (A/B/C/D) merujuk pada hasil review, bukan `CODE-REVIEW.md`.
 
 ### Fixed
 
+- **v2.9.4 tidak bisa di-build sama sekali** — `native_host::setup` memakai
+  `{registry}` (sebuah `PathBuf`) sebagai argumen inline di `format!` dan
+  `tracing::warn!`, padahal `PathBuf` tidak mengimplementasi `Display`
+  (E0277 di dua tempat: `new_origin_notice` dan `notify_new_extension_id`).
+  Sekarang `registry.display()`, yang mencetak path apa adanya tanpa tanda
+  kutip `{:?}` — jadi isi pesan dan test `notice_names_the_id_and_how_to_revoke`
+  tidak berubah. Karena kesalahan ini menggagalkan kompilasi seluruh crate,
+  angka "190 test" yang diklaim rilis 2.9.4 tidak pernah benar-benar dijalankan.
 - **Skema URL berhuruf besar tidak lagi dirusak** (A1) —
   `normalize_url_input("HTTP://example.com/f.zip")` sebelumnya menghasilkan
   `https://HTTP://example.com/f.zip` dan gagal resolve dengan pesan yang tidak
@@ -123,6 +131,16 @@ Label butir (A/B/C/D) merujuk pada hasil review, bukan `CODE-REVIEW.md`.
   daftar ekstensi (2).
 
 ### Catatan rilis
+
+- Versi disamakan di `Cargo.toml`, `Cargo.lock`, dan
+  `extension/manifest.json` (2.10.0) — `Cargo.lock` ikut diperbarui karena CI
+  menjalankan `cargo build --release --locked`.
+- Tidak ada perubahan `README.md`: seluruh butir di atas adalah perbaikan dan
+  pengetatan, bukan fitur baru yang terlihat user.
+- `cargo clippy --all-targets -- -D warnings` di CI SENGAJA masih advisory
+  (`continue-on-error: true`). Menaikkannya jadi gate blocking tanpa bisa
+  menjalankan clippy lebih dulu berisiko membuat CI merah; itu pekerjaan
+  terpisah di mesin dev.
 
 - Versi disamakan di `Cargo.toml`, `Cargo.lock`, dan
   `extension/manifest.json` (2.10.0) — `Cargo.lock` ikut diperbarui karena CI
