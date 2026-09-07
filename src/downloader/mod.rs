@@ -35,7 +35,10 @@ pub struct DownloadEngine {
     restored_ids: Arc<Mutex<Vec<String>>>,
 }
 
-#[allow(dead_code)]
+// v2.9.4: `#[allow(dead_code)]` blanket di impl ini dihapus — semua method di
+// sini memang terpakai (dipanggil GUI/IPC atau internal engine), dan allow
+// blanket hanya menyembunyikan dead code yang muncul di kemudian hari.
+
 impl DownloadEngine {
     pub fn new(event_tx: mpsc::UnboundedSender<DownloadEvent>) -> Self {
         // Restore session sebelumnya — yang tadinya aktif jadi Paused agar bisa di-resume
@@ -543,15 +546,6 @@ impl DownloadEngine {
             }
         }
         self.mark_dirty();
-    }
-
-    pub async fn get_download(&self, id: &str) -> Option<DownloadInfo> {
-        let downloads = self.downloads.read().await;
-        if let Some(info) = downloads.get(id) {
-            Some(info.lock().await.clone())
-        } else {
-            None
-        }
     }
 
     pub async fn get_all_downloads(&self) -> Vec<DownloadInfo> {

@@ -26,7 +26,10 @@ pub fn build_window(
     gui_tx: mpsc::UnboundedSender<DownloadEvent>,
     rt: tokio::runtime::Handle,
 ) {
-    // Load CSS — scoped ke window saja
+    // Load CSS. Provider-nya dipasang display-wide (GTK4 tidak punya provider
+    // per-window) — yang membuatnya tidak bocor ke aplikasi lain adalah setiap
+    // rule di css.rs di-prefix selector `.fast-dm-window`, dan class itu hanya
+    // dipasang di window/dialog milik kita.
     let provider = CssProvider::new();
     provider.load_from_string(css::THEME_CSS);
 

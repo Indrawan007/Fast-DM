@@ -4,14 +4,12 @@ use gtk4::{
     Window,
 };
 
-#[allow(dead_code)]
 pub struct QualityOption {
     pub id: &'static str,
     pub label: &'static str,
     pub desc: &'static str,
 }
 
-#[allow(dead_code)]
 pub const QUALITIES: &[QualityOption] = &[
     QualityOption {
         id: "best_mp4",

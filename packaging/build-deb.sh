@@ -27,6 +27,11 @@ chmod 755 "$PKG/opt/fast-dm/fast-dm" "$PKG/opt/fast-dm/fast-dm-native"
 ln -sf /opt/fast-dm/fast-dm "$PKG/usr/bin/fast-dm"
 
 # control + postinst
+# Catatan: DEBIAN/control adalah control file paket BINER, dan deb822 hanya
+# mengizinkan baris komentar pada control file paket SUMBER (debian/control).
+# dpkg-deb menolak "#" di sini ("field name '#' must be followed by colon"),
+# jadi packaging/control wajib bebas komentar -- penjelasan apa pun taruh di
+# skrip ini atau di CHANGELOG.
 sed "s/@VERSION@/$VER/" packaging/control > "$PKG/DEBIAN/control"
 cat > "$PKG/DEBIAN/postinst" <<'EOF'
 #!/bin/sh

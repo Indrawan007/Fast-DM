@@ -47,11 +47,30 @@ const DEFAULT_CONFIG = {
 
 let config = { ...DEFAULT_CONFIG };
 
-chrome.storage.sync.get("config", (result) => {
-  if (result.config) config = { ...DEFAULT_CONFIG, ...result.config };
+// B4e: config pindah dari storage.sync ke storage.local. Config ini
+// per-mesin (intersep, ambang ukuran, daftar ekstensi file) — bukan preferensi
+// yang perlu ikut ke perangkat lain, sedangkan `sync` punya kuota ketat
+// (8 KB/item, 512 tulis/hari, throttle) yang bisa membuat `setConfig` gagal
+// tanpa terlihat oleh user (L6).
+chrome.storage.local.get("config", (result) => {
+  if (result.config) {
+    config = { ...DEFAULT_CONFIG, ...result.config };
+    return;
+  }
+  // Migrasi satu arah dari ≤2.9.3. Bila tulis ke local gagal, salinan di sync
+  // dibiarkan utuh supaya config lama tidak hilang.
+  chrome.storage.sync.get("config", (old) => {
+    if (!old.config) return;
+    config = { ...DEFAULT_CONFIG, ...old.config };
+    chrome.storage.local.set({ config }, () => {
+      if (chrome.runtime.lastError) return;
+      chrome.storage.sync.remove("config");
+    });
+  });
 });
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "sync" && changes.config)
+  // `registered_id` juga hidup di local — batasi ke perubahan config saja.
+  if (area === "local" && changes.config)
     config = { ...DEFAULT_CONFIG, ...changes.config.newValue };
 });
 
@@ -225,6 +244,12 @@ async function sendDownload(
     message.domain = domain;
   }
 
+  // B4f: badge pending — sendToNative menunggu hingga 25 detik sebelum
+  // timeout. Tanpa penanda ini user tidak dapat umpan balik sama sekali saat
+  // native host lambat atau tidak merespons. `holdMs = 0` menahannya sampai
+  // badge hasil (⬇/!) menggantikannya.
+  showBadge("…", "#a6adc8", 0);
+
   try {
     const response = await sendToNative(message);
     console.log("[FastDM] Download sent:", filename || url);
@@ -237,10 +262,22 @@ async function sendDownload(
   }
 }
 
-function showBadge(text, color) {
+// B4f: timer badge dilacak. Tanpa ini, urutan "…" → "⬇" (atau dua unduhan
+// berdekatan) membuat timeout milik badge LAMA menghapus badge yang baru
+// dipasang sebelum 3 detik habis.
+let badgeTimer = null;
+
+function showBadge(text, color, holdMs = 3000) {
+  if (badgeTimer) clearTimeout(badgeTimer);
   chrome.action.setBadgeText({ text });
   chrome.action.setBadgeBackgroundColor({ color });
-  setTimeout(() => chrome.action.setBadgeText({ text: "" }), 3000);
+  badgeTimer =
+    holdMs > 0
+      ? setTimeout(() => {
+          badgeTimer = null;
+          chrome.action.setBadgeText({ text: "" });
+        }, holdMs)
+      : null;
 }
 
 // ═══════════════════════════════════════════════
@@ -444,7 +481,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.action === "setConfig") {
     config = { ...config, ...message.config };
-    chrome.storage.sync.set({ config });
+    chrome.storage.local.set({ config });
     sendResponse({ success: true });
     return false;
   }

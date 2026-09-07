@@ -32,8 +32,10 @@ pub fn run() {
     let mut stdin = stdin.lock();
     let mut stdout = stdout.lock();
 
-    // Baca satu message, respond, exit
-    // Chrome akan spawn ulang native host untuk message baru
+    // Loop sampai EOF, bukan "satu message lalu exit": Chrome menutup stdin
+    // setelah respons terkirim (untuk sendNativeMessage) sehingga loop ini
+    // memang berhenti di sana — tetapi bentuk loop juga melayani koneksi
+    // jangka panjang via chrome.runtime.connectNative tanpa perubahan kode.
     loop {
         // Read 4-byte length
         let mut len_buf = [0u8; 4];

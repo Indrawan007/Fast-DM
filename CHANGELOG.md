@@ -3,7 +3,166 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
-## [Unreleased]
+## [2.9.4] - 2026-09-07
+
+### Security
+
+- **Header dari extension kini disaring allow-list di boundary IPC**
+  (`ipc::sanitize_headers`) — sebelumnya field `headers` pada pesan IPC
+  diteruskan apa adanya ke argumen CLI aria2 (`--header=`) dan yt-dlp
+  (`--add-header`), sehingga proses lokal mana pun dengan UID sama bisa
+  menyuntikkan header arbitrer ke permintaan unduhan. Yang diterima sekarang
+  hanya `Referer`, `Origin`, `Cookie`, `Authorization`, `Accept-Language`, dan
+  `User-Agent` (dicocokkan case-insensitive, casing asli dipertahankan).
+  Control char (`\r`, `\n`, `\0`, tab, DEL) dibuang dari nama maupun nilai
+  sebagai lapisan kedua anti header-injection, whitespace di ujung di-trim,
+  nilai dipotong di char boundary pada 8 KB, dan jumlah dibatasi 16 entri
+  dengan urutan deterministik (tidak bergantung acakan `HashMap`). Tidak ada
+  perubahan perilaku yang terlihat user: extension hanya pernah mengirim
+  `Referer`. Menutup rekomendasi `CODE-REVIEW.md` §C3.
+- **Validasi extension ID diperketat ke bentuk Chrome yang sebenarnya**
+  (`native_host::setup::is_valid_extension_id`) — tepat 32 karakter dari
+  himpunan `a`–`p`. Validasi lama ("≥20 karakter alfanumerik apa pun")
+  membiarkan string arbitrer masuk `allowed_origins` manifest Native Messaging,
+  dan tidak konsisten dengan `setup-browser.sh` yang sudah lama menolak apa pun
+  di luar `^[a-p]{32}$`. Kedua penulis manifest itu kini setuju — penting
+  karena keduanya menulis file yang sama. Menutup rekomendasi §C2.
+- **`extension_ids.json` dibatasi 8 entri dengan eviksi LRU** — setiap ID
+  terdaftar menjadi satu origin yang diizinkan memanggil native host, jadi
+  tanpa batas proses lokal bisa memperbesar daftar origin (dan manifest) tanpa
+  batas. ID yang di-register ulang digeser ke posisi paling baru agar yang
+  masih aktif tidak ter-evict lebih dulu, dan entri warisan validasi lama yang
+  tidak valid dibuang saat registry dibaca.
+- **User kini diberi tahu saat sebuah extension ID baru diizinkan memanggil
+  native host** (menutup sisa rekomendasi §C2 — konfirmasi user saat `register`)
+  — aksi `register` bisa datang dari socket IPC (proses lokal mana pun dengan
+  UID sama, setelah cek `SO_PEERCRED`) maupun dari native host, dan ID yang
+  bentuknya valid akan diterima. `is_valid_extension_id` dan cap LRU membatasi
+  seberapa jauh itu bisa pergi, tetapi tidak satu pun bisa membedakan
+  extension sah dari proses lokal yang sedang memasang persistensi untuk dirinya
+  sendiri. Hanya user yang bisa — jadi sekarang user diberi tahu: selalu lewat
+  `tracing::warn!`, plus notifikasi desktop best-effort lewat `notify-send`.
+  - Notifikasi hanya untuk origin yang BENAR-BENAR baru. `push_registered_id`
+    kini mengembalikan apakah ID itu baru bagi registry, sehingga register ulang
+    (retry `background.js`, browser restart) yang hanya me-refresh posisi LRU
+    tidak memunculkan notifikasi berulang. ID bawaan `EXT_ID` dilewati:
+    `make_origins` selalu memasangnya di posisi pertama apa pun isi registry,
+    jadi register atas ID itu tidak memberi akses baru kepada siapa pun dan
+    mengumumkannya hanya menjadi noise pada pemasangan normal.
+  - `notify-send` (libnotify) dipakai, bukan notifikasi GTK: `register`
+    diproses di process native host yang tidak punya koneksi display/GTK sama
+    sekali, dan objek GTK tidak `Send` sehingga tidak bisa diserahkan ke task
+    IPC. Spawn-nya memakai `std::process`, bukan `tokio::process`, karena
+    `native_host::run()` adalah loop stdio sinkron tanpa runtime tokio —
+    `tokio::process` di jalur itu akan panic. Kegagalannya tidak pernah
+    menggagalkan register. `libnotify-bin`
+    ditambahkan sebagai `Recommends` (bukan `Depends`) di `packaging/control`
+    supaya tersedia pada pemasangan normal tanpa memaksa container/minimal
+    install memasang stack libnotify demi fitur best-effort.
+  - Pengumuman dilakukan tepat setelah registry ditulis, bukan setelah manifest:
+    registry itulah sumber `allowed_origins` dan ikut dipakai `check_and_setup`
+    saat start, jadi izinnya bertahan walaupun penulisan manifest kali ini gagal.
+  - Anak proses `notify-send` di-reap di thread terpisah. Ia biasanya selesai
+    dalam milidetik tetapi bisa menggantung bila daemon notifikasi macet,
+    sedangkan pemanggilnya adalah loop pesan native host / accept IPC yang tidak
+    boleh terblokir; `std::process::Child` yang di-drop TIDAK di-reap Rust, jadi
+    tanpa `wait()` ia menjadi zombie selama proses induk hidup.
+
+### Fixed
+
+- **Server IPC tidak lagi mati permanen saat `accept()` gagal** — satu error
+  transien (fd habis = `EMFILE`/`ENFILE`, `ENOBUFS`, `ECONNABORTED`) dulu
+  dipropagasi keluar dari `ipc::start_server` lewat `?`, dan pemanggilnya hanya
+  menulis log. Akibatnya native messaging putus untuk SELURUH sesi aplikasi:
+  extension tidak pernah bisa mencapai GUI lagi sampai `fast-dm` di-restart,
+  tanpa petunjuk apa pun di UI. Sekarang error dicatat lalu `accept` dicoba
+  ulang dengan backoff eksponensial 50 ms → 2 dtk (di-cap), dan counter
+  kegagalan di-reset begitu satu koneksi berhasil. Kegagalan `bind` dan
+  `set_permissions` saat start tetap fatal seperti sebelumnya.
+
+- **Badge ekstensi tidak lagi dihapus oleh timer milik badge sebelumnya** —
+  setiap `showBadge` memasang `setTimeout` 3 detik yang tidak pernah dibatalkan,
+  jadi urutan badge pending → badge hasil (atau dua unduhan berdekatan) membuat
+  timeout dari badge LAMA menghapus badge yang baru dipasang lebih cepat dari
+  seharusnya. Timer kini dilacak dan dibatalkan sebelum badge baru dipasang.
+
+### Changed
+
+- **Dead code dibersihkan** — `DownloadEngine::get_download()` dihapus (nol
+  pemanggil di seluruh crate; `get_all_downloads()` yang dipakai GUI/IPC).
+  `#[allow(dead_code)]` blanket pada `impl DownloadEngine` ikut dihapus karena
+  hanya menyembunyikan dead code yang muncul di kemudian hari, bersama tiga
+  `#[allow(dead_code)]` basi di `gui/youtube_dialog.rs` (`QualityOption`,
+  `QUALITIES`, `show_quality_dialog` — ketiganya terpakai).
+- Komentar yang menyesatkan diperbaiki: `native_host::run()` bukan "baca satu
+  message, respond, exit" melainkan loop sampai EOF (bentuk yang juga melayani
+  `chrome.runtime.connectNative`), dan provider CSS di `gui::window` dipasang
+  display-wide — yang mencegahnya bocor ke aplikasi lain adalah prefix selector
+  `.fast-dm-window` pada setiap rule, bukan cara provider dipasang.
+
+- **Biaya `sniffer.js` di halaman tanpa media ditekan mendekati nol**
+  (menutup rekomendasi `CODE-REVIEW.md` §B4 a–d) — script ini di-inject ke
+  MAIN world setiap halaman yang dikunjungi, padahal mayoritas halaman tidak
+  punya media sama sekali:
+  - `persist()` di-batch per microtask dan hanya menulis bila kandidat
+    benar-benar bertambah. Sebelumnya seluruh `Set` (hingga 50 URL) di-
+    `JSON.stringify` ulang setiap kali satu URL lolos saringan — puluhan kali
+    per burst mutasi. Microtask dipilih, bukan `requestAnimationFrame`, karena
+    rAF di-throttle (bahkan dihentikan) di tab latar sehingga kandidat bisa
+    tidak pernah terbaca oleh `content.js`.
+  - `MutationObserver` memindai hanya node yang baru ditambahkan atau yang
+    atribut `src`-nya berubah, bukan `querySelectorAll` atas SELURUH dokumen
+    tiap burst 300 ms. Biaya kini sebanding dengan ukuran konten baru, bukan
+    ukuran halaman; halaman berisi ribuan `a[href]` dulu membayar sapuan penuh
+    berulang kali.
+  - Halaman yang sampai 8 detik setelah `load` tidak punya kandidat sniffing
+    maupun elemen media masuk mode _dormant_: callback observer tinggal
+    memeriksa nama tag node baru. Tidur tidak permanen — sniffer bangun lagi
+    (dan boleh tidur lagi) bila muncul `video`/`audio`/`source`, `<a href>`
+    ber-ekstensi media, atau URL berubah (navigasi SPA).
+    `<a href="…mp4">` yang berada DI DALAM subtree baru saat dormant memang
+    tidak membangunkan sniffer; tombol "Pindai" di popup tetap menemukannya
+    karena `detectVideos` pada `content.js` menyapu `a[href]` seluruh dokumen
+    secara on-demand dan tidak bergantung pada sniffer.
+  - `manifest.json`: kedua content script kini mengecualikan properti Google
+    (`*://*.google.com/*`, `*://*.googleapis.com/*`, `*://*.gstatic.com/*`)
+    untuk memangkas injeksi MAIN-world. `host_permissions` tetap `<all_urls>`
+    karena memang diperlukan untuk cookies/referer. Intersep unduhan dan
+    context menu tidak terpengaruh (keduanya API service worker, bukan content
+    script), dan embed YouTube di halaman Google tetap mendapat overlay karena
+    dokumen iframe-nya berasal dari `youtube.com`.
+- **Config ekstensi pindah dari `chrome.storage.sync` ke
+  `chrome.storage.local`** (menutup §B4e; L6 sebagian — sisi `storage.sync`
+  selesai, sisi "timer badge hilang saat service worker di-suspend" belum) —
+  config ini per-mesin (intersep, ambang ukuran, daftar ekstensi file), bukan
+  preferensi yang perlu ikut ke perangkat lain, sedangkan `sync` berkuota ketat
+  (8 KB/item, ±512 tulis/hari, di-throttle) yang bisa membuat "Simpan" di popup
+  gagal tanpa pesan apa pun. Config lama dimigrasi satu arah saat service worker
+  start lalu salinan di `sync` dihapus supaya tidak ada dua sumber kebenaran;
+  bila tulis ke `local` gagal, salinan `sync` dibiarkan utuh agar config user
+  tidak hilang.
+- **Badge `…` selama unduhan sedang dikirim ke aplikasi** (menutup §B4f) —
+  `sendToNative` menunggu hingga 25 detik sebelum timeout, dan sebelumnya badge
+  baru muncul SETELAH native host menjawab. Selama cold-start GUI user tidak
+  mendapat umpan balik apa pun dan wajar mengira kliknya tidak terdaftar. Badge
+  pending kini ditahan sampai badge hasil (`⬇`/`!`) menggantikannya.
+
+### Added
+
+- 27 unit test baru: `ipc::accept_backoff` (4) dan `ipc::sanitize_headers`
+  beserta helper `truncate_chars`/`strip_control` (11) — `ipc/mod.rs` naik dari
+  0 ke 15 test; serta `native_host::setup` (12) untuk `is_valid_extension_id`,
+  `push_registered_id`, dan `make_origins` termasuk penjaga agar
+  `allowed_origins` tidak pernah memakai wildcard. Kedua modul itu sebelumnya
+  tidak punya test sama sekali (total test crate 159 → 186).
+- 4 unit test tambahan di `native_host::setup` untuk §C2 (total modul ini
+  12 → 16): ID ter-evict yang mendaftar lagi dilaporkan sebagai baru, `EXT_ID`
+  bawaan bukan origin baru (diperiksa dalam bentuk trim, bentuk mentah
+  `include_str!` yang membawa newline, dan bentuk ber-padding spasi), ID valid
+  lain adalah origin baru, dan teks notifikasi menyebut ID beserta berkas
+  registry sebagai cara mencabut izin. Total test crate 186 → 190.
+
+## [2.9.3] - 2026-09-07
 
 ### Fixed
 

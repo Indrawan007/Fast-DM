@@ -41,6 +41,9 @@
 | B2.1 magnet via RPC               | ✅ v2.7.0  | `aria2_rpc.rs`: daemon self-spawn (loopback+secret 600), addUri/tellStatus/forcePause, changeGlobalOption limit live                                                                                                                           |
 | B2.2 migrasi penuh RPC            | ✅ v2.9.0  | http/https/ftp file langsung via daemon (pipeline resolve HTML/CD + pre-check disk dipertahankan; cookie/header jadi opsi per-URI); limit global live untuk SEMUA unduhan; fallback per-proses bila daemon tak tersedia; magnet tetap RPC-only |
 | D8.1 close-behavior+autostart     | ✅ v2.8.0  | minimize-to-close opt-in (re-show via single-instance present()), XDG autostart write/remove; tray SNI ditangguh (dep berisiko)                                                                                                                |
+| L6 storage.sync & badge SW        | ⚠️ v2.9.4  | config → `chrome.storage.local` (migrasi satu arah; gagal tulis ke local TIDAK menghapus salinan sync); timer badge dilacak agar badge bertumpuk tidak saling hapus + badge pending `…` saat `sendDownload`. SISA: timer mati saat SW suspend  |
+| B4 sniffer/content.js performa    | ✅ v2.9.4  | `persist()` batch per microtask (hanya saat kandidat bertambah); MutationObserver memindai _added nodes_, bukan seluruh dokumen; 8 dtk tanpa sinyal media → _dormant_ (wake: node/`a[href]` media, URL SPA); `exclude_matches` properti Google |
+| C2 konfirmasi register ext        | ✅ v2.9.4  | `push_registered_id` melaporkan ID baru; `register_extension_id` mengumumkan origin baru via `tracing::warn!` + `notify-send` (best-effort, di-reap di thread terpisah). `EXT_ID` bawaan dilewati — `make_origins` selalu memasangnya          |
 | L2 AGENTS.md usang                | ✅ Fixed   | ditulis ulang v0.2.0 sesuai arsitektur nyata                                                                                                                                                                                                   |
 | L10 CI tanpa clippy/audit         | ⚠️ Partial | Clippy sudah berjalan sebagai advisory gate; cargo-deny/audit belum ditambahka                                                                                                                                                                 |
 | D-x (fitur), B-x (arsitektur RPC) | 📋 Roadmap | lihat §5 dokumen ini                                                                                                                                                                                                                           |
@@ -191,7 +194,11 @@ Extension (SW) ──sendNativeMessage──> fast-dm --native ──1 baris JSO
 
 - `manifest.json`: MV3, `key` dipin → ID unpacked stabil (`EXT_ID` di repo = ID yang sama),
   permission: `downloads, nativeMessaging, storage, activeTab, contextMenus, cookies,
-clipboardRead`, host `<all_urls>`.
+clipboardRead`, host `<all_urls>`. Sejak v2.9.4 kedua content script memakai
+  `exclude_matches` properti Google (`*.google.com`, `*.googleapis.com`, `*.gstatic.com`)
+  untuk memangkas injeksi MAIN-world; intersep unduhan dan context menu TIDAK terpengaruh
+  karena keduanya API service worker, dan embed YouTube di halaman Google tetap mendapat
+  overlay karena dokumen iframe-nya berasal dari `youtube.com`.
 - `background.js` (service worker):
   1. **auto-register extension id** ke NMH (sekali per ID; retry on startup/install);
   2. `chrome.downloads.onCreated` → **intersep**: filter (exclude pattern, ekstensi file,
@@ -205,14 +212,21 @@ clipboardRead`, host `<all_urls>`.
 - `sniffer.js` (MAIN world, `document_start`): **hook `fetch` & `XHR.open`** + scan
   `<video>/<audio>/<source>/<a href>` → kumpulkan URL media (`.m3u8/.mpd/.mp4/…`,
   resolve relatif→absolut, cap 50) ke `documentElement.dataset.fastdmMedia` (JSON)
-  — satu-satunya jembatan MAIN→ISOLATED world.
+  — satu-satunya jembatan MAIN→ISOLATED world. v2.9.4 menekan biaya di halaman tanpa
+  media: `persist()` di-batch per microtask (bukan rAF — rAF di-throttle di tab latar)
+  dan hanya menulis saat kandidat benar-benar bertambah; MutationObserver memindai node
+  yang baru ditambah / atribut `src`-nya berubah, bukan seluruh dokumen; dan bila sampai
+  8 dtk setelah `load` tidak ada kandidat maupun elemen media, sniffer masuk mode
+  _dormant_ — callback tinggal memeriksa nama tag, lalu bangun otomatis (dan boleh tidur
+  lagi) bila ada node media, `<a href>` ber-ekstensi media, atau URL berubah (SPA).
 - `content.js` (ISOLATED): overlay ⚡ IDM-like di player YouTube (watch/shorts/embed,
   dropdown 9 kualitas, auto-detect navigasi SPA via MutationObserver debounce 400 ms,
   listener klik-luar dipasang sekali anti-leak); di situs non-YouTube: tombol ⚡ per
   `<video>`, prioritas target: **kandidat sniffer > src langsung (bukan `.php/.html`) >
   URL halaman** — menyelamatkan wrapper page yang ternyata media.
 - `popup.js/html/css`: status koneksi (ping), kirim URL (auto-paste clipboard),
-  scan video aktif di tab, toggle intersep/enabled (sync ke `chrome.storage.sync`).
+  scan video aktif di tab, toggle intersep/enabled (tersimpan di `chrome.storage.local`
+  sejak v2.9.4, dimigrasi otomatis dari `sync`).
 
 ### 2.8 Persistensi & Config
 
@@ -375,7 +389,12 @@ concurrency cancel; `.deb` + zip extension siap-pakai; dev-mode NMH wrapper otom
    dan hitung ulang `total` hanya saat jumlah item berubah. `promote_next` O(n) per selesai
    — untuk N≤200 tak masalah; bila session cap dinaikkan, gunakan `BTreeSet<(created, id)>`
    untuk antrean FIFO yang deterministik (fix L4 juga).
-4. **Sniffer/content.js**: (a) `persist()` men-serialize ulang 50 URL JSON per event —
+4. ✅ **Sniffer/content.js** _(v2.9.4 — a–f selesai; catatan: `persist()` memakai
+   microtask bukan rAF karena rAF di-throttle di tab latar; dormant 8 dtk dengan wake
+   pada node media / `a[href]` media / URL SPA; `exclude_matches` dibatasi properti
+   Google agar embed YouTube tetap dapat overlay; badge `…` ditahan sampai native host
+   menjawab; timer badge dilacak agar tidak saling menghapus)_:
+   (a) `persist()` men-serialize ulang 50 URL JSON per event —
    batch dengan rAF/microtask; (b) `scan()` seluruh `a[href]` tiap burst 300 ms — cukup
    scan _added nodes_ dari MutationObserver; (c) di situs non-YouTube, gate penuh:
    skip scan bila tidak ada elemen media setelah N detik; (d) `matches` manifest bisa
@@ -393,18 +412,21 @@ concurrency cancel; `.deb` + zip extension siap-pakai; dev-mode NMH wrapper otom
 ### C. Keamanan & privasi (hardening)
 
 1. A + K1–K3 di atas adalah intinya; tambahan:
-2. **Batas `extension_ids.json`** + konfirmasi user saat `register` (mis. notification
-   "ekstensi baru terhubung") — saat ini proses lokal tanpa izin bisa mendaftarkan ID apa pun
-   yang valid bentuknya ke manifest (serangan persistensi lokal).
-3. **Header allow-list**: `headers` IPC diterima apa adanya ke CLI; batasi ke
+2. ✅ **Batas `extension_ids.json`** + konfirmasi user saat `register` _(v2.9.4: cap 8 entri
+   dengan eviksi LRU; `push_registered_id` melaporkan ID baru; origin yang benar-benar baru
+   diumumkan lewat `tracing::warn!` + notifikasi desktop `notify-send` best-effort. `EXT_ID`
+   bawaan dilewati karena `make_origins` selalu memasangnya, jadi register atas ID itu tidak
+   memberi akses baru)_ — sebelumnya proses lokal tanpa izin bisa mendaftarkan ID apa
+   pun yang valid bentuknya ke manifest (serangan persistensi lokal).
+   . **Header allow-list**: `headers` IPC diterima apa adanya ke CLI; batasi ke
    `Referer, Origin, Cookie, Authorization, Accept-Language, User-Agent` + tolak
    `Host`, `Content-Length`, `Connection` (aria2 menolak juga, tapi quick-fail lebih bersih).
-4. **`--referer` eksplisit** untuk aria2 (sekarang via `--header=Referer:` — fine, tapi
+3. **`--referer` eksplisit** untuk aria2 (sekarang via `--header=Referer:` — fine, tapi
    tambahkan `--http-auth-challenge` dan pertimbangkan `Netrc` bila user butuh).
-5. **Redaksi URL bertoken di `session.json`/log** (opsi "redact query" untuk share-debug) —
+4. **Redaksi URL bertoken di `session.json`/log** (opsi "redact query" untuk share-debug) —
    log `tracing::info!("Downloading: {filename}")` sudah aman, tapi `list` IPC mengembalikan
    URL penuh; tambahkan mode "ringkas".
-6. Manifest extension: `clipboardRead` dipakai untuk auto-paste — pindah ke tombol
+5. Manifest extension: `clipboardRead` dipakai untuk auto-paste — pindah ke tombol
    "Paste" eksplisit (menghilangkan permission scary) atau `activeTab`-only +
    `user_gesture`; pertimbangkan pemisahan `host_permissions` per fitur dengan
    `optional_permissions` untuk cookies `<all_urls>`.

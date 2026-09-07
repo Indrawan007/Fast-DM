@@ -34,6 +34,100 @@ struct IpcResponse {
 
 const MAX_REQUEST_LINE: usize = 1024 * 1024;
 
+/// v2.9.4 (C3): allow-list header yang boleh diteruskan extension ke CLI
+/// downloader (aria2 `--header=`, yt-dlp `--add-header`).
+///
+/// Sebelumnya `headers` dari IPC diterima apa adanya — proses lokal mana pun
+/// dengan UID sama bisa menyuntikkan header arbitrer ke permintaan unduhan
+/// (`Host`, `Content-Length`, `Transfer-Encoding`, `Cookie` sesuka hati).
+/// Allow-list (bukan deny-list) dipakai karena extension hanya benar-benar
+/// mengirim `Referer` (lihat background.js / content.js / popup.js), sehingga
+/// daftar ini menutup celah tanpa mengubah perilaku yang dipakai.
+///
+/// Dicocokkan case-insensitive — nama header HTTP memang case-insensitive.
+pub(crate) const HEADER_ALLOWLIST: &[&str] = &[
+    "referer",
+    "origin",
+    "cookie",
+    "authorization",
+    "accept-language",
+    "user-agent",
+];
+
+/// Batas jumlah header per permintaan. Dengan allow-list 6 nama saat ini batas
+/// ini praktis tak terjangkau (kunci HashMap unik) — dipasang sebagai penjaga
+/// bila daftar diperluas, supaya argumen CLI tidak bisa tumbuh tanpa batas.
+pub(crate) const MAX_HEADERS: usize = 16;
+
+/// Batas panjang nilai satu header (byte). Cookie bisa panjang; 8 KB lebih
+/// dari cukup dan menjaga argumen CLI tetap waras.
+pub(crate) const MAX_HEADER_VALUE_LEN: usize = 8 * 1024;
+
+/// Bersihkan header masuk sebelum dipakai engine/CLI. Aturan:
+/// - nama harus ada di `HEADER_ALLOWLIST` (case-insensitive) — casing asli
+///   DIPERTAHANKAN di keluaran,
+/// - nama/nilai kosong (atau hanya whitespace) dibuang,
+/// - `\r`, `\n`, `\0` dan control char lain dihapus dari nama & nilai
+///   (anti header injection — lapisan kedua; downloader juga strip `\r\n`),
+/// - nilai dipotong di char boundary bila melebihi `MAX_HEADER_VALUE_LEN`,
+/// - jumlah dibatasi `MAX_HEADERS` dengan urutan DETERMINISTIK (nama kunci
+///   diurut case-insensitive) supaya hasil tidak bergantung acakan HashMap.
+pub(crate) fn sanitize_headers(
+    raw: std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    let mut entries: Vec<(String, String)> = raw.into_iter().collect();
+    // Urutkan agar pemotongan MAX_HEADERS deterministik & bisa diuji.
+    entries.sort_by(|a, b| {
+        let ka = a.0.to_ascii_lowercase();
+        let kb = b.0.to_ascii_lowercase();
+        ka.cmp(&kb).then_with(|| a.0.cmp(&b.0))
+    });
+
+    let mut out = std::collections::HashMap::new();
+    for (key, value) in entries {
+        if out.len() >= MAX_HEADERS {
+            tracing::debug!("Header dibuang (melebihi {} entri): {}", MAX_HEADERS, key);
+            continue;
+        }
+        // Buang control char (\r\n = pemisah header) lalu OWS di ujung —
+        // whitespace di sekitar nama/nilai header tidak signifikan menurut HTTP.
+        let stripped_key = strip_control(&key);
+        let stripped_value = strip_control(&value);
+        let clean_key = stripped_key.trim();
+        let clean_value = stripped_value.trim();
+        if clean_key.is_empty() || clean_value.is_empty() {
+            continue;
+        }
+        if !HEADER_ALLOWLIST.contains(&clean_key.to_ascii_lowercase().as_str()) {
+            tracing::debug!("Header di luar allow-list dibuang: {}", clean_key);
+            continue;
+        }
+        let clean_value = truncate_chars(clean_value, MAX_HEADER_VALUE_LEN);
+        // Kunci casing asli yang dikirim ke CLI (`strip_control`/`trim` tidak
+        // mengubah huruf besar/kecil; pencocokan allow-list yang lowercase).
+        out.insert(clean_key.to_string(), clean_value);
+    }
+    out
+}
+
+/// Buang karakter control (0x00–0x1f & 0x7f) — termasuk `\r\n` pemisah header.
+fn strip_control(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// Potong ke maksimal `max` BYTE tanpa memotong char UTF-8 di tengah
+/// (slice byte mentah akan panic pada karakter multi-byte).
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum RequestLine {
     Eof,
@@ -88,6 +182,22 @@ fn peer_uid_ok(stream: &tokio::net::UnixStream) -> bool {
     }
 }
 
+/// Backoff untuk `accept()` yang gagal beruntun: 50 ms, 100, 200, 400, 800,
+/// 1600, lalu di-cap 2000 ms. Murni (tanpa I/O) supaya bisa di-unit test.
+///
+/// Cap 2 dtk dipilih agar server tetap terasa "hidup" untuk browser (native
+/// host punya timeout 5 dtk di `forward_to_gui`) sementara loop tidak sibuk
+/// berputar saat penyebabnya permanen.
+pub(crate) fn accept_backoff(consecutive_failures: u32) -> std::time::Duration {
+    const BASE_MS: u64 = 50;
+    const MAX_MS: u64 = 2_000;
+    // exponent dibatasi 6 (BASE_MS << 6 = 3200) lalu di-cap MAX_MS —
+    // saturating di dua tempat agar u32 besar tidak overflow shift.
+    let exp = consecutive_failures.saturating_sub(1).min(6);
+    let ms = BASE_MS.saturating_mul(1u64 << exp).min(MAX_MS);
+    std::time::Duration::from_millis(ms)
+}
+
 pub async fn start_server(engine: Arc<DownloadEngine>) -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = Config::ipc_socket_path();
     cleanup_legacy_socket();
@@ -114,8 +224,31 @@ pub async fn start_server(engine: Arc<DownloadEngine>) -> Result<(), Box<dyn std
 
     tracing::info!("IPC listening on {}", socket_path.display());
 
+     // v2.9.4: error `accept()` TIDAK boleh mematikan server. Dulu `?` langsung
+    // mempropagasi keluar dari `start_server`, dan pemanggilnya hanya menulis
+    // log — akibatnya satu error transien (fd habis = EMFILE/ENFILE, ENOBUFS,
+    // ECONNABORTED) mematikan IPC untuk SELURUH sesi aplikasi: extension tidak
+    // akan pernah bisa mencapai GUI lagi sampai app di-restart. Sekarang setiap
+    // error dicatat lalu dicoba lagi dengan backoff eksponensial terbatas.
+    let mut accept_failures = 0u32;
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, _) = match listener.accept().await {
+            Ok(pair) => {
+                accept_failures = 0;
+                pair
+            }
+            Err(e) => {
+                accept_failures += 1;
+                let delay = accept_backoff(accept_failures);
+                tracing::warn!(
+                    "IPC accept gagal ({e}) — mencoba lagi dalam {} ms (kegagalan beruntun #{})",
+                    delay.as_millis(),
+                    accept_failures
+                );
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+        };
 
         if !peer_uid_ok(&stream) {
             tracing::warn!("IPC: koneksi ditolak (peer UID != uid kita) — ditutup");
@@ -183,15 +316,12 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
                 }
             }
 
+            // v2.9.4 (C3): header disaring di boundary ini — sebelum mencapai
+            // engine dan argumen CLI aria2/yt-dlp. Lihat `sanitize_headers`.
+            let headers = sanitize_headers(msg.headers);
+
             let id = engine
-                .add_download(
-                    &url,
-                    msg.filename.as_deref(),
-                    None,
-                    true,
-                    msg.headers,
-                    msg.quality,
-                )
+                .add_download(&url, msg.filename.as_deref(), None, true, headers, msg.quality)
                 .await;
 
             IpcResponse {
@@ -364,6 +494,8 @@ fn write_cookies_txt(cookie_header: &str, domain: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn request_line_accepts_value_within_limit() {
@@ -384,5 +516,172 @@ mod tests {
         let input = std::io::Cursor::new(Vec::<u8>::new());
         let got = read_request_line(input, 64).await.unwrap();
         assert_eq!(got, RequestLine::Eof);
+    }
+
+    // ── v2.9.4: accept_backoff — IPC server tidak boleh mati saat accept error ──
+
+    #[test]
+    fn accept_backoff_grows_exponentially() {
+        assert_eq!(accept_backoff(1), Duration::from_millis(50));
+        assert_eq!(accept_backoff(2), Duration::from_millis(100));
+        assert_eq!(accept_backoff(3), Duration::from_millis(200));
+        assert_eq!(accept_backoff(4), Duration::from_millis(400));
+        assert_eq!(accept_backoff(5), Duration::from_millis(800));
+        assert_eq!(accept_backoff(6), Duration::from_millis(1600));
+    }
+
+    #[test]
+    fn accept_backoff_caps_and_never_overflows() {
+        // 50 << 6 = 3200 → di-cap 2000. Counter u32 besar tidak boleh panic
+        // (shift overflow) karena kegagalan bisa menumpuk lama.
+        assert_eq!(accept_backoff(7), Duration::from_millis(2000));
+        assert_eq!(accept_backoff(100), Duration::from_millis(2000));
+        assert_eq!(accept_backoff(u32::MAX), Duration::from_millis(2000));
+    }
+
+    #[test]
+    fn accept_backoff_zero_is_not_busy_loop() {
+        // Pemanggil menaikkan counter sebelum memanggil, jadi 0 tidak terjadi —
+        // tetap harus > 0 agar tidak pernah jadi busy-loop.
+        assert!(accept_backoff(0) > Duration::ZERO);
+    }
+
+    #[test]
+    fn accept_backoff_never_decreases() {
+        let mut prev = Duration::ZERO;
+        for n in 1..=20u32 {
+            let d = accept_backoff(n);
+            assert!(d >= prev, "backoff menurun pada n={n}: {d:?} < {prev:?}");
+            prev = d;
+        }
+    }
+
+    // ── v2.9.4 (C3): sanitize_headers — allow-list di boundary IPC ──
+
+    fn headers_of(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().copied().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn every_allowlist_entry_is_accepted() {
+        // Penjaga typo: setiap nama di HEADER_ALLOWLIST harus benar-benar lolos
+        // filter (sudah lowercase, tanpa salah eja) — kalau tidak, header sah
+        // ikut terbuang diam-diam.
+        let raw: HashMap<String, String> = HEADER_ALLOWLIST
+            .iter()
+            .map(|n| ((*n).to_string(), "v".to_string()))
+            .collect();
+        let got = sanitize_headers(raw);
+        assert_eq!(got.len(), HEADER_ALLOWLIST.len(), "got {got:?}");
+    }
+
+    #[test]
+    fn sanitize_keeps_allowlisted_headers_case_insensitively() {
+        let raw = [
+            ("Referer", "https://site.test/page"),
+            ("ORIGIN", "https://site.test"),
+            ("accept-language", "id-ID"),
+            ("User-Agent", "Mozilla/5.0"),
+        ];
+        let got = sanitize_headers(headers_of(&raw));
+        assert_eq!(got.len(), 4, "got {got:?}");
+        assert_eq!(got["Referer"], "https://site.test/page");
+        // Casing asli DIPERTAHANKAN — pencocokan allow-list yang lowercase,
+        // bukan namanya yang dinormalkan.
+        assert_eq!(got["ORIGIN"], "https://site.test");
+        assert_eq!(got["accept-language"], "id-ID");
+    }
+
+    #[test]
+    fn sanitize_drops_headers_outside_allowlist() {
+        let raw = [
+            ("Host", "evil.test"),
+            ("Content-Length", "0"),
+            ("Connection", "keep-alive"),
+            ("Transfer-Encoding", "chunked"),
+            ("X-Injected", "yes"),
+            ("Cookie2", "nope"),
+            ("Referer", "https://ok.test/"),
+        ];
+        let got = sanitize_headers(headers_of(&raw));
+        assert_eq!(got.len(), 1, "hanya Referer yang boleh lolos: {got:?}");
+        assert_eq!(got["Referer"], "https://ok.test/");
+    }
+
+    #[test]
+    fn sanitize_strips_header_injection_from_value() {
+        let raw = [("Referer", "https://ok.test/\r\nX-Injected: yes")];
+        let got = sanitize_headers(headers_of(&raw));
+        let v = &got["Referer"];
+        assert!(!v.contains('\r') && !v.contains('\n'), "got {v:?}");
+        assert_eq!(v, "https://ok.test/X-Injected: yes");
+    }
+
+    #[test]
+    fn sanitize_strips_control_chars_from_key() {
+        // "Ref\r\nerer" → "Referer" setelah control char dibuang → lolos.
+        let raw = [("Ref\r\nerer", "x")];
+        let got = sanitize_headers(headers_of(&raw));
+        assert_eq!(got.get("Referer").map(String::as_str), Some("x"));
+    }
+
+    #[test]
+    fn sanitize_drops_empty_key_or_value() {
+        let raw = [
+            ("", "value"),
+            ("Referer", ""),
+            ("Origin", "   "),
+            ("Accept-Language", "id"),
+        ];
+        let got = sanitize_headers(headers_of(&raw));
+        assert_eq!(got.len(), 1, "got {got:?}");
+        assert!(got.contains_key("Accept-Language"));
+    }
+
+    #[test]
+    fn sanitize_truncates_overlong_value() {
+        let long = "a".repeat(MAX_HEADER_VALUE_LEN + 500);
+        let raw = [("Referer", long.as_str())];
+        let got = sanitize_headers(headers_of(&raw));
+        assert_eq!(got["Referer"].len(), MAX_HEADER_VALUE_LEN);
+    }
+
+    #[test]
+    fn sanitize_truncates_on_utf8_boundary() {
+        // 'é' = 2 byte. Nilai melewati batas byte tidak boleh terpotong di
+        // tengah char (slice byte mentah akan panic).
+        let long = "é".repeat(MAX_HEADER_VALUE_LEN);
+        let raw = [("Referer", long.as_str())];
+        let got = sanitize_headers(headers_of(&raw));
+        let v = &got["Referer"];
+        assert!(v.len() <= MAX_HEADER_VALUE_LEN, "len {}", v.len());
+        assert_eq!(v.len() % 2, 0, "harus berhenti di batas char");
+        assert!(v.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn truncate_chars_short_input_untouched() {
+        assert_eq!(truncate_chars("abc", 10), "abc");
+        assert_eq!(truncate_chars("", 10), "");
+        assert_eq!(truncate_chars("abcdef", 3), "abc");
+    }
+
+    #[test]
+    fn truncate_chars_backs_off_to_boundary() {
+        // 'é' = 2 byte: batas 3 mundur ke 2, bukan memotong di tengah.
+        assert_eq!(truncate_chars("aébc", 3), "aé");
+        // '🦀' = 4 byte: batas 6 mundur ke 4.
+        assert_eq!(truncate_chars("🦀🦀", 6), "🦀");
+        assert_eq!(truncate_chars("🦀🦀", 4), "🦀");
+    }
+
+    #[test]
+    fn strip_control_removes_cr_lf_nul_tab_del() {
+        assert_eq!(strip_control("a\r\nb"), "ab");
+        assert_eq!(strip_control("a\0b"), "ab");
+        assert_eq!(strip_control("a\tb"), "ab");
+        assert_eq!(strip_control("a\x7fb"), "ab");
+        // spasi BUKAN control char — harus tetap ada
+        assert_eq!(strip_control("normal text 123"), "normal text 123");
     }
 }
