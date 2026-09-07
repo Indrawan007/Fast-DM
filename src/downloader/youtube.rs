@@ -180,6 +180,7 @@ const COOKIE_FRESH_SECS: u64 = 24 * 3600;
 fn cookie_file_is_fresh(len: u64, age_secs: u64) -> bool {
     len > 30 && age_secs < COOKIE_FRESH_SECS
 }
+
 fn is_fresh_cookie_file(path: &std::path::Path) -> bool {
     match std::fs::metadata(path) {
         Ok(meta) => {
