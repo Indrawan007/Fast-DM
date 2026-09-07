@@ -221,7 +221,8 @@ impl Config {
 
     /// Hapus file cookie `cookies_*.txt` yang lebih tua dari `max_age`.
     /// Cookie yang ditulis extension punya TTL 24 jam — yang menua tak akan
-    /// pernah dipakai lagi (yt-dlp menolak > 2 jam), jadi buang saja.
+    /// pernah dipakai lagi (`youtube::cookie_file_is_fresh` menolaknya), jadi
+    /// buang saja.
     pub fn gc_stale_cookies() -> usize {
         Self::gc_cookie_files_in(
             &Self::config_dir(),

@@ -138,7 +138,8 @@ fn desktop_to_browser(desktop: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn cookie_args(url: &str) -> Vec<String> {
-    // B7: cookies per-domain dari extension (fresh < 2 jam) → pakai file itu.
+    // B7: cookies per-domain dari extension (fresh < 24 jam, sama dengan TTL
+    // yang ditulis `ipc::write_cookies_txt`) → pakai file itu.
     // Pencarian naik ke domain induk (sub.example.com → example.com) karena
     // extension menyimpan cookies memakai host halaman, sedangkan file video
     // kadang ada di subdomain CDN yang berbeda.
@@ -180,6 +181,7 @@ const COOKIE_FRESH_SECS: u64 = 24 * 3600;
 fn cookie_file_is_fresh(len: u64, age_secs: u64) -> bool {
     len > 30 && age_secs < COOKIE_FRESH_SECS
 }
+
 fn is_fresh_cookie_file(path: &std::path::Path) -> bool {
     match std::fs::metadata(path) {
         Ok(meta) => {
