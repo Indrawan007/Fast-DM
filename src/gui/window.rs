@@ -1108,6 +1108,9 @@ where
 
     let conn_spin = gtk4::SpinButton::with_range(1.0, 32.0, 1.0);
     conn_spin.set_value(cur.max_connections as f64);
+    conn_spin.set_tooltip_text(Some(
+        "aria2 membatasi 16 koneksi per server; sisanya dipakai sebagai segmen (--split).",
+    ));
     content.append(&settings_row("Koneksi per server", &conn_spin));
 
     let conc_spin = gtk4::SpinButton::with_range(1.0, 10.0, 1.0);
