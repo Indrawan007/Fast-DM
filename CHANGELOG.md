@@ -35,6 +35,14 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   sama tiba; bila download fallback tidak pernah terbentuk (dialog "Simpan
   sebagai" ditutup, URL ditolak Chrome, dll.) entri tertinggal selamanya di
   service worker dan membuat unduhan ULANG URL yang sama diam-diam dilewatkan.
+- **`setup-browser.sh` tidak lagi memutus extension unpacked** — script menulis
+  ulang manifest hanya dengan ID packed, menghapus origin extension dev yang
+  sudah di-register aplikasi (`extension_ids.json`). Kini ID yang terdaftar
+  ikut digabung, EXT_ID kosong/tidak valid ditolak (dulu diam-diam menulis
+  `chrome-extension:///` dan native messaging mati tanpa pesan), manifest hanya
+  ditulis untuk profil browser yang benar-benar ada (tidak lagi membuat ±13
+  folder sampah di `~/.config`, sejalan dengan M8 di sisi Rust), dan
+  `XDG_CONFIG_HOME` dihormati.
 
 - **Crate kembali dapat dikompilasi** — commit sebelumnya kehilangan dua baris
   di accept loop IPC (`tokio::spawn` + `stream.into_split()`), menyisakan blok

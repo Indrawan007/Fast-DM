@@ -309,6 +309,15 @@ impl Config {
         Self::config_dir().join(format!("cookies_{safe}.txt"))
     }
 
+    /// Snapshot config saat pertama kali dipanggil (proses berumur pendek =
+    /// native host / IPC client boleh memakainya langsung).
+    ///
+    /// ⚠️ Nilainya **tidak** ikut berubah saat user menyimpan Pengaturan:
+    /// `OnceLock` hanya diisi sekali. Sumber kebenaran setelah startup adalah
+    /// `DownloadEngine.config` (RwLock) yang diperbarui `update_config()`.
+    /// Jadi di GUI/engine baca lewat `engine.get_config().await`, bukan
+    /// `Config::load()` — kalau tidak, unduhan berikutnya diam-diam memakai
+    /// setelan lama. Saat ini hanya `DownloadEngine::new` yang memanggilnya.
     pub fn load() -> &'static Config {
         CONFIG.get_or_init(|| {
             let path = Self::config_file();
