@@ -135,8 +135,11 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         format!("--input-file={}", input_path.display()),
         format!("--dir={}", info.save_dir),
         format!("--out={}", info.filename),
-        format!("--max-connection-per-server={}", config.max_connections),
-        format!("--split={}", config.max_connections),
+        format!(
+            "--max-connection-per-server={}",
+            conn_per_server(config.max_connections)
+        ),
+        format!("--split={}", config.max_connections.max(1)),
         "--min-split-size=1M".into(),
         "--piece-length=1M".into(),
         format!("--timeout={}", config.timeout),
@@ -411,6 +414,17 @@ pub(crate) fn has_space(dir: &str, needed: u64) -> bool {
         }
         Err(_) => true,
     }
+}
+
+/// v2.9.3: `--max-connection-per-server` aria2 hanya menerima 1–16; nilai di
+/// luar rentang itu membuat aria2c menolak SELURUH baris perintah (Pengaturan
+/// mengizinkan sampai 32, sehingga nilai 17–32 dulu mematikan semua unduhan
+/// jalur per-proses). `--split` tidak dibatasi 16, jadi di sana nilai penuh
+/// tetap dipakai. Satu helper dipakai jalur per-proses DAN jalur daemon RPC
+/// (`aria2_rpc::daemon_args`/`adduri_options`) agar keduanya tidak bisa lagi
+/// berbeda.
+pub(crate) fn conn_per_server(max_connections: u8) -> u8 {
+    max_connections.clamp(1, 16)
 }
 
 /// Limit total user → batas per-proses aria2c. v2.3.0 (M3): pembaginya
@@ -892,6 +906,28 @@ mod tests {
     fn parse_speed_setting_case_insensitive() {
         assert_eq!(parse_speed_setting("2k"), 2 * 1024);
         assert_eq!(parse_speed_setting("2m"), 2 * 1024 * 1024);
+    }
+
+    // ── v2.9.3: conn_per_server (clamp aria2 1–16) ──
+
+    #[test]
+    fn conn_per_server_clamps_to_aria2_range() {
+        // aria2 menolak --max-connection-per-server di luar 1–16; Pengaturan
+        // mengizinkan sampai 32 sehingga nilai besar HARUS di-clamp, bukan
+        // diteruskan apa adanya (dulu aria2c gagal start untuk nilai 17–32).
+        assert_eq!(conn_per_server(16), 16);
+        assert_eq!(conn_per_server(17), 16);
+        assert_eq!(conn_per_server(32), 16);
+        assert_eq!(conn_per_server(255), 16);
+    }
+
+    #[test]
+    fn conn_per_server_keeps_valid_values_and_floors_zero() {
+        assert_eq!(conn_per_server(1), 1);
+        assert_eq!(conn_per_server(8), 8);
+        // 0 tidak lolos validasi Settings, tapi config.json hasil edit manual
+        // bisa berisi 0 — jangan sampai jadi "--max-connection-per-server=0".
+        assert_eq!(conn_per_server(0), 1);
     }
 
     // ── resolve_speed_limit (M3) ──

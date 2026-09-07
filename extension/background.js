@@ -250,7 +250,30 @@ function showBadge(text, color) {
 // URL yang di-restart ulang oleh fallback kita sendiri. Tanpa ini, download
 // fallback akan ter-intercept lagi → cancel → fallback lagi → loop tak
 // berujung saat native host tidak tersedia.
-const selfInitiated = new Set();
+//
+// v2.9.3: entri kedaluwarsa otomatis. Dulu entri hanya dihapus saat event
+// onCreated untuk URL yang sama tiba — kalau download fallback tidak pernah
+// terbentuk (user menutup dialog "Simpan sebagai", URL ditolak Chrome, dst.)
+// entri tertinggal selamanya dan menumpuk di service worker; unduhan ULANG
+// URL yang sama juga jadi ikut dilewatkan (tidak dikirim ke Fast DM).
+const SELF_INITIATED_TTL_MS = 60_000;
+const selfInitiated = new Map();
+
+function markSelfInitiated(url) {
+  selfInitiated.set(url, Date.now() + SELF_INITIATED_TTL_MS);
+}
+
+/** true = event ini berasal dari fallback kita sendiri (sekali pakai). */
+function consumeSelfInitiated(url) {
+  const now = Date.now();
+  // Sapu entri kedaluwarsa sekalian — jumlahnya kecil, biayanya sepele.
+  for (const [key, expiry] of selfInitiated) {
+    if (expiry <= now) selfInitiated.delete(key);
+  }
+  if (!selfInitiated.has(url)) return false;
+  selfInitiated.delete(url);
+  return true;
+}
 
 chrome.downloads.onCreated.addListener(async (downloadItem) => {
   if (!config.enabled || !config.interceptDownloads) return;
@@ -259,8 +282,7 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
   if (!url || url.startsWith("blob:") || url.startsWith("data:")) return;
 
   // Jangan intercept download yang kita sendiri buat ulang (fallback)
-  if (selfInitiated.has(url)) {
-    selfInitiated.delete(url);
+  if (consumeSelfInitiated(url)) {
     return;
   }
 
@@ -290,7 +312,7 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
     // (omit filename when unknown — Chrome rejects null for optional string args)
     const opts = { url, saveAs: true };
     if (filename) opts.filename = filename;
-    selfInitiated.add(url);
+    markSelfInitiated(url);
     chrome.downloads.download(opts);
   }
 });

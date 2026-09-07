@@ -207,7 +207,7 @@ pub(crate) fn daemon_args(port: u16, secret: &str, cfg: &Config) -> Vec<String> 
         format!("--max-concurrent-downloads={}", cfg.max_concurrent.max(1)),
         format!(
             "--max-connection-per-server={}",
-            cfg.max_connections.clamp(1, 16)
+            aria2::conn_per_server(cfg.max_connections)
         ),
         format!("--disk-cache={}", cfg.disk_cache_size),
         format!("--file-allocation={}", cfg.file_allocation),
@@ -237,7 +237,8 @@ pub(crate) fn daemon_args(port: u16, secret: &str, cfg: &Config) -> Vec<String> 
 /// (lihat manual aria2). `pause` selalu "true" dulu; pemanggil memanggil
 /// `unpause` setelah `addUri` (pola B2.1 — hindari balapan "sudah jalan"
 /// sebelum tick pertama). `min-split-size`/`piece-length` mengikuti jalur
-/// per-proses; koneksi-per-server memakai nilai GLOBAL daemon (daemon_args).
+/// per-proses; koneksi-per-server & split mengikuti Pengaturan saat unduhan
+/// ditambahkan (v2.9.3 — bukan lagi hanya nilai global daemon).
 pub(crate) fn adduri_options(
     save_dir: &str,
     filename: Option<&str>,
@@ -274,12 +275,79 @@ pub(crate) fn adduri_options(
     o.insert("retry-wait".into(), json!(cfg.retry_wait.to_string()));
     o.insert("min-split-size".into(), json!("1M"));
     o.insert("piece-length".into(), json!("1M"));
+    // v2.9.3: koneksi/segmen mengikuti Pengaturan SAAT unduhan ditambahkan —
+    // dulu hanya nilai global daemon (dibaca sekali saat daemon lahir), jadi
+    // perubahan "Koneksi per server" tidak berlaku sampai app di-restart.
+    o.insert(
+        "max-connection-per-server".into(),
+        json!(aria2::conn_per_server(cfg.max_connections).to_string()),
+    );
+    o.insert("split".into(), json!(cfg.max_connections.max(1).to_string()));
     // Auto-rename (default ON) → JANGAN overwrite: tabrakan jadi "file (1).ext".
     o.insert(
         "allow-overwrite".into(),
         json!((!cfg.auto_file_renaming).to_string()),
     );
+    // v2.9.3: kirim eksplisit seperti jalur CLI — jangan bergantung pada
+    // default aria2 yang bisa berbeda antar versi/konfigurasi daemon yatim.
+    o.insert(
+        "auto-file-renaming".into(),
+        json!(cfg.auto_file_renaming.to_string()),
+    );
+    // Proxy & verifikasi TLS per-URI: daemon bisa saja yatim dari sesi
+    // sebelumnya dengan Pengaturan lama. Proxy kosong tidak dikirim (tanpa
+    // proxy = perilaku default); pembersihan proxy basi ditangani
+    // `global_options_extended`.
+    if !cfg.proxy_url.trim().is_empty() {
+        o.insert("all-proxy".into(), json!(cfg.proxy_url.trim()));
+    }
+    if !cfg.verify_tls {
+        o.insert("check-certificate".into(), json!("false"));
+    }
     Value::Object(o)
+}
+
+/// Nilai `max-overall-download-limit` untuk daemon: kosong/whitespace → "0"
+/// (tanpa batas), selain itu apa adanya ("512K", "2M", …).
+fn speed_limit_value(cfg: &Config) -> String {
+    let s = cfg.max_overall_speed.trim();
+    if s.is_empty() {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Opsi global yang WAJIB berlaku live. Dipisah dari opsi tambahan karena
+/// `changeGlobalOption` bersifat all-or-nothing: satu kunci yang ditolak
+/// daemon membatalkan seluruh panggilan — dan limit kecepatan tidak boleh
+/// ikut gagal hanya karena opsi pelengkap.
+pub(crate) fn global_options_core(cfg: &Config) -> Value {
+    json!({
+        "max-overall-download-limit": speed_limit_value(cfg),
+        "max-concurrent-downloads": cfg.max_concurrent.max(1).to_string(),
+    })
+}
+
+/// v2.9.3: opsi Pengaturan lain yang disusulkan ke daemon yang SUDAH berjalan
+/// (best-effort). Daemon hanya membaca `daemon_args` saat lahir — termasuk
+/// daemon yatim milik sesi app sebelumnya — sehingga tanpa ini perubahan
+/// proxy/TLS/timeout/retry baru berlaku setelah app di-restart. Isinya sengaja
+/// dibatasi pada opsi per-unduhan klasik (input-file options) yang diterima
+/// `changeGlobalOption`; `disk-cache`/`file-allocation` TIDAK disertakan agar
+/// panggilan tidak gagal total di daemon yang menolaknya (keduanya tetap
+/// diterapkan saat daemon berikutnya lahir).
+pub(crate) fn global_options_extended(cfg: &Config) -> Value {
+    json!({
+        "max-connection-per-server": aria2::conn_per_server(cfg.max_connections).to_string(),
+        "split": cfg.max_connections.max(1).to_string(),
+        "timeout": cfg.timeout.to_string(),
+        "max-tries": cfg.retry_count.to_string(),
+        "retry-wait": cfg.retry_wait.to_string(),
+        "check-certificate": cfg.verify_tls.to_string(),
+        // String kosong = hapus proxy yang pernah dipasang daemon lama.
+        "all-proxy": cfg.proxy_url.trim(),
+    })
 }
 
 /// Pastikan daemon RPC siap: reuse milik sendiri (probe ber-token sukses),
@@ -608,17 +676,17 @@ pub async fn download(
     // setiap unduhan baru start (daemon yang membagi ke semua yang aktif —
     // tidak perlu pembagian statis per-proses lagi; B2.2 menjadikannya
     // berlaku untuk SEMUA unduhan http/ftp juga).
-    let limit = if cfg.max_overall_speed.is_empty() {
-        "0".to_string()
-    } else {
-        cfg.max_overall_speed.clone()
-    };
+    // v2.9.3: sekalian sinkronkan Pengaturan lain ke daemon yang sudah hidup
+    // (dua panggilan terpisah — lihat global_options_core/extended).
     let _ = rpc
-        .call(
-            "changeGlobalOption",
-            vec![json!({ "max-overall-download-limit": limit })],
-        )
+        .call("changeGlobalOption", vec![global_options_core(cfg)])
         .await; // best-effort
+    if let Err(e) = rpc
+        .call("changeGlobalOption", vec![global_options_extended(cfg)])
+        .await
+    {
+        tracing::debug!("changeGlobalOption (opsi tambahan) ditolak daemon: {e}");
+    }
 
     // B2.2: opsi per-URI — cookie per-domain + header (mis. Referer) +
     // timeout/retry mengikuti Pengaturan. `out` hanya untuk http/ftp.
@@ -1018,6 +1086,95 @@ mod tests {
         assert_eq!(o["timeout"], "60");
         assert_eq!(o["max-tries"], "9");
         assert_eq!(o["retry-wait"], "7");
+    }
+
+    // ── v2.9.3: paritas opsi jalur RPC vs jalur per-proses ──
+
+    #[test]
+    fn adduri_options_sends_connections_and_renaming_explicitly() {
+        // Regresi: dulu koneksi/split hanya nilai global daemon (dibaca sekali
+        // saat daemon lahir) dan `auto-file-renaming` tidak pernah dikirim,
+        // sehingga perilaku jalur RPC bisa menyimpang dari jalur CLI.
+        let mut cfg = Config::default();
+        cfg.max_connections = 8;
+        let o = adduri_options("/dl", None, None, &HashMap::new(), &cfg);
+        assert_eq!(o["max-connection-per-server"], "8");
+        assert_eq!(o["split"], "8");
+        assert_eq!(o["auto-file-renaming"], "true");
+        assert_eq!(o["allow-overwrite"], "false");
+    }
+
+    #[test]
+    fn adduri_options_clamps_connection_per_server_but_not_split() {
+        // aria2 menolak --max-connection-per-server > 16; Pengaturan
+        // mengizinkan sampai 32 → nilai harus di-clamp, split tetap penuh.
+        let mut cfg = Config::default();
+        cfg.max_connections = 32;
+        let o = adduri_options("/dl", None, None, &HashMap::new(), &cfg);
+        assert_eq!(o["max-connection-per-server"], "16");
+        assert_eq!(o["split"], "32");
+    }
+
+    #[test]
+    fn adduri_options_proxy_and_tls_are_per_uri() {
+        // Daemon bisa yatim dari sesi sebelumnya dengan Pengaturan lama →
+        // proxy & check-certificate dikirim per-URI.
+        let mut cfg = Config::default();
+        cfg.proxy_url = "  socks5://127.0.0.1:1080  ".into();
+        cfg.verify_tls = false;
+        let o = adduri_options("/dl", None, None, &HashMap::new(), &cfg);
+        assert_eq!(o["all-proxy"], "socks5://127.0.0.1:1080");
+        assert_eq!(o["check-certificate"], "false");
+
+        // Default (tanpa proxy, TLS diverifikasi) tidak mengirim keduanya.
+        let d = adduri_options("/dl", None, None, &HashMap::new(), &Config::default());
+        assert!(d.get("all-proxy").is_none());
+        assert!(d.get("check-certificate").is_none());
+    }
+
+    #[test]
+    fn global_options_core_carries_limit_and_concurrency() {
+        let mut cfg = Config::default();
+        cfg.max_overall_speed = "2M".into();
+        cfg.max_concurrent = 5;
+        let g = global_options_core(&cfg);
+        assert_eq!(g["max-overall-download-limit"], "2M");
+        assert_eq!(g["max-concurrent-downloads"], "5");
+    }
+
+    #[test]
+    fn global_options_core_normalizes_empty_limit_to_zero() {
+        let mut cfg = Config::default();
+        cfg.max_overall_speed = "   ".into();
+        assert_eq!(global_options_core(&cfg)["max-overall-download-limit"], "0");
+        cfg.max_overall_speed = String::new();
+        assert_eq!(global_options_core(&cfg)["max-overall-download-limit"], "0");
+    }
+
+    #[test]
+    fn global_options_extended_syncs_settings_to_live_daemon() {
+        let mut cfg = Config::default();
+        cfg.max_connections = 32;
+        cfg.timeout = 45;
+        cfg.retry_count = 2;
+        cfg.retry_wait = 4;
+        cfg.verify_tls = false;
+        cfg.proxy_url = " http://127.0.0.1:8080 ".into();
+        let g = global_options_extended(&cfg);
+        assert_eq!(g["max-connection-per-server"], "16"); // clamp aria2
+        assert_eq!(g["split"], "32");
+        assert_eq!(g["timeout"], "45");
+        assert_eq!(g["max-tries"], "2");
+        assert_eq!(g["retry-wait"], "4");
+        assert_eq!(g["check-certificate"], "false");
+        assert_eq!(g["all-proxy"], "http://127.0.0.1:8080");
+        // Proxy dikosongkan user → string kosong (menghapus proxy daemon lama),
+        // bukan kunci yang hilang.
+        cfg.proxy_url = String::new();
+        assert_eq!(global_options_extended(&cfg)["all-proxy"], "");
+        // Kunci yang berisiko ditolak daemon TIDAK ikut (call all-or-nothing).
+        assert!(g.get("disk-cache").is_none());
+        assert!(g.get("file-allocation").is_none());
     }
 
     #[test]

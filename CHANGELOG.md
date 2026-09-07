@@ -7,6 +7,35 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ### Fixed
 
+- **Koneksi per server > 16 tidak lagi mematikan unduhan** — Pengaturan
+  mengizinkan 1–32, tetapi `aria2c` menolak seluruh baris perintah bila
+  `--max-connection-per-server` di luar 1–16. Nilai kini di-clamp lewat satu
+  helper bersama (`aria2::conn_per_server`) yang dipakai jalur per-proses,
+  `daemon_args`, dan opsi per-URI RPC; `--split` tetap memakai nilai penuh
+  (aria2 tidak membatasinya).
+- **Perubahan Pengaturan berlaku tanpa restart untuk jalur daemon RPC** —
+  daemon hanya membaca `daemon_args` saat lahir (termasuk daemon yatim dari
+  sesi app sebelumnya), sehingga koneksi/timeout/retry/proxy/TLS lama ikut
+  terbawa. Kini setiap unduhan baru menyinkronkan opsi ke daemon hidup lewat
+  dua panggilan `changeGlobalOption` terpisah — inti (limit kecepatan +
+  `max-concurrent-downloads`) dan pelengkap best-effort — supaya satu kunci
+  yang ditolak daemon tidak ikut membatalkan penerapan limit.
+- **Opsi `addUri` sejajar dengan jalur CLI** — `max-connection-per-server`,
+  `split`, `auto-file-renaming`, serta `all-proxy`/`check-certificate`
+  sekarang dikirim per-URI. Sebelumnya nilai-nilai itu bergantung pada state
+  global daemon, sehingga unduhan RPC bisa memakai proxy/verifikasi TLS/aturan
+  penamaan file yang berbeda dari yang dipilih user.
+- **Cookie dari ekstensi tidak lagi dianggap basi terlalu cepat** — ambang
+  kesegaran file cookie disamakan dengan TTL yang benar-benar ditulis
+  (`ipc::write_cookies_txt` = 24 jam); sebelumnya 2 jam, sehingga yt-dlp jatuh
+  ke `--cookies-from-browser` yang sering gagal saat browser sedang berjalan
+  dan unduhan login-protected ikut gagal. GC 7 hari tetap berlaku.
+- **Ekstensi: penanda anti-loop `selfInitiated` kedaluwarsa otomatis (60 dtk)**
+  — dulu entri hanya dihapus saat event `downloads.onCreated` untuk URL yang
+  sama tiba; bila download fallback tidak pernah terbentuk (dialog "Simpan
+  sebagai" ditutup, URL ditolak Chrome, dll.) entri tertinggal selamanya di
+  service worker dan membuat unduhan ULANG URL yang sama diam-diam dilewatkan.
+
 - **Crate kembali dapat dikompilasi** — commit sebelumnya kehilangan dua baris
   di accept loop IPC (`tokio::spawn` + `stream.into_split()`), menyisakan blok
   `close_request` yang terduplikasi dan terpotong di `gui/window.rs`, serta

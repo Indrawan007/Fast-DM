@@ -164,17 +164,33 @@ pub(crate) fn cookie_args(url: &str) -> Vec<String> {
     vec![]
 }
 
-/// Cookie file ada (isi bukan hanya header), dan terakhir diubah < 2 jam lalu
+/// Cookie file ada (isi bukan hanya header) dan belum kedaluwarsa.
+///
+/// v2.9.3: ambang disamakan dengan TTL yang benar-benar ditulis
+/// `ipc::write_cookies_txt` (24 jam). Sebelumnya 2 jam — file yang masih
+/// berlaku menurut isinya sudah dianggap basi, sehingga yt-dlp jatuh ke
+/// `--cookies-from-browser` yang justru sering gagal saat browser berjalan
+/// (database profil terkunci) → unduhan login-protected gagal tanpa sebab
+/// yang jelas bagi user. GC 7 hari di `Config::gc_stale_cookies` tetap jadi
+/// jaring pengaman terakhir.
+const COOKIE_FRESH_SECS: u64 = 24 * 3600;
+
+/// Bagian murni dari `is_fresh_cookie_file` (bisa di-unit test tanpa filesystem).
+/// Header Netscape = 29 byte; > 30 berarti minimal ada satu baris cookie.
+fn cookie_file_is_fresh(len: u64, age_secs: u64) -> bool {
+    len > 30 && age_secs < COOKIE_FRESH_SECS
+}
 fn is_fresh_cookie_file(path: &std::path::Path) -> bool {
     match std::fs::metadata(path) {
         Ok(meta) => {
-            // Header Netscape = 29 byte; > 30 berarti minimal ada 1 cookie
-            meta.len() > 30
-                && meta
-                    .modified()
-                    .ok()
-                    .and_then(|m| m.elapsed().ok())
-                    .is_some_and(|e| e.as_secs() < 7200)
+            // mtime tidak terbaca → anggap basi (jangan pakai cookie ragu).
+            let age = meta
+                .modified()
+                .ok()
+                .and_then(|m| m.elapsed().ok())
+                .map(|e| e.as_secs())
+                .unwrap_or(u64::MAX);
+            cookie_file_is_fresh(meta.len(), age)
         }
         Err(_) => false,
     }
@@ -706,6 +722,25 @@ fn parse_speed(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── v2.9.3: kesegaran cookie file (murni, tanpa filesystem) ──
+
+    #[test]
+    fn cookie_file_fresh_matches_written_ttl() {
+        // TTL yang ditulis ipc::write_cookies_txt = 24 jam → file berumur
+        // 3 jam masih HARUS dipakai (dulu ditolak karena ambang 2 jam).
+        assert!(cookie_file_is_fresh(200, 3 * 3600));
+        assert!(cookie_file_is_fresh(200, 23 * 3600));
+        assert!(!cookie_file_is_fresh(200, 25 * 3600));
+    }
+
+    #[test]
+    fn cookie_file_header_only_is_not_fresh() {
+        // 29 byte = hanya header Netscape, tidak ada cookie di dalamnya.
+        assert!(!cookie_file_is_fresh(29, 0));
+        assert!(!cookie_file_is_fresh(0, 0));
+        assert!(cookie_file_is_fresh(31, 0));
+    }
 
     // ── is_youtube_url ──
 
