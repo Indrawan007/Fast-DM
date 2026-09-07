@@ -87,6 +87,7 @@ write_manifest() {
   mkdir -p "$dir"
   printf '%s\n' "$HOST_JSON" > "$dir/$HOST_NAME.json"
   echo "✓ $dir/$HOST_NAME.json"
+}
 
 echo "Setting up Native Messaging Hosts..."
 
