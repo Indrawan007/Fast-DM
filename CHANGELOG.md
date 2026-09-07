@@ -3,6 +3,137 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.10.0] - 2026-09-07
+
+Rilis perbaikan hasil review kode menyeluruh: 6 bug logika, 4 celah
+privasi/keamanan, 4 masalah performa/UX, plus penjaga regresi baru.
+Label butir (A/B/C/D) merujuk pada hasil review, bukan `CODE-REVIEW.md`.
+
+### Security
+
+- **Kredensial tidak lagi bisa masuk `session.json`** (B1) — dua lapis:
+  1. `Cookie`, `Authorization`, dan `Proxy-Authorization` DIHAPUS dari
+     `ipc::HEADER_ALLOWLIST`. Tidak ada pemakainya: extension hanya pernah
+     mengirim `Referer`, dan cookie sudah punya jalur sendiri yang lebih aman
+     (field `cookies`+`domain` → file Netscape per-domain 0600 →
+     `--load-cookies`/`--cookies`/opsi per-URI `cookie`). Lewat header, cookie
+     justru berakhir di argv proses (terbaca di `/proc/<pid>/cmdline`) dan ikut
+     tertulis ke disk.
+  2. `downloader::redact_for_persist` membuang header sensitif dari snapshot
+     sebelum ditulis. Ini juga membersihkan `session.json` warisan ≤2.9.4 pada
+     flush berikutnya — file itu tidak punya kedaluwarsa (hanya cap 200 entri),
+     jadi tanpa redaksi kredensial lama bertahan selamanya.
+- **`Config::config_dir()` tidak lagi jatuh ke `/tmp`** (B2) — fallback lama
+  `/tmp/fast-dm` adalah path publik yang bisa di-pre-create user lain, padahal
+  isinya `config.json`, `rpc.secret`, `cookies_*.txt`, dan `session.json`.
+  Sekarang bertingkat: XDG config dir → `$HOME/.config/fast-dm` →
+  `temp_dir/fast-dm-<euid>` (di-namespace per-UID). Inti logika dipisah ke
+  `config_dir_from()` agar bisa diuji tanpa mengutak-atik `HOME`.
+- **`config.json` kini ditulis 0600** — ia bisa memuat `proxy_url` berisi
+  kredensial (`http://user:pass@host:port`), tapi satu-satunya file rahasia di
+  config dir yang belum diperketat.
+- **`apply_autostart()` gagal dengan pesan, bukan menulis ke `/tmp/autostart`**
+  (B2) — `.desktop` di `/tmp` tidak akan pernah dibaca session manager mana pun.
+- **`rpc.secret` dibuat atomik dengan `O_EXCL` + mode 0600 sejak lahir** (B3) —
+  sebelumnya `fs::write` biasa: dua proses yang start bersamaan saat pertama
+  kali bisa sama-sama menghasilkan secret dan saling menimpa, sehingga daemon
+  yang lahir dari proses A tidak bisa di-probe proses B. Yang kalah balapan
+  kini membaca secret milik pemenang.
+- **`ipc::peer_uid_ok` memakai `geteuid()`** (A5) — menyamakan identitas dengan
+  `config::validated_runtime_dir()`. Keduanya identik untuk proses non-setuid,
+  tapi dua keputusan keamanan tidak boleh memakai identitas berbeda.
+  (`cleanup_legacy_socket` sengaja tetap `getuid()` — ia merekonstruksi path
+  warisan ≤2.2.5 yang memang dibentuk dari `getuid()`.)
+
+### Fixed
+
+- **Skema URL berhuruf besar tidak lagi dirusak** (A1) —
+  `normalize_url_input("HTTP://example.com/f.zip")` sebelumnya menghasilkan
+  `https://HTTP://example.com/f.zip` dan gagal resolve dengan pesan yang tidak
+  menjelaskan apa pun. Hanya `magnet:` yang di-lowercase; pencocokan
+  `http://`/`https://`/`ftp://` bersifat case-sensitive. Kini semuanya
+  case-insensitive, dengan casing URL asli tetap dipertahankan.
+- **IPC tidak lagi mengaku sukses untuk unduhan yang ditolak** (A2) — handler
+  `download` selalu membalas `success: true` karena `add_download` tetap
+  mengembalikan id (dengan status `Error` di dalamnya). Extension lalu
+  menampilkan badge ⬇ biru untuk `blob:`/`data:`/`file:` yang tidak akan
+  pernah terunduh. Skema kini ditolak di boundary IPC; guard di dalam engine
+  tetap ada untuk jalur GUI.
+- **Pre-check ruang disk memakai satuan yang benar** (A3) — `statvfs(3)`
+  menyatakan `f_bavail` dalam satuan `f_frsize`, bukan `f_bsize`. Kode lama
+  mengalikan `blocks_available()` dengan `block_size()`. Di ext4/xfs/btrfs
+  keduanya sama sehingga tidak terlihat; di NFS/FUSE bisa berbeda dan membuat
+  unduhan lolos pre-check padahal disk tidak muat. Inti dipisah ke
+  `available_bytes()` (murni, teruji) dengan fallback bila `f_frsize` 0 dan
+  `saturating_mul` anti-overflow.
+- **`#[allow(dead_code)]` yang tertinggal dihapus** (A6) — CHANGELOG 2.9.4
+  sudah mengklaim tiga atribut di `gui/youtube_dialog.rs` hilang
+  (`QualityOption`, `QUALITIES`, `show_quality_dialog`); yang benar-benar
+  terhapus hanya dua.
+
+### Changed
+
+- **Unduhan http/ftp tidak lagi membayar 6 detik per unduhan saat daemon RPC
+  tidak tersedia** (C1) — kegagalan `ensure_daemon` sebelumnya tidak diingat
+  sama sekali, jadi bila `rpc_port` dipakai daemon aria2 asing setiap unduhan
+  mengulang: probe gagal → spawn `aria2c` (lahir lalu mati karena bind gagal) →
+  `wait_ready` 6 detik → fallback diam-diam. Kini kegagalan di-cache 60 detik
+  (`daemon_gate_closed`, teruji) dengan pesan yang menyebut `rpc_port`, dan
+  gerbangnya dibuka lagi begitu daemon terbukti siap ATAU user menyimpan
+  Pengaturan (`update_config` → `reset_daemon_gate`) supaya pergantian
+  `rpc_port` langsung dicoba.
+- **Menutup jendela tidak lagi membekukan UI sampai ±9 detik** (C2) —
+  `connect_close_request` memanggil `block_on(engine.shutdown())` di main
+  thread GTK, padahal `shutdown_daemon` punya timeout berantai (forcePauseAll
+  2 dtk → shutdown 2 dtk → forceShutdown 2 dtk → tunggu child/probe 3 dtk).
+  Sekarang mesin tutup tiga tahap: konfirmasi → `Stop`; shutdown jalan di task
+  lalu `win.close()`; `close_request` berikutnya melihat `close_done` →
+  `Proceed`. Idempotent, dan `app.connect_shutdown` tetap jadi jaring pengaman.
+- **`yt-dlp -J` di-spawn dengan `process_group(0)`** (C3) — menyamakan dengan
+  aturan semua child lain (AGENTS.md §3). Tanpa group, saat timeout 20 dtk
+  membuat future di-drop, `kill_on_drop` hanya menjangkau proses yt-dlp dan
+  anak yang terlanjur lahir menjadi yatim.
+- **Tombol "Pindai" di popup kini menampilkan kandidat hasil sniffing** (C4) —
+  `detectVideos` tidak pernah membaca `dataset.fastdmMedia`, padahal justru di
+  situlah `.m3u8`/`.mpd` hasil hook `fetch`/`XHR` paling berharga: URL itu
+  tidak muncul di DOM sehingga sapuan `video`/`a[href]` tidak akan
+  menemukannya. Sniffer mengumpulkan sampai 50 kandidat tetapi hanya satu
+  (terbaru) yang pernah dipakai. Pembacaannya diekstrak ke
+  `readSniffedCandidates()`; popup memakai seluruh daftar, tombol per-elemen
+  media tetap memakai yang terbaru.
+- **`Config::load()` → `Config::load_startup_snapshot()`** (D7) — nama lama
+  mengundang pemanggil baru mengira ia membaca ulang dari disk setiap kali,
+  padahal `OnceLock` hanya diisi sekali dan nilai yang benar setelah startup
+  adalah `engine.get_config().await`.
+
+### Added
+
+- **Penjaga regresi: dua daftar ekstensi tidak bisa lagi melenceng diam-diam**
+  (D5) — `DIRECT_FILE_EXTENSIONS` (Rust) dan `videoExtensions`/`fileExtensions`
+  (`extension/background.js`) selama ini hanya dijaga komentar
+  ("M2: SELARASKAN…"). Test `extension_intercept_list_is_covered` membaca
+  `background.js` lewat `include_str!`, mem-parse kedua array, dan menuntut
+  setiap ekstensi yang di-intercept browser dikenali `is_direct_file_url` —
+  dengan pengecualian SADAR `.m3u8`/`.mpd` yang dikunci test terpisah
+  (`hls_manifests_are_deliberately_not_direct_files`) agar manifest HLS/DASH
+  tidak pernah dialihkan dari yt-dlp.
+- 19 unit test baru (total crate 190 → 209): `config_dir_from` (3),
+  `available_bytes` (3), gerbang daemon (3), redaksi kredensial + penjaga
+  allow-list (6), `normalize_url_input` case-insensitive (2), dan penjaga
+  daftar ekstensi (2).
+
+### Catatan rilis
+
+- Versi disamakan di `Cargo.toml`, `Cargo.lock`, dan
+  `extension/manifest.json` (2.10.0) — `Cargo.lock` ikut diperbarui karena CI
+  menjalankan `cargo build --release --locked`.
+- Tidak ada perubahan `README.md`: seluruh butir di atas adalah perbaikan dan
+  pengetatan, bukan fitur baru yang terlihat user.
+- `cargo clippy --all-targets -- -D warnings` di CI SENGAJA masih advisory
+  (`continue-on-error: true`). Menaikkannya jadi gate blocking tanpa bisa
+  menjalankan clippy lebih dulu berisiko membuat CI merah; itu pekerjaan
+  terpisah di mesin dev.
+
 ## [2.9.4] - 2026-09-07
 
 ### Security

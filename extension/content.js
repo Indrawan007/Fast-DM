@@ -68,6 +68,28 @@
     return "https://www.youtube.com/watch?v=" + videoId;
   }
 
+  // v2.10.0 (C4): kandidat hasil sniffing `sniffer.js` (MAIN world) dibaca
+  // lewat DOM — satu-satunya jembatan ke ISOLATED world.
+  //
+  // Sebelumnya hanya `detectNonYTVideos` yang memakainya, dan hanya mengambil
+  // SATU kandidat terbaru (`cands[cands.length - 1]`). Handler `detectVideos`
+  // (tombol "Pindai" di popup) tidak membacanya sama sekali, padahal justru
+  // di situlah m3u8/mpd hasil hook fetch/XHR paling berharga: URL itu tidak
+  // pernah muncul di DOM, jadi sapuan `video`/`a[href]` di popup tidak akan
+  // pernah menemukannya.
+  function readSniffedCandidates() {
+    try {
+      const raw = document.documentElement.dataset.fastdmMedia;
+      if (!raw) return [];
+      const cands = JSON.parse(raw);
+      return Array.isArray(cands)
+        ? cands.filter((u) => typeof u === "string")
+        : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
   // Catatan: permintaan unduhan dikirim via chrome.runtime.sendMessage
   // langsung dari handler (overlay & tombol video non-YouTube). Cookie
   // TIDAK pernah diambil dari document.cookie — cookie login YouTube
@@ -519,17 +541,12 @@
 
     // Kandidat ditulis sniffer.js di MAIN world lewat DOM (ISOLATED world
     // tidak berbagi objek JS dengan MAIN world — window.* tidak bisa dibaca).
+    // v2.10.0 (C4): ambil yang TERBARU — untuk tombol per-elemen media,
+    // kandidat terakhir biasanya yang sedang diputar. Seluruh daftar tetap
+    // tersedia lewat `readSniffedCandidates()` untuk popup.
     function candidateFor() {
-      try {
-        const raw = document.documentElement.dataset.fastdmMedia;
-        if (!raw) return null;
-        const cands = JSON.parse(raw);
-        return Array.isArray(cands) && cands.length
-          ? cands[cands.length - 1]
-          : null;
-      } catch (e) {
-        return null;
-      }
+      const cands = readSniffedCandidates();
+      return cands.length ? cands[cands.length - 1] : null;
     }
 
     document.querySelectorAll("video, audio").forEach((media) => {
@@ -717,6 +734,12 @@
       // Current YouTube video
       const vid = extractVideoId();
       if (vid) videos.add(getVideoUrl(vid));
+
+      // v2.10.0 (C4): kandidat hasil sniffing fetch/XHR (.m3u8/.mpd/.mp4…).
+      // URL ini TIDAK ada di DOM — tanpa baris ini tombol "Pindai" di popup
+      // tidak akan pernah menampilkannya, padahal sniffer sudah
+      // mengumpulkannya (hingga 50 entri).
+      readSniffedCandidates().forEach((u) => videos.add(u));
 
       // Video links
       const videoExts = /\.(mp4|mkv|webm|avi|mov|flv|wmv|m4v|3gp|ts)(\?|$)/i;

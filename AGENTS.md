@@ -41,8 +41,11 @@ fast-dm --native  ──1 baris JSON──►  Unix socket (Config::ipc_socket_p
 - `src/gui/` = GTK4 window/dialog; state GUI disinkronkan via `mpsc::Unbounded<DownloadEvent>`.
 - `extension/` = MV3: `background.js` (intercept + native msg), `sniffer.js`
   (MAIN world, hook fetch/XHR), `content.js` (overlay ⚡), `popup.*`.
-- Persistensi di `~/.config/fast-dm/`: `config.json`, `session.json` (cap 200,
-  flush ≤2 dtk atomik), `cookies_<host>.txt` (0600), `extension_ids.json`.
+- Persistensi di `~/.config/fast-dm/` (fallback berjenjang `$XDG_CONFIG_HOME` →
+  `$HOME/.config/fast-dm` → `temp_dir/fast-dm-<euid>`; JANGAN pakai `/tmp`
+  tanpa namespace UID): `config.json` (0600), `session.json` (cap 200, flush
+  ≤2 dtk atomik, header sensitif diredaksi), `cookies_<host>.txt` (0600),
+  `extension_ids.json`.
   IPC + file kerja di `XDG_RUNTIME_DIR/fast-dm` (fallback `~/.config/fast-dm/run`).
 
 ## 3. Aturan Pengembangan (ketat)

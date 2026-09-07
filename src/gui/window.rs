@@ -942,19 +942,63 @@ pub fn build_window(
 
     // ── A1: tutup jendela TIDAK diam-diam mematikan download ──
     // Jika masih ada unduhan aktif/antri, minta konfirmasi dulu.
+    //
+    // v2.10.0 (C2): mesin tutup kini tiga tahap dan shutdown-nya jalan DI
+    // BACKGROUND. Sebelumnya `connect_close_request` memanggil
+    // `rt_close.block_on(eng.shutdown())` langsung di main thread GTK,
+    // padahal `aria2_rpc::shutdown_daemon` punya timeout berantai
+    // (forcePauseAll 2 dtk → shutdown 2 dtk → forceShutdown 2 dtk →
+    // tunggu child / probe port 3 dtk) sehingga worst case jendela beku
+    // ±9 detik tanpa umpan balik apa pun. Sekarang:
+    //   tahap 1  close_request → (konfirmasi bila perlu) → Stop
+    //   tahap 2  shutdown di task → set `close_done` → win.close()
+    //   tahap 3  close_request melihat `close_done` → Proceed (benar-benar tutup)
+    // `app.connect_shutdown` di atas tetap ada sebagai jaring pengaman dan
+    // idempotent, jadi tidak ada risiko shutdown ganda.
     let engine_close = engine.clone();
     let rt_close = rt.clone();
     let win_close = window.clone();
     let close_confirmed = Rc::new(Cell::new(false));
     let close_confirmed_cb = close_confirmed.clone();
+    let close_done = Rc::new(Cell::new(false));
+    let shutdown_started = Rc::new(Cell::new(false));
+
+    // Dipanggil dari dua tempat di bawah (setelah konfirmasi, dan saat tidak
+    // ada unduhan aktif). Idempotent — `close_request` bisa terpicu berulang
+    // (user menekan tutup lagi, WM mengirim ulang) dan tidak boleh men-spawn
+    // shutdown kedua.
+    let engine_sd = engine.clone();
+    let rt_sd = rt.clone();
+    let win_sd = window.clone();
+    let done_sd = close_done.clone();
+    let started_sd = shutdown_started.clone();
+    let shutdown_then_close = move || {
+        if started_sd.replace(true) {
+            return;
+        }
+        let eng = engine_sd.clone();
+        let rt2 = rt_sd.clone();
+        let win = win_sd.clone();
+        let done = done_sd.clone();
+        glib::spawn_future_local(async move {
+            let _ = rt2.spawn(async move { eng.shutdown().await }).await;
+            done.set(true);
+            win.close();
+        });
+    };
+
     window.connect_close_request(move |_| {
-        // Putaran kedua: user sudah konfirmasi → hentikan subprocess DAN
-        // daemon RPC, tulis snapshot final, lalu tutup. Engine memakai SIGTERM
-        // / forcePause agar file parsial tetap resumable.
-        if close_confirmed_cb.get() {
-            let eng = engine_close.clone();
-            rt_close.block_on(async move { eng.shutdown().await });
+        // Tahap 3: shutdown sudah selesai → benar-benar tutup.
+        if close_done.get() {
             return glib::Propagation::Proceed;
+        }
+
+        // Tahap 2: user sudah konfirmasi → hentikan subprocess DAN daemon
+        // RPC, tulis snapshot final, lalu tutup. Engine memakai SIGTERM /
+        // forcePause agar file parsial tetap resumable.
+        if close_confirmed_cb.get() {
+            shutdown_then_close();
+            return glib::Propagation::Stop;
         }
 
         let eng = engine_close.clone();
@@ -974,9 +1018,8 @@ pub fn build_window(
         if active == 0 {
             // Termasuk membersihkan daemon idle / task RPC paused yang tidak
             // dihitung sebagai aktif oleh dialog konfirmasi.
-            let eng = engine_close.clone();
-            rt_close.block_on(async move { eng.shutdown().await });
-            return glib::Propagation::Proceed;
+            shutdown_then_close();
+            return glib::Propagation::Stop;
         }
 
         // v2.8.0 (D8.1): minimize-to-close (opt-in, default OFF) — jendela
@@ -1277,13 +1320,22 @@ pub(crate) fn should_minimize_on_close(minimize: bool, active: usize) -> bool {
 }
 
 /// Normalisasi input user: tanpa skema → asumsikan https (perilaku lama on_add).
+///
+/// v2.10.0 (A1): pencocokan skema kini case-insensitive. Sebelumnya hanya
+/// `magnet:` yang di-lowercase, sedangkan `http://`/`https://`/`ftp://`
+/// dibandingkan apa adanya — sehingga `HTTP://example.com/f.zip` (mis. hasil
+/// paste dari dokumen yang meng-kapitalisasi) menjadi
+/// `https://HTTP://example.com/f.zip` dan gagal resolve dengan pesan yang
+/// tidak menjelaskan apa pun.
 pub(crate) fn normalize_url_input(raw: &str) -> String {
     let url = raw.trim().to_string();
+    let lower = url.to_ascii_lowercase();
     // v2.7.0 (B2): magnet bukan URL web — jangan di-prefix https://
-    if url.to_ascii_lowercase().starts_with("magnet:") {
+    if lower.starts_with("magnet:") {
         return url;
     }
-    if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("ftp://") {
+    const SCHEMES: &[&str] = &["http://", "https://", "ftp://"];
+    if SCHEMES.iter().any(|s| lower.starts_with(s)) {
         url
     } else {
         format!("https://{}", url)
@@ -1369,6 +1421,39 @@ mod tests {
             "magnet:?xt=urn:btih:ab12"
         );
         assert_eq!(normalize_url_input("MAGNET:?xt=x"), "MAGNET:?xt=x");
+    }
+
+    #[test]
+    fn normalize_url_scheme_matching_is_case_insensitive() {
+        // v2.10.0 (A1): sebelumnya hanya `magnet:` yang di-lowercase, jadi
+        // "HTTP://x/f.zip" menjadi "https://HTTP://x/f.zip" dan gagal resolve
+        // dengan pesan yang tidak menjelaskan apa pun.
+        assert_eq!(
+            normalize_url_input("HTTP://example.com/f.zip"),
+            "HTTP://example.com/f.zip"
+        );
+        assert_eq!(
+            normalize_url_input("Https://Example.com/a"),
+            "Https://Example.com/a"
+        );
+        assert_eq!(normalize_url_input("FTP://h/f.bin"), "FTP://h/f.bin");
+        // Casing asli DIPERTAHANKAN (URL case-sensitive di path/query) —
+        // yang case-insensitive hanya pencocokan skemanya.
+        assert_eq!(
+            normalize_url_input("  HtTpS://Site.test/Path?A=B  "),
+            "HtTpS://Site.test/Path?A=B"
+        );
+    }
+
+    #[test]
+    fn normalize_url_still_prefixes_scheme_less_input() {
+        // Tanpa skema → tetap https:// (perilaku lama tidak boleh berubah).
+        assert_eq!(
+            normalize_url_input("HTTPbin.org/get"),
+            "https://HTTPbin.org/get"
+        );
+        // "magnet" tanpa titik dua bukan skema magnet → diperlakukan host.
+        assert_eq!(normalize_url_input("magnet.example/x"), "https://magnet.example/x");
     }
 
     #[test]

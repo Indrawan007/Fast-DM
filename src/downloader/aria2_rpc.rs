@@ -350,12 +350,57 @@ pub(crate) fn global_options_extended(cfg: &Config) -> Value {
     })
 }
 
+/// v2.10.0 (C1): epoch-millis sampai kapan daemon dianggap "tidak tersedia".
+///
+/// Sebelumnya kegagalan `ensure_daemon` TIDAK diingat sama sekali. Bila port
+/// `rpc_port` dipakai daemon aria2 asing (secret berbeda), maka SETIAP
+/// unduhan http/ftp mengulang seluruh siklus: probe gagal → spawn `aria2c`
+/// baru (lahir lalu langsung mati karena bind gagal) → `wait_ready` 6 detik
+/// penuh → `Fallback` diam-diam. Artinya +6 detik per unduhan, selamanya,
+/// tanpa satu pun pesan ke user. Sekarang kegagalan di-cache `DAEMON_RETRY_MS`
+/// dan dicoba lagi otomatis setelahnya.
+static DAEMON_UNAVAILABLE_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+/// Jeda sebelum daemon dicoba lagi setelah gagal siap.
+pub(crate) const DAEMON_RETRY_MS: u64 = 60_000;
+
+/// Sekarang (epoch millis); 0 bila jam sistem di luar rentang UNIX_EPOCH.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// Apakah gerbang "daemon tidak tersedia" sedang menutup? (murni, teruji)
+pub(crate) fn daemon_gate_closed(until_ms: u64, now_ms: u64) -> bool {
+    until_ms > now_ms
+}
+
+/// Buka gerbang — daemon terbukti siap, atau config berubah (mis. user
+/// mengganti `rpc_port` sehingga percobaan lama tidak relevan lagi).
+pub(crate) fn reset_daemon_gate() {
+    DAEMON_UNAVAILABLE_UNTIL.store(0, Ordering::Relaxed);
+}
+
 /// Pastikan daemon RPC siap: reuse milik sendiri (probe ber-token sukses),
 /// atau spawn `aria2c` baru. Err = pesan siap-tampil.
 async fn ensure_daemon(cfg: &Config) -> Result<Rpc, String> {
+    // C1: jangan bayar ulang spawn + wait_ready 6 dtk untuk setiap unduhan
+    // selama penyebabnya belum sempat berubah.
+    if daemon_gate_closed(DAEMON_UNAVAILABLE_UNTIL.load(Ordering::Relaxed), now_ms()) {
+        let secs = DAEMON_RETRY_MS / 1000;
+        let port = cfg.rpc_port;
+        return Err(format!(
+            "daemon aria2 RPC tidak tersedia — dicoba lagi otomatis dalam ≤{secs} dtk \
+             (port {port} mungkin dipakai daemon asing; ubah rpc_port di Pengaturan)"
+        ));
+    }
+
     let rpc = Rpc::new(cfg.rpc_port, Config::rpc_secret());
     // Sudah hidup (milik kita — token cocok) → pakai.
     if rpc.probe().await.is_ok() {
+        reset_daemon_gate();
         return Ok(rpc);
     }
     let mut guard = DAEMON.lock().await;
@@ -390,8 +435,20 @@ async fn ensure_daemon(cfg: &Config) -> Result<Rpc, String> {
         *guard = Some(child);
     }
     drop(guard);
-    rpc.wait_ready(Duration::from_secs(6)).await?;
-    Ok(rpc)
+    // C1: siap → buka gerbang; gagal → tutup selama DAEMON_RETRY_MS supaya
+    // unduhan berikutnya gagal cepat dengan pesan yang sama, bukan menunggu
+    // 6 detik lagi.
+    match rpc.wait_ready(Duration::from_secs(6)).await {
+        Ok(()) => {
+            reset_daemon_gate();
+            Ok(rpc)
+        }
+        Err(e) => {
+            let until = now_ms().saturating_add(DAEMON_RETRY_MS);
+            DAEMON_UNAVAILABLE_UNTIL.store(until, Ordering::Relaxed);
+            Err(e)
+        }
+    }
 }
 
 /// Hasil proyeksi satu `tellStatus` → field patch GUI (murni, teruji).
@@ -940,6 +997,39 @@ pub async fn download(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── v2.10.0 (C1): gerbang "daemon tidak tersedia" ──
+
+    #[test]
+    fn daemon_gate_closed_only_before_deadline() {
+        // until > now → tutup; sama atau lewat → buka (tidak boleh macet
+        // selamanya hanya karena jam tepat di batas).
+        assert!(daemon_gate_closed(1_000, 999));
+        assert!(!daemon_gate_closed(1_000, 1_000));
+        assert!(!daemon_gate_closed(1_000, 1_001));
+        // 0 = gerbang tidak pernah ditutup (nilai awal & hasil reset).
+        assert!(!daemon_gate_closed(0, 0));
+        assert!(!daemon_gate_closed(0, u64::MAX));
+    }
+
+    #[test]
+    fn daemon_retry_window_is_bounded() {
+        // Backoff harus terbatas — bukan "coba lagi besok", tapi juga bukan
+        // 0 (yang berarti kembali membayar wait_ready 6 dtk tiap unduhan).
+        assert_eq!(DAEMON_RETRY_MS, 60_000);
+        let now = 1_700_000_000_000u64;
+        let until = now.saturating_add(DAEMON_RETRY_MS);
+        assert!(daemon_gate_closed(until, now));
+        assert!(daemon_gate_closed(until, now + DAEMON_RETRY_MS - 1));
+        assert!(!daemon_gate_closed(until, now + DAEMON_RETRY_MS));
+    }
+
+    #[test]
+    fn daemon_retry_saturates_at_u64_max() {
+        // Jam sistem rusak (mis. tahun 292 juta) tidak boleh overflow-panic.
+        let until = u64::MAX.saturating_add(DAEMON_RETRY_MS);
+        assert_eq!(until, u64::MAX);
+    }
     #[test]
     fn is_magnet_detects_scheme_only() {
         assert!(is_magnet("magnet:?xt=urn:btih:0123abcd"));

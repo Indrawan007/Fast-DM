@@ -94,7 +94,7 @@ impl DownloadEngine {
         Self {
             downloads,
             event_tx,
-            config: Arc::new(RwLock::new(Config::load().clone())),
+            config: Arc::new(RwLock::new(Config::load_startup_snapshot().clone())),
             dirty,
             session_io,
             shutting_down,
@@ -230,6 +230,11 @@ impl DownloadEngine {
         }
         cfg.save().map_err(|e| e.to_string())?;
         *self.config.write().await = cfg;
+        // v2.10.0 (C1): user mungkin baru saja mengganti `rpc_port` / proxy
+        // — alasan gerbang "daemon tidak tersedia" ditutup bisa jadi sudah
+        // tidak berlaku, jadi buka lagi agar percobaan berikutnya langsung
+        // dicoba (bukan menunggu sisa backoff 60 dtk).
+        aria2_rpc::reset_daemon_gate();
         Ok(())
     }
 
@@ -656,6 +661,22 @@ pub fn is_supported_scheme(url: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// v2.10.0 (D5): daftar ekstensi "file langsung" diangkat ke level modul
+/// supaya bisa dibandingkan dengan daftar intersep `extension/background.js`
+/// oleh test `extension_intercept_list_is_covered`. Sebelumnya kedua daftar
+/// itu hanya dijaga oleh komentar ("M2: SELARASKAN…") — tidak ada yang
+/// menangkap bila salah satunya ditambah ekstensi baru.
+///
+/// `.m3u8`/`.mpd` SENGAJA tidak ada di sini: manifest HLS/DASH harus lewat
+/// yt-dlp supaya segmennya di-merge benar (lihat `wants_quality_dialog`).
+pub(crate) const DIRECT_FILE_EXTENSIONS: &[&str] = &[
+    ".mp4", ".webm", ".mkv", ".avi", ".mov", ".m4v", ".flv", ".wmv", ".3gp", ".ts", ".mp3", ".m4a",
+    ".aac", ".ogg", ".opus", ".flac", ".wav", ".zip", ".tar", ".gz", ".bz2", ".tbz2", ".xz", ".txz",
+    ".7z", ".rar", ".pdf", ".iso", ".img", ".bin", ".apk", ".deb", ".rpm", ".exe", ".msi", ".dmg",
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico", ".doc", ".docx", ".xls",
+    ".xlsx", ".ppt", ".pptx", ".odt", ".epub", ".mobi", ".txt", ".csv", ".json", ".xml",
+];
+
 /// URL file langsung (punya ekstensi file/media) → langsung ke aria2 tanpa
 /// lewat yt-dlp. HLS/DASH (m3u8/mpd) tetap ke yt-dlp agar di-merge benar.
 pub fn is_direct_file_url(url: &str) -> bool {
@@ -672,15 +693,8 @@ pub fn is_direct_file_url(url: &str) -> bool {
     // v2.3.0 (M2): SELARASKAN dengan daftar intersep extension/background.js —
     // dulu .exe/.msi/.dmg/.bz2/.docx dll tidak ada di sini sehingga URL-nya
     // dicoba lewat yt-dlp dulu (gagal, ±1-3 dtk terbuang) baru fallback aria2.
-    const EXTENSIONS: &[&str] = &[
-        ".mp4", ".webm", ".mkv", ".avi", ".mov", ".m4v", ".flv", ".wmv", ".3gp", ".ts", ".mp3",
-        ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav", ".zip", ".tar", ".gz", ".bz2", ".tbz2",
-        ".xz", ".txz", ".7z", ".rar", ".pdf", ".iso", ".img", ".bin", ".apk", ".deb", ".rpm",
-        ".exe", ".msi", ".dmg", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico",
-        ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".epub", ".mobi", ".txt",
-        ".csv", ".json", ".xml",
-    ];
-    EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+    // v2.10.0 (D5): keselarasan itu kini dikunci oleh test, bukan hanya komentar.
+    DIRECT_FILE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
 }
 
 /// Cari download Queued tertua dan jalankan jika ada slot kosong
@@ -924,12 +938,42 @@ fn prepare_shutdown_snapshot(info: &mut DownloadInfo) -> DownloadInfo {
     snapshot
 }
 
+/// v2.10.0 (B1): header yang TIDAK boleh ikut tertulis ke `session.json`.
+///
+/// Sejak allow-list IPC dipersempit (§C3/B4) header semacam ini seharusnya
+/// tidak pernah masuk `DownloadInfo.headers` lagi — tapi `session.json` dari
+/// versi ≤2.9.4 masih bisa memuatnya, dan file itu tidak punya kedaluwarsa
+/// (hanya cap 200 entri). Redaksi di jalur tulis membuat salinan lama
+/// otomatis bersih pada flush berikutnya, tanpa perlu migrasi terpisah.
+/// Dicocokkan case-insensitive; nama header HTTP memang case-insensitive.
+pub(crate) const SENSITIVE_HEADERS: &[&str] = &["cookie", "authorization", "proxy-authorization"];
+
+/// Buang header sensitif dari satu item sebelum dipersist.
+pub(crate) fn redact_for_persist(d: &mut DownloadInfo) {
+    if d.headers.is_empty() {
+        return;
+    }
+    let before = d.headers.len();
+    d.headers.retain(|k, _| !SENSITIVE_HEADERS.contains(&k.to_ascii_lowercase().as_str()));
+    if d.headers.len() != before {
+        tracing::debug!(
+            "{} header sensitif dibuang dari snapshot session ({})",
+            before - d.headers.len(),
+            d.id
+        );
+    }
+}
+
 /// Tulis satu snapshot session secara atomik, dibatasi 200 entri terbaru.
 fn write_session_snapshot(mut all: Vec<DownloadInfo>) -> Result<(), String> {
     // urut (created_ms, id) — konsisten dengan promote_next (L4)
     all.sort_by_key(|d| (d.created, d.id.clone()));
     if all.len() > 200 {
         all = all.split_off(all.len() - 200);
+    }
+    // B1: kredensial tidak pernah menyentuh disk lewat jalur ini.
+    for d in &mut all {
+        redact_for_persist(d);
     }
 
     let wrapped = SessionFile {
@@ -1388,5 +1432,148 @@ mod tests {
         assert_eq!(lines.next_line().await.as_deref(), Some("aaa bbb"));
         assert_eq!(lines.next_line().await.as_deref(), Some("ccc"));
         assert_eq!(lines.next_line().await, None);
+    }
+    // ── v2.10.0 (B1): redaksi kredensial dari snapshot session ──
+
+    #[test]
+    fn redact_drops_credentials_keeps_referer() {
+        let mut d = DownloadInfo::new(
+            "dl_r".into(),
+            "https://x.test/f.zip".into(),
+            "f.zip".into(),
+            "/tmp".into(),
+            [
+                ("Referer".to_string(), "https://x.test/page".to_string()),
+                ("Cookie".to_string(), "SID=rahasia".to_string()),
+                ("Authorization".to_string(), "Bearer token".to_string()),
+                ("Origin".to_string(), "https://x.test".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            None,
+        );
+        redact_for_persist(&mut d);
+        assert!(!d.headers.contains_key("Cookie"), "got {:?}", d.headers);
+        assert!(!d.headers.contains_key("Authorization"), "got {:?}", d.headers);
+        // Header non-kredensial tetap ada — dipakai saat resume.
+        assert_eq!(d.headers.get("Referer").map(String::as_str), Some("https://x.test/page"));
+        assert_eq!(d.headers.get("Origin").map(String::as_str), Some("https://x.test"));
+    }
+
+    #[test]
+    fn redact_is_case_insensitive() {
+        // Nama header HTTP case-insensitive — "COOKIE" dan "cookie" sama saja.
+        let mut d = DownloadInfo::new(
+            "dl_c".into(),
+            "u".into(),
+            "f".into(),
+            "/tmp".into(),
+            [
+                ("COOKIE".to_string(), "a=b".to_string()),
+                ("proxy-authorization".to_string(), "Basic x".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            None,
+        );
+        redact_for_persist(&mut d);
+        assert!(d.headers.is_empty(), "got {:?}", d.headers);
+    }
+
+    #[test]
+    fn redact_noop_without_headers() {
+        let mut d = DownloadInfo::new(
+            "dl_n".into(),
+            "u".into(),
+            "f".into(),
+            "/tmp".into(),
+            Default::default(),
+            None,
+        );
+        redact_for_persist(&mut d);
+        assert!(d.headers.is_empty());
+    }
+
+    #[test]
+    fn sensitive_header_list_matches_ipc_removal() {
+        // Setelah v2.10.0 (B4) allow-list IPC tidak lagi memuat kredensial,
+        // jadi daftar redaksi ini adalah lapisan kedua untuk session.json
+        // warisan ≤2.9.4. Bila kelak salah satunya diperluas, test ini
+        // memaksa keduanya dipikirkan bersama.
+        for name in crate::ipc::HEADER_ALLOWLIST {
+            assert!(
+                !SENSITIVE_HEADERS.contains(name),
+                "{name} ada di allow-list IPC SEKALIGUS daftar redaksi — \
+                 putuskan salah satu secara sadar"
+            );
+        }
+        assert!(SENSITIVE_HEADERS.contains(&"cookie"));
+        assert!(SENSITIVE_HEADERS.contains(&"authorization"));
+    }
+
+    // ── v2.10.0 (D5): dua daftar ekstensi tidak boleh melenceng diam-diam ──
+
+    /// Ambil token `"..."` di dalam `<key>: [ ... ]` pada background.js.
+    fn js_array_items(src: &str, key: &str) -> Vec<String> {
+        let start = src
+            .find(&format!("{key}: ["))
+            .unwrap_or_else(|| panic!("background.js: kunci `{key}: [` tidak ditemukan"));
+        let body = &src[start..];
+        let end = body.find(']').expect("array tanpa penutup");
+        let body = &body[..end];
+        let mut out = Vec::new();
+        let mut rest = body;
+        while let Some(q) = rest.find('"') {
+            let after = &rest[q + 1..];
+            let Some(q2) = after.find('"') else { break };
+            out.push(after[..q2].to_string());
+            rest = &after[q2 + 1..];
+        }
+        out
+    }
+
+    #[test]
+    fn extension_intercept_list_is_covered() {
+        // Invarian yang sebenarnya penting: APA PUN yang di-intercept browser
+        // dan dikirim ke Fast DM harus dikenali sebagai file langsung, supaya
+        // tidak dicoba lewat yt-dlp dulu (gagal, ±1-3 dtk terbuang) baru
+        // fallback ke aria2 — persis regresi M2 yang dulu hanya dijaga komentar.
+        let src = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/extension/background.js"
+        ));
+        let mut intercepted = js_array_items(src, "videoExtensions");
+        intercepted.extend(js_array_items(src, "fileExtensions"));
+        assert!(
+            intercepted.len() >= 20,
+            "parser gagal membaca daftar intersep ({} entri)",
+            intercepted.len()
+        );
+
+        // Pengecualian SADAR: manifest HLS/DASH harus lewat yt-dlp agar
+        // segmennya di-merge benar, jadi memang BUKAN file langsung.
+        let hls_only = [".m3u8", ".mpd"];
+
+        let missing: Vec<&String> = intercepted
+            .iter()
+            .filter(|e| !hls_only.contains(&e.as_str()))
+            .filter(|e| !DIRECT_FILE_EXTENSIONS.contains(&e.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "extension/background.js meng-intercept ekstensi yang tidak dikenal \
+             is_direct_file_url (tambahkan ke DIRECT_FILE_EXTENSIONS): {missing:?}"
+        );
+    }
+
+    #[test]
+    fn hls_manifests_are_deliberately_not_direct_files() {
+        // Penjaga sisi sebaliknya: kalau suatu saat .m3u8/.mpd ikut
+        // ditambahkan ke DIRECT_FILE_EXTENSIONS, unduhan HLS akan melewati
+        // yt-dlp dan menghasilkan segmen mentah yang tidak ter-merge.
+        assert!(!is_direct_file_url("https://x.test/master.m3u8"));
+        assert!(!is_direct_file_url("https://x.test/manifest.mpd?v=2"));
+        assert!(!DIRECT_FILE_EXTENSIONS.contains(&".m3u8"));
+        assert!(!DIRECT_FILE_EXTENSIONS.contains(&".mpd"));
     }
 }

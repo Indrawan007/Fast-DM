@@ -327,13 +327,20 @@ pub async fn fetch_formats(url: &str, config: &Config) -> Vec<FormatOption> {
     }
     cmd.push(url.to_string());
 
-    let Ok(child) = tokio::process::Command::new(&cmd[0])
+    // v2.10.0 (C3): `process_group(0)` seperti SEMUA child lain di crate ini
+    // (AGENTS.md §3) — `yt-dlp -J` memang jarang men-spawn anak, tapi saat
+    // timeout 20 dtk membuat future di-drop, `kill_on_drop` hanya menjangkau
+    // proses yt-dlp itu sendiri; tanpa group, anak yang terlanjur lahir
+    // menjadi yatim.
+    let mut spawn = tokio::process::Command::new(&cmd[0]);
+    spawn
         .args(&cmd[1..])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-    else {
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    spawn.process_group(0);
+    let Ok(child) = spawn.spawn() else {
         return Vec::new();
     };
     // Cap 20 dtk: ekstraksi situs tertentu bisa sangat lambat — lebih baik

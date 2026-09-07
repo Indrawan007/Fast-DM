@@ -404,16 +404,37 @@ async fn run_aria2c(
     }
 }
 
+/// v2.10.0 (A3): inti `has_space` — dipisah agar bisa diuji tanpa filesystem.
+///
+/// `statvfs(3)`: `f_blocks`/`f_bfree`/`f_bavail` dinyatakan dalam satuan
+/// **`f_frsize`** (fragment size), BUKAN `f_bsize`. Kode lama mengalikan
+/// `blocks_available()` dengan `block_size()` (= `f_bsize`); di ext4/xfs/btrfs
+/// keduanya sama sehingga tidak terlihat, tapi di NFS/FUSE bisa berbeda dan
+/// membuat pre-check disk lolos padahal tidak muat (atau sebaliknya).
+/// `fragment_size` 0 (dilaporkan beberapa implementasi) → fallback ke
+/// `block_size`, dan `saturating_mul` menjaga filesystem besar tidak overflow.
+pub(crate) fn available_bytes(blocks_available: u64, fragment_size: u64, block_size: u64) -> u64 {
+    let unit = if fragment_size > 0 {
+        fragment_size
+    } else {
+        block_size
+    };
+    blocks_available.saturating_mul(unit)
+}
+
 /// Cek ruang disk tersedia untuk direktori tujuan. Gagal cek → izinkan (jangan blokir).
 /// `pub(crate)`: dipakai jalur RPC (`aria2_rpc.rs`, B2.2) sebelum `addUri`.
 pub(crate) fn has_space(dir: &str, needed: u64) -> bool {
     match nix::sys::statvfs::statvfs(std::path::Path::new(dir)) {
         Ok(stat) => {
-            let avail = stat.blocks_available() * stat.block_size();
+            let avail = available_bytes(
+                stat.blocks_available(),
+                stat.fragment_size(),
+                stat.block_size(),
+            );
             needed <= avail
         }
         Err(_) => true,
-    }
 }
 
 /// v2.9.3: `--max-connection-per-server` aria2 hanya menerima 1–16; nilai di
@@ -909,6 +930,32 @@ mod tests {
     }
 
     // ── v2.9.3: conn_per_server (clamp aria2 1–16) ──
+
+    // ── v2.10.0 (A3): available_bytes — satuan f_bavail adalah f_frsize ──
+
+    #[test]
+    fn available_bytes_uses_fragment_size() {
+        // 1000 blok × 4096 B = 4.096.000 byte.
+        assert_eq!(available_bytes(1000, 4096, 4096), 4_096_000);
+        // f_frsize != f_bsize (mis. NFS): yang benar f_frsize.
+        assert_eq!(available_bytes(1000, 512, 32_768), 512_000);
+    }
+
+    #[test]
+    fn available_bytes_falls_back_to_block_size() {
+        // Beberapa implementasi melaporkan f_frsize 0 — jangan hasilkan 0
+        // (akan membuat setiap unduhan ditolak "ruang disk tidak cukup").
+        assert_eq!(available_bytes(1000, 0, 4096), 4_096_000);
+        // Keduanya 0 → 0 (memang tidak ada informasi).
+        assert_eq!(available_bytes(1000, 0, 0), 0);
+    }
+
+    #[test]
+    fn available_bytes_saturates_instead_of_wrapping() {
+        // Filesystem besar × blok besar tidak boleh overflow jadi angka kecil
+        // — kalau wrap, pre-check disk menolak unduhan yang sebenarnya muat.
+        assert_eq!(available_bytes(u64::MAX, u64::MAX, 4096), u64::MAX);
+    }
 
     #[test]
     fn conn_per_server_clamps_to_aria2_range() {

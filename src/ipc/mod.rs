@@ -45,22 +45,34 @@ const MAX_REQUEST_LINE: usize = 1024 * 1024;
 /// daftar ini menutup celah tanpa mengubah perilaku yang dipakai.
 ///
 /// Dicocokkan case-insensitive — nama header HTTP memang case-insensitive.
-pub(crate) const HEADER_ALLOWLIST: &[&str] = &[
-    "referer",
-    "origin",
-    "cookie",
-    "authorization",
-    "accept-language",
-    "user-agent",
-];
+///
+/// v2.10.0 (B1/B4): `Cookie`, `Authorization`, dan `Proxy-Authorization`
+/// DIHAPUS dari daftar. Alasannya dua:
+/// 1. **Tidak ada pemakainya.** Extension hanya pernah mengirim `Referer`
+///    (`background.js`, `content.js`, `popup.js`). Cookie sudah punya jalur
+///    sendiri yang lebih aman: field `cookies`+`domain` → file Netscape
+///    per-domain 0600 (`write_cookies_txt`) → `--load-cookies`/`--cookies`/
+///    opsi per-URI `cookie`. Lewat header, cookie justru berakhir di argv
+///    proses (terbaca di `/proc/<pid>/cmdline`) dan — sebelum v2.10.0 — ikut
+///    tertulis ke `session.json`.
+/// 2. **Kredensial tidak perlu menempuh jalur ini sama sekali**, jadi
+///    permukaan injeksi untuk proses lokal se-UID menyempit tanpa mengubah
+///    satu pun perilaku yang dipakai.
+///
+/// Lapisan kedua tetap ada: `downloader::redact_for_persist` membuang header
+/// sensitif dari snapshot session (membersihkan `session.json` warisan
+/// ≤2.9.4), dan tiap runner men-strip `\r\n` sebelum membentuk argumen CLI.
+pub(crate) const HEADER_ALLOWLIST: &[&str] =
+    &["referer", "origin", "accept-language", "user-agent"];
 
-/// Batas jumlah header per permintaan. Dengan allow-list 6 nama saat ini batas
+/// Batas jumlah header per permintaan. Dengan allow-list 4 nama saat ini batas
 /// ini praktis tak terjangkau (kunci HashMap unik) — dipasang sebagai penjaga
 /// bila daftar diperluas, supaya argumen CLI tidak bisa tumbuh tanpa batas.
 pub(crate) const MAX_HEADERS: usize = 16;
 
-/// Batas panjang nilai satu header (byte). Cookie bisa panjang; 8 KB lebih
-/// dari cukup dan menjaga argumen CLI tetap waras.
+/// Batas panjang nilai satu header (byte). `User-Agent` dan `Referer` bisa
+/// panjang (referer sering membawa query string); 8 KB lebih dari cukup dan
+/// menjaga argumen CLI tetap waras.
 pub(crate) const MAX_HEADER_VALUE_LEN: usize = 8 * 1024;
 
 /// Bersihkan header masuk sebelum dipakai engine/CLI. Aturan:
@@ -174,10 +186,20 @@ fn cleanup_legacy_socket() {
 /// Defense-in-depth: terima koneksi HANYA dari proses dengan UID yang sama.
 /// Permission socket 0600 sudah membatasi, tapi bila parent dir pernah salah
 /// mode (mis. hasil versi lama / home di-share), peer-cred tetap menutup celah.
+///
+/// v2.10.0 (A5): memakai `geteuid()` — identitas EFEKTIF, sama seperti
+/// `config::validated_runtime_dir()`. Sebelumnya fungsi ini membandingkan
+/// dengan `getuid()` sementara pemeriksaan path privat memakai `geteuid()`;
+/// keduanya identik untuk proses non-setuid, tapi dua keputusan keamanan yang
+/// berbeda tidak boleh memakai identitas yang berbeda.
+///
+/// (Catatan: `cleanup_legacy_socket` di atas sengaja TETAP memakai `getuid()`
+/// — ia merekonstruksi path warisan ≤2.2.5 yang dulu memang dibentuk dari
+/// `getuid()`, jadi menggantinya justru membuat socket lama tidak ditemukan.)
 fn peer_uid_ok(stream: &tokio::net::UnixStream) -> bool {
     match nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials) {
         // Ucred::uid() mengembalikan uid_t (u32), bukan Uid — bandingkan raw.
-        Ok(cred) => cred.uid() == nix::unistd::getuid().as_raw(),
+        Ok(cred) => cred.uid() == nix::unistd::geteuid().as_raw(),
         Err(_) => false,
     }
 }
@@ -308,6 +330,22 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
                     }
                 }
             };
+
+            // v2.10.0 (A2): tolak skema yang tidak bisa diunduh SEBELUM
+            // membuat item. Dulu `add_download` tetap mengembalikan id (dengan
+            // status Error di dalamnya) dan handler ini selalu membalas
+            // `success: true` — extension lalu menampilkan badge ⬇ "sukses"
+            // untuk `blob:`/`data:`/`file:` yang tidak akan pernah terunduh.
+            // Guard di dalam engine tetap dipertahankan (dipakai jalur GUI).
+            if !crate::downloader::is_supported_scheme(&url) {
+                const REJECTED: &str = "Skema URL tidak didukung — http, https, ftp, atau magnet.";
+                return IpcResponse {
+                    success: false,
+                    id: None,
+                    error: Some(REJECTED.into()),
+                    message: None,
+                };
+            }
 
             // Tulis cookies.txt SEBELUM download start (yt-dlp membacanya saat spawn)
             if let (Some(c), Some(d)) = (msg.cookies.as_deref(), msg.domain.as_deref()) {
@@ -664,6 +702,41 @@ mod tests {
         assert_eq!(truncate_chars("abc", 10), "abc");
         assert_eq!(truncate_chars("", 10), "");
         assert_eq!(truncate_chars("abcdef", 3), "abc");
+    }
+
+    // ── v2.10.0 (B1/B4): kredensial tidak lagi lewat jalur header ──
+
+    #[test]
+    fn sanitize_drops_credential_headers() {
+        // Cookie punya jalur sendiri yang lebih aman (field `cookies`+`domain`
+        // → file Netscape 0600 → --load-cookies). Lewat header ia berakhir di
+        // argv proses (terbaca di /proc/<pid>/cmdline) dan — sebelum v2.10.0 —
+        // ikut tertulis ke session.json.
+        let raw = [
+            ("Cookie", "SID=super-rahasia; HSID=x"),
+            ("Authorization", "Bearer token-rahasia"),
+            ("Proxy-Authorization", "Basic abc"),
+            ("Referer", "https://ok.test/page"),
+        ];
+        let got = sanitize_headers(headers_of(&raw));
+        assert_eq!(got.len(), 1, "got {got:?}");
+        assert_eq!(got["Referer"], "https://ok.test/page");
+        // Pastikan tidak lolos dalam casing apa pun.
+        let raw2 = headers_of(&[("COOKIE", "a=b"), ("authorization", "x")]);
+        assert!(sanitize_headers(raw2).is_empty());
+    }
+
+    #[test]
+    fn allowlist_has_no_credential_entries() {
+        // Penjaga arah: jangan diam-diam menambahkan kredensial kembali.
+        for banned in ["cookie", "authorization", "proxy-authorization"] {
+            assert!(
+                !HEADER_ALLOWLIST.contains(&banned),
+                "{banned} masuk allow-list lagi — lihat komentar HEADER_ALLOWLIST"
+            );
+        }
+        // Yang memang dibutuhkan extension tetap ada.
+        assert!(HEADER_ALLOWLIST.contains(&"referer"));
     }
 
     #[test]

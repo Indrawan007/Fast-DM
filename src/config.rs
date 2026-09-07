@@ -92,9 +92,39 @@ impl Default for Config {
 
 impl Config {
     pub fn config_dir() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("fast-dm")
+        Self::config_dir_from(
+            dirs::config_dir(),
+            dirs::home_dir(),
+            &std::env::temp_dir(),
+            nix::unistd::geteuid().as_raw(),
+        )
+    }
+
+    /// v2.10.0 (B2): inti `config_dir()` — dipisah agar bisa diuji tanpa
+    /// mengutak-atik `HOME`.
+    ///
+    /// Dulu fallback-nya `/tmp/fast-dm`: direktori publik yang bisa
+    /// di-pre-create user lain, padahal isinya `config.json`, `rpc.secret`,
+    /// `cookies_*.txt`, dan `session.json` (URL bertoken + header). Itu
+    /// persis skenario yang ditutup K1 untuk socket IPC. Sekarang:
+    /// 1. `XDG config dir` (normal),
+    /// 2. `$HOME/.config/fast-dm`,
+    /// 3. `temp_dir/fast-dm-<euid>` — di-namespace per-UID sehingga tidak
+    ///    bisa ditebak/di-preempt proses user lain, dan `ensure_private_dir`
+    ///    tetap menegakkan 0700 di `work_dir()`.
+    pub(crate) fn config_dir_from(
+        xdg_config: Option<PathBuf>,
+        home: Option<PathBuf>,
+        temp: &Path,
+        euid: u32,
+    ) -> PathBuf {
+        if let Some(d) = xdg_config {
+            return d.join("fast-dm");
+        }
+        if let Some(h) = home {
+            return h.join(".config").join("fast-dm");
+        }
+        temp.join(format!("fast-dm-{euid}"))
     }
 
     /// v2.7.0 (B2): secret RPC stabil-per-installasi. Disimpan di file 600
@@ -106,23 +136,56 @@ impl Config {
 
     /// Inti `rpc_secret()` — dir parameterisasi supaya bisa diuji tanpa
     /// menyentuh XDG config asli (test paralel tidak boleh beradu env var).
+    ///
+    /// v2.10.0 (B3): pembuatan file memakai `create_new` (O_EXCL) + mode 0600
+    /// sejak lahir. Sebelumnya `fs::write` biasa: dua proses yang start
+    /// bersamaan saat pertama kali bisa sama-sama menghasilkan secret dan
+    /// saling menimpa (last-writer-wins), sehingga daemon yang lahir dari
+    /// proses A tidak bisa di-probe proses B. Yang kalah balapan kini membaca
+    /// secret milik pemenang.
     pub fn rpc_secret_in(dir: &Path) -> String {
         let p = dir.join("rpc.secret");
-        if let Ok(s) = fs::read_to_string(&p) {
-            let t = s.trim().to_string();
-            if !t.is_empty() && t.len() <= 64 {
-                return t;
-            }
+        if let Some(s) = Self::read_rpc_secret(&p) {
+            return s;
         }
         let fresh = uuid::Uuid::new_v4().simple().to_string()[..16].to_string();
-        if fs::create_dir_all(dir).is_ok() && fs::write(&p, &fresh).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
-            }
+        if fs::create_dir_all(dir).is_err() {
+            return fresh;
         }
-        fresh
+
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&p) {
+            Ok(mut f) => {
+                use std::io::Write;
+                // Jaring pengaman untuk platform tanpa OpenOptionsExt::mode.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
+                }
+                if f.write_all(fresh.as_bytes()).is_ok() {
+                    return fresh;
+                }
+            }
+            // EEXIST = proses lain menang → pakai secret-nya.
+            Err(_) => {}
+        }
+        Self::read_rpc_secret(&p).unwrap_or(fresh)
+    }
+
+    /// Baca secret yang sudah ada; `None` bila tidak ada / kosong / kepanjangan.
+    fn read_rpc_secret(p: &Path) -> Option<String> {
+        let t = fs::read_to_string(p).ok()?.trim().to_string();
+        if t.is_empty() || t.len() > 64 {
+            return None;
+        }
+        Some(t)
     }
 
     /// Isi file .desktop XDG autostart. Path dgn spasi → dikutip
@@ -159,10 +222,15 @@ impl Config {
     }
 
     /// Sisi-efek nyata: ~/.config/autostart. Failures dilaporkan pemanggil.
+    ///
+    /// v2.10.0 (B2): tanpa XDG config dir fungsi ini kini gagal dengan pesan,
+    /// bukan menulis `.desktop` ke `/tmp/autostart` (publik, dan tidak akan
+    /// pernah dibaca session manager mana pun).
     pub fn apply_autostart(enable: bool) -> Result<(), String> {
-        let dir = dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("autostart");
+        let Some(cfg) = dirs::config_dir() else {
+            return Err("XDG config dir tidak tersedia — autostart dilewati".into());
+        };
+        let dir = cfg.join("autostart");
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fast-dm"));
         Self::apply_autostart_in(&dir, &exe, enable)
     }
@@ -317,9 +385,13 @@ impl Config {
     /// `OnceLock` hanya diisi sekali. Sumber kebenaran setelah startup adalah
     /// `DownloadEngine.config` (RwLock) yang diperbarui `update_config()`.
     /// Jadi di GUI/engine baca lewat `engine.get_config().await`, bukan
-    /// `Config::load()` — kalau tidak, unduhan berikutnya diam-diam memakai
+    /// fungsi ini — kalau tidak, unduhan berikutnya diam-diam memakai
     /// setelan lama. Saat ini hanya `DownloadEngine::new` yang memanggilnya.
-    pub fn load() -> &'static Config {
+    ///
+    /// v2.10.0 (D7): di-rename dari `load()` supaya namanya sendiri sudah
+    /// mengatakan "snapshot sekali saat start" — `load()` mengundang pemanggil
+    /// baru mengira ia membaca ulang dari disk setiap kali.
+    pub fn load_startup_snapshot() -> &'static Config {
         CONFIG.get_or_init(|| {
             let path = Self::config_file();
             if path.exists() {
@@ -353,6 +425,14 @@ impl Config {
         let path = Self::config_file();
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, json)?;
+        // v2.10.0 (B1): config.json bisa memuat `proxy_url` berisi kredensial
+        // (http://user:pass@host:port) — samakan perlakuannya dengan
+        // session.json/cookie/rpc.secret yang sudah 0600.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+        }
         fs::rename(&tmp, &path)?;
         Ok(())
     }
@@ -443,6 +523,56 @@ mod tests {
     }
 
     // ── Config default ──
+
+    // ── v2.10.0 (B2): config_dir tidak pernah jatuh ke path publik ──
+
+    #[test]
+    fn config_dir_prefers_xdg_then_home() {
+        let d = Config::config_dir_from(
+            Some(PathBuf::from("/home/u/.config")),
+            Some(PathBuf::from("/home/u")),
+            Path::new("/tmp"),
+            1000,
+        );
+        assert_eq!(d, PathBuf::from("/home/u/.config/fast-dm"));
+
+        let d = Config::config_dir_from(
+            None,
+            Some(PathBuf::from("/home/u")),
+            Path::new("/tmp"),
+            1000,
+        );
+        assert_eq!(d, PathBuf::from("/home/u/.config/fast-dm"));
+    }
+
+    #[test]
+    fn config_dir_fallback_is_uid_namespaced_not_public() {
+        // Dulu fallback-nya "/tmp/fast-dm" — path publik yang bisa
+        // di-pre-create user lain, padahal isinya config.json, rpc.secret,
+        // cookies_*.txt, dan session.json (URL bertoken). Sekarang
+        // di-namespace per-eUID sehingga tidak bisa ditebak/di-preempt.
+        let d = Config::config_dir_from(None, None, Path::new("/tmp"), 1000);
+        assert_eq!(d, PathBuf::from("/tmp/fast-dm-1000"));
+        assert_ne!(d, PathBuf::from("/tmp/fast-dm"));
+        // Dua user berbeda tidak berbagi direktori.
+        let other = Config::config_dir_from(None, None, Path::new("/tmp"), 1001);
+        assert_ne!(d, other);
+    }
+
+    #[test]
+    fn config_dir_always_ends_with_fast_dm_component() {
+        for (xdg, home) in [
+            (Some(PathBuf::from("/a/.config")), Some(PathBuf::from("/a"))),
+            (None, Some(PathBuf::from("/a"))),
+            (None, None),
+        ] {
+            let d = Config::config_dir_from(xdg, home, Path::new("/tmp"), 7);
+            assert!(
+                d.to_string_lossy().contains("fast-dm"),
+                "path config harus mengandung 'fast-dm': {d:?}"
+            );
+        }
+    }
 
     #[test]
     fn config_default_has_safe_values() {

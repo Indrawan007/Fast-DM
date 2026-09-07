@@ -66,7 +66,10 @@ pub const QUALITIES: &[QualityOption] = &[
 /// main_context.iteration(true) }`) adalah NESTED main loop: berisiko
 /// reentrancy, dan punya bug nyata — dialog di-Cancel tetap melanjutkan
 /// download (return None dianggap "tanpa kualitas"), kini dibatalkan benar.
-#[allow(dead_code)]
+/// v2.10.0 (A6): `#[allow(dead_code)]` di sini dihapus — CHANGELOG 2.9.4
+/// sudah mengklaimnya hilang bersama `QualityOption`/`QUALITIES`, tapi
+/// atributnya tertinggal. Fungsinya dipanggil dari dua tempat di
+/// `gui/window.rs` (alur "Unduh" dan "Simpan Sebagai…").
 pub fn show_quality_dialog<F>(
     parent: &Window,
     title: &str,
