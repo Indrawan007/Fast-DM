@@ -43,6 +43,12 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   ditulis untuk profil browser yang benar-benar ada (tidak lagi membuat ±13
   folder sampah di `~/.config`, sejalan dengan M8 di sisi Rust), dan
   `XDG_CONFIG_HOME` dihormati.
+  - **`setup-browser.sh` kembali bisa dijalankan** — perombakan di atas
+    kehilangan kurung kurawal penutup fungsi `write_manifest()`, sehingga bash
+    menolak seluruh script (`syntax error: unexpected end of file`) sebelum
+    satu manifest pun ditulis. Diverifikasi dengan `bash -n` dan uji jalan di
+    `XDG_CONFIG_HOME` sementara (origin packed + registry tergabung, profil
+    yang tidak ada dilewati, EXT_ID tidak valid / tanpa profil → exit 1).
 
 - **Crate kembali dapat dikompilasi** — commit sebelumnya kehilangan dua baris
   di accept loop IPC (`tokio::spawn` + `stream.into_split()`), menyisakan blok
