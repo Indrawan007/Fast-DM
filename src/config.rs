@@ -5,6 +5,31 @@ use std::sync::OnceLock;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
+/// Unique sibling temporary, private from creation; never expose data before chmod.
+pub(crate) fn write_private_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("missing parent"))?;
+    fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(".fastdm-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -339,7 +364,9 @@ impl Config {
         let mut h = Self::normalize_host(host);
         while !h.is_empty() {
             let p = Self::cookies_file_for_host(&h);
-            if p.exists() {
+            // Legacy flattened caches lost their original security attributes.
+            // Leave them on disk, but require a fresh structured export to use them.
+            if verified_cookie_cache(&p) {
                 return Some(p);
             }
             // Buang label kiri: "a.b.c" → "b.c"; berhenti di "c"
@@ -417,21 +444,19 @@ impl Config {
         let dir = Self::config_dir();
         fs::create_dir_all(&dir)?;
         let json = serde_json::to_string_pretty(self)?;
-        // Tulis atomik (tmp + rename) supaya config tidak korup kalau crash
-        let path = Self::config_file();
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, json)?;
-        // v2.10.0 (B1): config.json bisa memuat `proxy_url` berisi kredensial
-        // (http://user:pass@host:port) — samakan perlakuannya dengan
-        // session.json/cookie/rpc.secret yang sudah 0600.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
-        }
-        fs::rename(&tmp, &path)?;
+        write_private_atomic(&Self::config_file(), json.as_bytes())?;
         Ok(())
     }
+}
+
+fn verified_cookie_cache(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let header = crate::cookies::CACHE_HEADER.as_bytes();
+    let mut bytes = vec![0; header.len()];
+    file.read_exact(&mut bytes).is_ok() && bytes == header
 }
 
 /// v2.4.0 (D3): validasi proxy sebelum disimpan — nilai ngawur bikin aria2
@@ -457,6 +482,22 @@ pub fn is_valid_proxy_url(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_atomic_file_is_private_and_replaces_without_temp_leaks() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("fastdm-private-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("config.json");
+        write_private_atomic(&path, b"first").unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        write_private_atomic(&path, b"second").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     // ── normalize_host (tested via public cookies_file_for) ──
 

@@ -17,6 +17,22 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 🌐 **Proxy global** (HTTP/SOCKS5, kredensial di URL) — satu kolom di Pengaturan, berlaku untuk aria2 & yt-dlp
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 
+## Stabilitas v2.10.5
+
+- Native host menolak ACK kosong/tidak valid; output stderr Unicode dan baris
+  subprocess panjang dibatasi dengan aman.
+- Update aplikasi **dan extension bersama-sama**: cookie sekarang dikirim dengan
+  atribut Secure, HttpOnly, host-only, path, dan expiry. Payload cookie lama yang
+  hanya name=value ditolak. Cache per-domain lama diabaikan tanpa dihapus;
+  ekspor ulang lewat extension terbaru. Cookie partitioned belum diekspor.
+- File cookie/config/session dibuat privat sejak awal; riwayat terminal dibatasi
+  200 entri tanpa membuang unduhan belum selesai.
+- Hapus row mempertahankan hitungan worker sampai cleanup selesai. Statistik
+  diperbarui berkala dan event row yang sudah dihapus diabaikan.
+- Nama eksplisit Simpan Sebagai dipertahankan; penemuan profil mengikuti XDG.
+- Simpan konfigurasi menyinkronkan daemon milik aplikasi dan mengisi slot antrean
+  yang tersedia. Perubahan port RPC memerlukan restart.
+
 ## Stabilitas v2.10.4
 
 - Lanjut Semua mengajukan resume unduhan paused/error menurut waktu pembuatan

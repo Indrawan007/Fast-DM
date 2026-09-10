@@ -20,6 +20,8 @@ use uuid::Uuid;
 pub(crate) type SharedInfo = Arc<Mutex<DownloadInfo>>;
 pub(crate) type DownloadMap = Arc<RwLock<HashMap<String, SharedInfo>>>;
 
+static CONFIG_UPDATE: Mutex<()> = Mutex::const_new(());
+
 pub struct DownloadEngine {
     downloads: DownloadMap,
     event_tx: mpsc::UnboundedSender<DownloadEvent>,
@@ -228,13 +230,33 @@ impl DownloadEngine {
                 "Proxy tidak valid — contoh: http://127.0.0.1:8080, socks5://host:1080".to_string(),
             );
         }
-        cfg.save().map_err(|e| e.to_string())?;
+        let _update = CONFIG_UPDATE.lock().await;
+        let current = self.config.read().await.clone();
+        if current.rpc_port != cfg.rpc_port {
+            return Err(
+                "Perubahan port RPC memerlukan restart; edit config.json saat aplikasi ditutup"
+                    .into(),
+            );
+        }
+        if let Err(e) = aria2_rpc::apply_live_config(&cfg).await {
+            let _ = aria2_rpc::apply_live_config(&current).await;
+            return Err(format!("Daemon menolak konfigurasi live: {e}"));
+        }
+        let saved = cfg.save().map_err(|e| e.to_string());
+        if let Err(error) = saved {
+            let _ = aria2_rpc::apply_live_config(&current).await;
+            return Err(error);
+        }
         *self.config.write().await = cfg;
-        // v2.10.0 (C1): user mungkin baru saja mengganti `rpc_port` / proxy
-        // — alasan gerbang "daemon tidak tersedia" ditutup bisa jadi sudah
-        // tidak berlaku, jadi buka lagi agar percobaan berikutnya langsung
-        // dicoba (bukan menunggu sisa backoff 60 dtk).
         aria2_rpc::reset_daemon_gate();
+        promote_next(
+            self.downloads.clone(),
+            self.event_tx.clone(),
+            self.config.clone(),
+            self.dirty.clone(),
+            self.shutting_down.clone(),
+        )
+        .await;
         Ok(())
     }
 
@@ -265,6 +287,9 @@ impl DownloadEngine {
         // Pengecekan + insert harus atomik terhadap add_download lain.
         // Urutan lock tetap map -> item; lepas sebelum start_download.
         let mut downloads = self.downloads.write().await;
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return String::new();
+        }
         let live = {
             let mut found = None;
             for (existing_id, info) in downloads.iter() {
@@ -294,6 +319,7 @@ impl DownloadEngine {
         let mut info =
             DownloadInfo::new(id.clone(), url.to_string(), fname, save, headers, quality);
         info.is_youtube = is_yt;
+        info.filename_explicit = filename.is_some_and(|f| !f.trim().is_empty());
 
         // v2.3.0 (M11): tolak cepat skema non-download (blob:, data:, javascript:,
         // file:, dll.) — dulu lolos dan baru gagal lambat di CLI dengan error
@@ -309,7 +335,7 @@ impl DownloadEngine {
             let _ = self.event_tx.send(DownloadEvent::Error(info.clone()));
             downloads.insert(id.clone(), Arc::new(Mutex::new(info)));
             self.mark_dirty();
-            tracing::warn!("Download ditolak (skema URL): {}", url);
+            tracing::warn!("Download ditolak (skema URL tidak didukung)");
             return id;
         }
 
@@ -503,33 +529,35 @@ impl DownloadEngine {
     }
 
     pub async fn clear_download(&self, id: &str) {
-        // Cancel dulu supaya background task (aria2/yt-dlp) berhenti. Tidak
-        // mengirim event agar row yang baru dihapus GUI tidak dibuat kembali.
         let target = {
-            let downloads = self.downloads.read().await;
-            match downloads.get(id) {
-                Some(info) => {
-                    let mut i = info.lock().await;
-                    let target = (i.pid.take(), i.rpc_gid.take());
-                    i.status = DownloadStatus::Cancelled;
-                    i.resume_pending = false;
-                    i.status_detail.clear();
-                    i.speed = 0;
-                    Some(target)
-                }
-                None => None,
+            let mut downloads = self.downloads.write().await;
+            let Some(info) = downloads.get(id).cloned() else {
+                return;
+            };
+            let mut i = info.lock().await;
+            i.removed = true;
+            i.status = DownloadStatus::Cancelled;
+            i.resume_pending = false;
+            i.speed = 0;
+            // Active RPC workers own cleanup and retain their GID/PID.
+            let target = (
+                i.pid,
+                if i.worker_active {
+                    None
+                } else {
+                    i.rpc_gid.take()
+                },
+            );
+            if !i.worker_active {
+                downloads.remove(id);
             }
+            target
         };
-
-        self.downloads.write().await.remove(id);
-
-        if let Some((pid, gid)) = target {
-            kill_child_pid(pid);
-            if let Some(gid) = gid {
-                let config = self.config.read().await.clone();
-                if let Err(e) = aria2_rpc::remove_gid(&gid, &config).await {
-                    tracing::warn!("RPC remove GID {}: {}", gid, e);
-                }
+        kill_child_pid(target.0);
+        if let Some(gid) = target.1 {
+            let config = self.config.read().await.clone();
+            if let Err(e) = aria2_rpc::remove_gid(&gid, &config).await {
+                tracing::warn!("RPC remove gagal: {}", e);
             }
         }
         self.mark_dirty();
@@ -539,7 +567,10 @@ impl DownloadEngine {
         let downloads = self.downloads.read().await;
         let mut result = Vec::with_capacity(downloads.len());
         for info in downloads.values() {
-            result.push(info.lock().await.clone());
+            let info = info.lock().await;
+            if !info.removed {
+                result.push(info.clone());
+            }
         }
         result
     }
@@ -616,14 +647,18 @@ fn spawn_supervised(
         // Slot baru dilepas setelah seluruh cleanup backend selesai. Resume
         // yang diminta saat pause kini aman dipromosikan sebagai worker baru.
         {
-            let map = downloads.write().await;
+            let mut map = downloads.write().await;
             let mut i = info.lock().await;
             i.finish_worker(!shutting_down.load(Ordering::SeqCst));
             if map
                 .get(&i.id)
                 .is_some_and(|current| Arc::ptr_eq(current, &info))
             {
-                let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                if i.removed {
+                    map.remove(&i.id);
+                } else {
+                    let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                }
             }
         }
         dirty.store(true, Ordering::SeqCst);
@@ -637,6 +672,9 @@ fn spawn_supervised(
 /// dipakai sebagai jalur cepat yang tahan terhadap variasi penulisan.
 /// Yang ditolak: `blob:`, `data:`, `javascript:`, `file:`, `about:`, dll.
 pub fn is_supported_scheme(url: &str) -> bool {
+    if url.chars().any(char::is_control) {
+        return false;
+    }
     if aria2_rpc::is_magnet(url) {
         return true;
     }
@@ -691,65 +729,69 @@ async fn promote_next(
     dirty: Arc<AtomicBool>,
     shutting_down: Arc<AtomicBool>,
 ) {
-    let max = usize::from(shared_config.read().await.max_concurrent.max(1));
+    loop {
+        let max = usize::from(shared_config.read().await.max_concurrent.max(1));
 
-    let next = {
-        let map = downloads.write().await;
-        if shutting_down.load(Ordering::SeqCst) {
-            return;
-        }
+        let next = {
+            let map = downloads.write().await;
+            if shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
 
-        let mut active = 0usize;
-        let mut queued = 0usize;
-        let mut oldest: Option<((i64, String), SharedInfo)> = None;
+            let mut active = 0usize;
+            let mut queued = 0usize;
+            let mut oldest: Option<((i64, String), SharedInfo)> = None;
 
-        for info in map.values() {
-            let i = info.lock().await;
-            if i.occupies_slot() {
-                active += 1;
-            } else if i.status == DownloadStatus::Queued {
-                queued += 1;
-                let key = (i.created, i.id.clone());
-                if oldest.as_ref().is_none_or(|(k, _)| key < *k) {
-                    oldest = Some((key, info.clone()));
+            for info in map.values() {
+                let i = info.lock().await;
+                if i.occupies_slot() {
+                    active += 1;
+                } else if i.status == DownloadStatus::Queued {
+                    queued += 1;
+                    let key = (i.created, i.id.clone());
+                    if oldest.as_ref().is_none_or(|(k, _)| key < *k) {
+                        oldest = Some((key, info.clone()));
+                    }
                 }
             }
-        }
 
-        if active >= max {
-            None
-        } else if let Some((_, info)) = oldest {
-            let live = (active + queued).max(1);
-            let started = {
-                let mut i = info.lock().await;
-                if i.status != DownloadStatus::Queued || !i.request_start(true) {
-                    false
+            if active >= max {
+                None
+            } else if let Some((_, info)) = oldest {
+                let live = (active + queued).max(1);
+                let started = {
+                    let mut i = info.lock().await;
+                    if i.status != DownloadStatus::Queued || !i.request_start(true) {
+                        false
+                    } else {
+                        let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                        true
+                    }
+                };
+
+                if started {
+                    Some((info, live))
                 } else {
-                    let _ = tx.send(DownloadEvent::Progress(i.clone()));
-                    true
+                    None
                 }
-            };
-
-            if started {
-                Some((info, live))
             } else {
                 None
             }
-        } else {
-            None
-        }
-    };
+        };
 
-    if let Some((info, live)) = next {
-        spawn_supervised(
-            downloads,
-            info,
-            tx,
-            shared_config,
-            dirty,
-            shutting_down,
-            live,
-        );
+        if let Some((info, live)) = next {
+            spawn_supervised(
+                downloads.clone(),
+                info,
+                tx.clone(),
+                shared_config.clone(),
+                dirty.clone(),
+                shutting_down.clone(),
+                live,
+            );
+        } else {
+            break;
+        }
     }
 }
 
@@ -822,11 +864,26 @@ impl<R: tokio::io::AsyncRead + Unpin> ChildLines<R> {
             }
             match self.reader.read(&mut self.raw).await {
                 Ok(0) => self.eof = true,
-                Ok(n) => self.pending.extend_from_slice(&self.raw[..n]),
+                Ok(n) => {
+                    self.pending.extend_from_slice(&self.raw[..n]);
+                    if self.pending.len() > 64 * 1024 {
+                        let tail = self.pending.split_off(self.pending.len() - 64 * 1024);
+                        self.pending = tail;
+                    }
+                }
                 Err(_) => self.eof = true,
             }
         }
     }
+}
+
+/// Keep a bounded tail without slicing through a UTF-8 code point.
+fn retain_utf8_tail(buf: &mut String, max: usize) {
+    let mut cut = buf.len().saturating_sub(max);
+    while !buf.is_char_boundary(cut) {
+        cut += 1;
+    }
+    buf.drain(..cut);
 }
 
 /// v2.3.0 (K3): file input aria2 (`aria2-<id>.txt`) berisi URL penuh — mungkin
@@ -957,14 +1014,33 @@ pub(crate) fn redact_for_persist(d: &mut DownloadInfo) {
 }
 
 /// Tulis satu snapshot session secara atomik, dibatasi 200 entri terbaru.
+fn retain_session_items(all: &mut Vec<DownloadInfo>) {
+    let mut history = 0;
+    all.reverse();
+    all.retain(|d| {
+        if d.removed {
+            return false;
+        }
+        if matches!(
+            d.status,
+            DownloadStatus::Completed | DownloadStatus::Cancelled
+        ) {
+            history += 1;
+            history <= 200
+        } else {
+            true
+        }
+    });
+    all.reverse();
+}
+
 fn write_session_snapshot(mut all: Vec<DownloadInfo>) -> Result<(), String> {
     // urut (created_ms, id) — konsisten dengan promote_next (L4)
     all.sort_by_key(|d| (d.created, d.id.clone()));
-    if all.len() > 200 {
-        all = all.split_off(all.len() - 200);
-    }
+    retain_session_items(&mut all);
     // B1: kredensial tidak pernah menyentuh disk lewat jalur ini.
     for d in &mut all {
+        d.pid = None;
         redact_for_persist(d);
     }
 
@@ -977,15 +1053,7 @@ fn write_session_snapshot(mut all: Vec<DownloadInfo>) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    crate::config::write_private_atomic(&path, json.as_bytes()).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1078,6 +1146,91 @@ pub fn extract_filename_from_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stderr_tail_is_utf8_safe_and_bounded() {
+        for text in ["€".repeat(6000), "x".repeat(20000), "a\n界🙂".repeat(5000)] {
+            let mut tail = text.clone();
+            retain_utf8_tail(&mut tail, 8192);
+            assert!(tail.len() <= 8192);
+            assert!(text.ends_with(&tail));
+        }
+        let mut text = "🙂".to_string();
+        retain_utf8_tail(&mut text, 0);
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn session_retains_all_unfinished_work_but_caps_history() {
+        let mut all = Vec::new();
+        for n in 0..250 {
+            let mut info = DownloadInfo::new(
+                n.to_string(),
+                "unused".into(),
+                "unused".into(),
+                "unused".into(),
+                Default::default(),
+                None,
+            );
+            info.status = DownloadStatus::Paused;
+            all.push(info.clone());
+            info.status = DownloadStatus::Completed;
+            all.push(info);
+        }
+        retain_session_items(&mut all);
+        assert_eq!(
+            all.iter()
+                .filter(|i| i.status == DownloadStatus::Paused)
+                .count(),
+            250
+        );
+        assert_eq!(
+            all.iter()
+                .filter(|i| i.status == DownloadStatus::Completed)
+                .count(),
+            200
+        );
+        all[0].removed = true;
+        retain_session_items(&mut all);
+        assert!(all.iter().all(|i| !i.removed));
+    }
+
+    #[tokio::test]
+    async fn clearing_stopping_worker_preserves_slot_until_cleanup() {
+        let engine = lifecycle_engine();
+        let old = lifecycle_item(&engine, "old", DownloadStatus::Paused).await;
+        old.lock().await.worker_active = true;
+        engine.clear_download("old").await;
+        assert!(engine.get_all_downloads().await.is_empty());
+        assert!(old.lock().await.occupies_slot());
+        let next = lifecycle_item(&engine, "next", DownloadStatus::Queued).await;
+        engine.start_download("next").await;
+        assert_eq!(next.lock().await.status, DownloadStatus::Queued);
+        assert!(!next.lock().await.worker_active);
+        let mut old = old.lock().await;
+        old.finish_worker(true);
+        assert!(!old.occupies_slot());
+        assert!(!old.request_start(true));
+    }
+
+    #[test]
+    fn rejects_raw_control_characters_in_download_urls() {
+        for url in [
+            "https://example.com/file\nout=other",
+            "https://example.com/\tfile",
+            "magnet:?xt=x\r",
+        ] {
+            assert!(!is_supported_scheme(url));
+        }
+    }
+
+    #[tokio::test]
+    async fn child_lines_bounds_unterminated_output() {
+        let data = vec![b'a'; 512 * 1024];
+        let mut lines = ChildLines::new(data.as_slice());
+        assert!(lines.next_line().await.unwrap().len() <= 64 * 1024);
+        assert!(lines.next_line().await.is_none());
+    }
 
     // Engine fixture without startup/session/config filesystem side effects.
     fn lifecycle_engine() -> DownloadEngine {

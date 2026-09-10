@@ -11,6 +11,7 @@
 
 pub mod app;
 pub mod config;
+pub mod cookies;
 pub mod downloader;
 pub mod gui;
 pub mod ipc;

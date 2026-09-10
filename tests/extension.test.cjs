@@ -182,3 +182,80 @@ for (const outcome of ["success", "rejected", "missing", "transport"]) {
     assert.ok(b.logs.every((line) => !line.includes("private")));
   });
 }
+
+
+test("background exports cookie attributes and ignores flattened caller cookies", async () => {
+  const b = background();
+  b.context.chrome.cookies.getAll = async () => [
+    { domain: "example.com", name: "sid", value: "private", path: "/login", secure: true,
+      hostOnly: true, httpOnly: true, session: false, expirationDate: 2000000000 },
+    { domain: "example.com", name: "partition", value: "omit", partitionKey: { topLevelSite: "https://other.test" } },
+  ];
+  const response = new Promise(resolve => b.onMessage({ action: "download",
+    url: "https://example.com/login/file.zip", cookies: "untrusted=wrong", domain: "other.test" }, {}, resolve));
+  await new Promise(setImmediate);
+  const message = b.requests[0].message;
+  assert.equal(message.cookies, undefined);
+  assert.equal(message.cookie_jar.length, 1);
+  assert.equal(message.cookie_jar[0].secure, true);
+  assert.equal(message.cookie_jar[0].hostOnly, true);
+  assert.equal(message.cookie_jar[0].httpOnly, true);
+  assert.equal(message.cookie_jar[0].path, "/login");
+  assert.equal(message.cookie_jar[0].expirationDate, 2000000000);
+  b.requests[0].callback({ success: true });
+  await response;
+});
+
+
+test("disabled extension refuses manual downloads before reading cookies", async () => {
+  const b = background();
+  b.onMessage({ action: "setConfig", config: { enabled: false } }, {}, () => {});
+  let read = false;
+  b.context.chrome.cookies.getAll = async () => { read = true; return []; };
+  const result = await new Promise(resolve => b.onMessage({ action: "download", url: "https://example.com/a.zip" }, {}, resolve));
+  assert.equal(result.success, false);
+  assert.equal(read, false);
+  assert.equal(b.requests.length, 0);
+});
+
+function sniffer() {
+  const location = { href: "https://example.com/first" };
+  const root = { dataset: {} };
+  let onMutation;
+  const window = { fetch() {}, addEventListener() {} };
+  const document = {
+    readyState: "complete", documentElement: root,
+    querySelectorAll: () => [], querySelector: () => null,
+  };
+  class XMLHttpRequest { open() {} }
+  class MutationObserver {
+    constructor(callback) { onMutation = callback; }
+    observe() {}
+  }
+  vm.runInNewContext(source("sniffer.js"), {
+    window, document, location, URL, XMLHttpRequest, MutationObserver,
+    setTimeout: () => 1,
+  });
+  return { window, location, root, mutate: () => onMutation([]) };
+}
+
+test("sniffer removes old candidates when SPA navigation precedes a fetch", async () => {
+  const s = sniffer();
+  s.window.fetch("https://example.com/old.mp4");
+  await new Promise(setImmediate);
+  assert.deepEqual(JSON.parse(s.root.dataset.fastdmMedia), ["https://example.com/old.mp4"]);
+  s.location.href = "https://example.com/next";
+  s.window.fetch("https://example.com/new.m3u8");
+  await new Promise(setImmediate);
+  assert.deepEqual(JSON.parse(s.root.dataset.fastdmMedia), ["https://example.com/new.m3u8"]);
+});
+
+test("sniffer clears stale candidates on navigation without a new media request", async () => {
+  const s = sniffer();
+  s.window.fetch("https://example.com/old.mp4");
+  await new Promise(setImmediate);
+  s.location.href = "https://example.com/empty";
+  s.mutate();
+  await new Promise(setImmediate);
+  assert.deepEqual(JSON.parse(s.root.dataset.fastdmMedia), []);
+});

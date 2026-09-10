@@ -301,12 +301,11 @@ pub(crate) fn adduri_options(
     // sebelumnya dengan Pengaturan lama. Proxy kosong tidak dikirim (tanpa
     // proxy = perilaku default); pembersihan proxy basi ditangani
     // `global_options_extended`.
-    if !cfg.proxy_url.trim().is_empty() {
-        o.insert("all-proxy".into(), json!(cfg.proxy_url.trim()));
-    }
-    if !cfg.verify_tls {
-        o.insert("check-certificate".into(), json!("false"));
-    }
+    o.insert("all-proxy".into(), json!(cfg.proxy_url.trim()));
+    o.insert(
+        "check-certificate".into(),
+        json!(cfg.verify_tls.to_string()),
+    );
     Value::Object(o)
 }
 
@@ -388,6 +387,22 @@ pub(crate) fn reset_daemon_gate() {
 
 /// Pastikan daemon RPC siap: reuse milik sendiri (probe ber-token sukses),
 /// atau spawn `aria2c` baru. Err = pesan siap-tampil.
+pub(crate) async fn apply_live_config(cfg: &Config) -> Result<(), String> {
+    let mut daemon = DAEMON.lock().await;
+    let Some(child) = daemon.as_mut() else {
+        return Ok(());
+    };
+    if child.try_wait().map_err(|e| e.to_string())?.is_some() {
+        return Ok(());
+    }
+    let rpc = Rpc::new(cfg.rpc_port, Config::rpc_secret());
+    rpc.call("changeGlobalOption", vec![global_options_core(cfg)])
+        .await?;
+    rpc.call("changeGlobalOption", vec![global_options_extended(cfg)])
+        .await?;
+    Ok(())
+}
+
 async fn ensure_daemon(cfg: &Config) -> Result<Rpc, String> {
     // C1: jangan bayar ulang spawn + wait_ready 6 dtk untuk setiap unduhan
     // selama penyebabnya belum sempat berubah.
@@ -738,18 +753,9 @@ pub async fn download(
     // berlaku untuk SEMUA unduhan http/ftp juga).
     // v2.9.3: sekalian sinkronkan Pengaturan lain ke daemon yang sudah hidup
     // (dua panggilan terpisah — lihat global_options_core/extended).
-    let _ = rpc
-        .call("changeGlobalOption", vec![global_options_core(cfg)])
-        .await; // best-effort
-    if let Err(e) = rpc
-        .call("changeGlobalOption", vec![global_options_extended(cfg)])
-        .await
-    {
-        tracing::debug!("changeGlobalOption (opsi tambahan) ditolak daemon: {e}");
-    }
+    // Global settings are set at daemon creation and by apply_live_config.
+    // A worker's older snapshot must not overwrite newer user settings.
 
-    // B2.2: opsi per-URI — cookie per-domain + header (mis. Referer) +
-    // timeout/retry mengikuti Pengaturan. `out` hanya untuk http/ftp.
     let (out, cookie, headers) = {
         let i = info.lock().await;
         (
@@ -1219,10 +1225,10 @@ mod tests {
         assert_eq!(o["all-proxy"], "socks5://127.0.0.1:1080");
         assert_eq!(o["check-certificate"], "false");
 
-        // Default (tanpa proxy, TLS diverifikasi) tidak mengirim keduanya.
+        // Defaults must override insecure/stale daemon defaults explicitly.
         let d = adduri_options("/dl", None, None, &HashMap::new(), &Config::default());
-        assert!(d.get("all-proxy").is_none());
-        assert!(d.get("check-certificate").is_none());
+        assert_eq!(d["all-proxy"], "");
+        assert_eq!(d["check-certificate"], "true");
     }
 
     #[test]

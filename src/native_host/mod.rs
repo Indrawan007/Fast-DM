@@ -14,10 +14,11 @@ struct NativeMessage {
     #[serde(default)]
     headers: std::collections::HashMap<String, String>,
     cookies: Option<String>,
+    cookie_jar: Option<Vec<crate::cookies::BrowserCookie>>,
     domain: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Debug)]
 struct NativeResponse {
     success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -116,6 +117,7 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
 
             match forward_to_gui(&socket_path, &msg) {
                 Ok(resp) => resp,
+                Err(e) if !e.starts_with("connect: ") => invalid_ack(),
                 Err(e) => {
                     // Launch GUI dengan setsid agar TIDAK jadi child dari browser.
                     // Jangan paksa GDK_BACKEND=x11 — pada sesi Wayland-only GUI tidak bisa start.
@@ -199,7 +201,7 @@ fn forward_to_gui(
     use std::io::BufRead;
     use std::os::unix::net::UnixStream;
 
-    let mut stream = UnixStream::connect(socket_path).map_err(|e| e.to_string())?;
+    let mut stream = UnixStream::connect(socket_path).map_err(|e| format!("connect: {e}"))?;
 
     // Timeout supaya native host tidak hang selamanya jika GUI macet
     let timeout = Some(std::time::Duration::from_secs(5));
@@ -219,6 +221,7 @@ fn forward_to_gui(
         "extension_id": msg.extension_id,
         "headers": msg.headers,
         "cookies": msg.cookies,
+        "cookie_jar": msg.cookie_jar,
         "domain": msg.domain,
     }))
     .unwrap();
@@ -229,32 +232,44 @@ fn forward_to_gui(
     stream.write_all(b"\n").map_err(|e| e.to_string())?;
     stream.flush().map_err(|e| e.to_string())?;
 
-    // Read response from IPC server
-    let mut reader = std::io::BufReader::new(&stream);
+    // Bound the reply as well as the request. Protocol failures are negative
+    // acknowledgements, not reasons to resend an already delivered action.
+    let mut reader = std::io::BufReader::new((&stream).take(1024 * 1024 + 1));
     let mut line = String::new();
-    reader.read_line(&mut line).map_err(|e| e.to_string())?;
-
-    if line.is_empty() {
-        return Ok(NativeResponse {
-            success: true,
-            message: None,
-            error: None,
-        });
+    if reader.read_line(&mut line).is_err() {
+        return Ok(invalid_ack());
     }
+    Ok(decode_ack(&line))
+}
 
-    let resp: serde_json::Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-    let success = resp
-        .get("success")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+fn invalid_ack() -> NativeResponse {
+    NativeResponse {
+        success: false,
+        message: None,
+        error: Some("Respons GUI kosong, tidak valid, atau terputus; periksa daftar unduhan sebelum mencoba lagi".into()),
+    }
+}
 
-    Ok(NativeResponse {
-        success,
-        message: resp
-            .get("message")
-            .and_then(|v| v.as_str().map(|s| s.to_string())),
-        error: resp
-            .get("error")
-            .and_then(|v| v.as_str().map(|s| s.to_string())),
-    })
+fn decode_ack(line: &str) -> NativeResponse {
+    if line.len() > 1024 * 1024 {
+        return invalid_ack();
+    }
+    serde_json::from_str::<NativeResponse>(line).unwrap_or_else(|_| invalid_ack())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gui_ack_requires_an_explicit_boolean() {
+        for input in ["", "\n", "{}", "null", "[]", "{", r#"{"success":"true"}"#] {
+            assert!(!decode_ack(input).success, "{input:?}");
+        }
+        assert!(decode_ack(r#"{"success":true,"id":"dl_test"}"#).success);
+        let rejected = decode_ack(r#"{"success":false,"error":"rejected"}"#);
+        assert!(!rejected.success);
+        assert_eq!(rejected.error.as_deref(), Some("rejected"));
+        assert!(!decode_ack(&" ".repeat(1024 * 1024 + 1)).success);
+    }
 }
