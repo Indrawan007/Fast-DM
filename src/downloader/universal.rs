@@ -73,6 +73,9 @@ pub async fn download(
         // v2.3.1 (M1): dulu `Handle::current().block_on` dari konteks async —
         // panic di runtime Tokio; kini await langsung.
         let mut i = info.lock().await;
+        if i.stop_requested() {
+            return Outcome::Failed;
+        }
         i.status = DownloadStatus::Error;
         i.error_msg = "yt-dlp tidak terinstall — jalankan: sudo apt install yt-dlp".to_string();
         i.speed = 0;

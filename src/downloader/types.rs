@@ -65,6 +65,10 @@ pub struct DownloadInfo {
 
     #[serde(default)]
     pub created: i64,
+    #[serde(skip)]
+    pub(crate) worker_active: bool,
+    #[serde(skip)]
+    pub(crate) resume_pending: bool,
 }
 
 impl DownloadInfo {
@@ -96,8 +100,69 @@ impl DownloadInfo {
             quality,
             pid: None,
             rpc_gid: None,
+            worker_active: false,
+            resume_pending: false,
             created: chrono::Utc::now().timestamp_millis(),
         }
+    }
+
+    pub(crate) fn stop_requested(&self) -> bool {
+        matches!(
+            self.status,
+            DownloadStatus::Paused | DownloadStatus::Cancelled
+        )
+    }
+
+    pub(crate) fn occupies_slot(&self) -> bool {
+        self.worker_active
+            || matches!(
+                self.status,
+                DownloadStatus::Resolving | DownloadStatus::Downloading
+            )
+    }
+
+    /// Dipanggil dengan write-lock map lalu item: klaim start idempotent.
+    pub(crate) fn request_start(&mut self, slot_available: bool) -> bool {
+        if self.worker_active {
+            if matches!(self.status, DownloadStatus::Paused | DownloadStatus::Error) {
+                self.resume_pending = true;
+                self.status_detail = "Menunggu proses sebelumnya berhenti…".into();
+            }
+            return false;
+        }
+        if !matches!(
+            self.status,
+            DownloadStatus::Queued | DownloadStatus::Paused | DownloadStatus::Error
+        ) {
+            return false;
+        }
+        self.resume_pending = false;
+        self.speed = 0;
+        self.eta = 0;
+        self.status_detail.clear();
+        self.status = if slot_available {
+            DownloadStatus::Resolving
+        } else {
+            DownloadStatus::Queued
+        };
+        if slot_available {
+            self.worker_active = true;
+            self.retry_count = self.retry_count.saturating_add(1);
+        }
+        slot_available
+    }
+
+    /// Hanya supervisor pemilik yang boleh melepas slot, setelah backend return.
+    pub(crate) fn finish_worker(&mut self, restart_allowed: bool) {
+        self.worker_active = false;
+        if self.resume_pending
+            && matches!(self.status, DownloadStatus::Paused | DownloadStatus::Error)
+            && restart_allowed
+        {
+            self.status = DownloadStatus::Queued;
+            self.status_detail.clear();
+        }
+        self.resume_pending = false;
     }
 
     pub fn total_size_fmt(&self) -> String {
@@ -155,6 +220,112 @@ pub enum DownloadEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lifecycle_info() -> DownloadInfo {
+        DownloadInfo::new(
+            "lifecycle".into(),
+            "https://example.test/file.zip".into(),
+            "file.zip".into(),
+            "unused".into(),
+            Default::default(),
+            None,
+        )
+    }
+
+    #[test]
+    fn start_claim_is_idempotent_even_when_slots_become_full() {
+        let mut info = lifecycle_info();
+        assert!(info.request_start(true));
+        assert_eq!(info.retry_count, 1);
+        assert!(!info.request_start(true));
+        assert!(!info.request_start(false));
+        assert_eq!(info.status, DownloadStatus::Resolving);
+        assert_eq!(info.retry_count, 1);
+        info.status = DownloadStatus::Downloading;
+        assert!(!info.request_start(false));
+        assert_eq!(info.status, DownloadStatus::Downloading);
+        for status in [DownloadStatus::Completed, DownloadStatus::Cancelled] {
+            let mut terminal = lifecycle_info();
+            terminal.status = status;
+            assert!(!terminal.request_start(true));
+            assert_eq!(terminal.status, status);
+        }
+    }
+
+    #[test]
+    fn rapid_resume_waits_for_old_worker_cleanup() {
+        let mut info = lifecycle_info();
+        assert!(info.request_start(true));
+        info.status = DownloadStatus::Paused;
+        assert!(info.occupies_slot(), "stopping process still owns the slot");
+        for _ in 0..3 {
+            assert!(!info.request_start(true));
+        }
+        assert!(info.resume_pending);
+        assert_eq!(info.status, DownloadStatus::Paused);
+        info.finish_worker(true);
+        assert_eq!(info.status, DownloadStatus::Queued);
+        assert!(!info.occupies_slot());
+        assert!(!info.resume_pending);
+        assert!(info.request_start(true));
+        assert_eq!(info.retry_count, 2);
+    }
+
+    #[test]
+    fn manual_pause_cancel_and_shutdown_do_not_restart_worker() {
+        for status in [DownloadStatus::Paused, DownloadStatus::Cancelled] {
+            for restart_allowed in [true, false] {
+                let mut info = lifecycle_info();
+                assert!(info.request_start(true));
+                info.status = status;
+                info.finish_worker(restart_allowed);
+                assert_eq!(info.status, status);
+            }
+        }
+        let mut info = lifecycle_info();
+        assert!(info.request_start(true));
+        info.status = DownloadStatus::Paused;
+        assert!(!info.request_start(true));
+        info.finish_worker(false);
+        assert_eq!(info.status, DownloadStatus::Paused);
+        assert!(!info.resume_pending);
+        assert!(!info.worker_active);
+    }
+
+    #[test]
+    fn retry_during_error_cleanup_is_deferred_too() {
+        let mut info = lifecycle_info();
+        assert!(info.request_start(true));
+        info.status = DownloadStatus::Error;
+        assert!(!info.request_start(true));
+        assert!(info.resume_pending);
+        info.finish_worker(true);
+        assert_eq!(info.status, DownloadStatus::Queued);
+        assert!(info.request_start(true));
+    }
+
+    #[test]
+    fn runtime_worker_flags_are_not_persisted() {
+        let mut info = lifecycle_info();
+        info.worker_active = true;
+        info.resume_pending = true;
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(!json.contains("worker_active"));
+        assert!(!json.contains("resume_pending"));
+        let restored: DownloadInfo = serde_json::from_str(&json).unwrap();
+        assert!(!restored.worker_active);
+        assert!(!restored.resume_pending);
+    }
+
+    #[test]
+    fn queued_claim_counts_attempt_only_when_worker_starts() {
+        let mut info = lifecycle_info();
+        assert!(!info.request_start(false));
+        assert!(!info.worker_active);
+        assert_eq!(info.retry_count, 0);
+        assert!(info.request_start(true));
+        assert_eq!(info.retry_count, 1);
+    }
 
     // ── DownloadStatus Display ──
 

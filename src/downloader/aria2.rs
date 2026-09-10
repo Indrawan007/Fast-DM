@@ -45,15 +45,10 @@ pub async fn download(
     // (pid belum ada → kill_child_pid no-op). Tanpa guard, status ditimpa
     // Resolving dan download yang "dibatalkan" jalan terus.
     {
-        let i = info.lock().await;
-        if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
+        let mut i = info.lock().await;
+        if i.stop_requested() {
             return;
         }
-    }
-
-    // Resolve filename
-    {
-        let mut i = info.lock().await;
         i.status = DownloadStatus::Resolving;
         let _ = tx.send(DownloadEvent::Progress(i.clone()));
     }
@@ -61,6 +56,9 @@ pub async fn download(
     // Resolve filename + tolak halaman HTML (penyebab "file .php" terdownload)
     if let Err(msg) = resolve_filename(&info, config).await {
         let mut i = info.lock().await;
+        if i.stop_requested() {
+            return;
+        }
         i.status = DownloadStatus::Error;
         i.error_msg = msg;
         i.speed = 0;
@@ -84,24 +82,26 @@ pub async fn download(
     };
     if size > 0 && !has_space(&dir, size) {
         let mut i = info.lock().await;
+        if i.stop_requested() {
+            return;
+        }
         i.status = DownloadStatus::Error;
         i.error_msg = format!("Ruang disk tidak cukup — butuh {}", format_size(size));
         let _ = tx.send(DownloadEvent::Error(i.clone()));
         return;
     }
 
-    // Build aria2c command
+    // Re-check stop and publish Downloading under the same item lock.
     let (cmd, input_file) = {
-        let i = info.lock().await;
-        build_aria2_cmd(&i, config)
-    };
-
-    // Update status
-    {
         let mut i = info.lock().await;
+        if i.stop_requested() {
+            return;
+        }
+        let command = build_aria2_cmd(&i, config);
         i.status = DownloadStatus::Downloading;
         let _ = tx.send(DownloadEvent::Progress(i.clone()));
-    }
+        command
+    };
 
     tracing::info!("Downloading: {}", info.lock().await.filename);
 
@@ -228,6 +228,11 @@ async fn run_aria2c(
 ) {
     // process_group(0): child jadi leader group → SIGTERM/SIGKILL via killpg
     // menjangkau seluruh keturunannya (K4).
+    // Spawn + publikasi PID satu lock: pause tidak bisa kehilangan child.
+    let mut i = info.lock().await;
+    if i.stop_requested() {
+        return;
+    }
     let mut child = match tokio::process::Command::new(&cmd[0])
         .args(&cmd[1..])
         .process_group(0)
@@ -243,7 +248,6 @@ async fn run_aria2c(
             } else {
                 format!("aria2c: {}", e)
             };
-            let mut i = info.lock().await;
             i.status = DownloadStatus::Error;
             i.error_msg = msg;
             let _ = tx.send(DownloadEvent::Error(i.clone()));
@@ -255,7 +259,8 @@ async fn run_aria2c(
     // tokio: id() -> Option, None bila proses sudah selesai. Semua pemakaian
     // pid di bawah dijaga Option — killpg(0) akan mengenai GRUP FAST-DM SENDIRI.
     let pid = child.id();
-    info.lock().await.pid = pid;
+    i.pid = pid;
+    drop(i);
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -844,6 +849,32 @@ fn parse_content_disposition(cd: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stopped_download_does_not_spawn_or_become_error() {
+        for status in [DownloadStatus::Paused, DownloadStatus::Cancelled] {
+            let mut item = DownloadInfo::new(
+                "stopped".into(),
+                "unused".into(),
+                "unused".into(),
+                "unused".into(),
+                Default::default(),
+                None,
+            );
+            item.status = status;
+            let info = Arc::new(Mutex::new(item));
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            run_aria2c(
+                vec!["/nonexistent/fastdm-must-not-spawn".into()],
+                info.clone(),
+                tx,
+            )
+            .await;
+            assert_eq!(info.lock().await.status, status);
+            assert!(info.lock().await.pid.is_none());
+            assert!(rx.try_recv().is_err());
+        }
+    }
 
     #[tokio::test]
     async fn resolver_uses_proxy_and_refreshes_it_after_settings_change() {

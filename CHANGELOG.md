@@ -3,6 +3,32 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.10.2] - 2026-09-10
+
+### Fixed
+
+- Start/resume berulang kini idempotent: unduhan aktif tidak berubah menjadi
+  antrean ketika slot penuh, dan tidak mengklaim worker kedua.
+- Resume ketika pause masih menghentikan backend ditunda sampai supervisor lama
+  selesai cleanup. Worker yang sedang berhenti tetap dihitung dalam batas slot;
+  pause ulang/cancel membatalkan permintaan resume tertunda.
+- Spawn subprocess dan publikasi PID dilakukan dalam satu lock, sehingga pause
+  tidak kehilangan proses yang baru lahir. Respons resolver/tool yang terlambat
+  tidak lagi menimpa status pause/cancel pada jalur yang diperbaiki.
+- Promosi antrean membaca konfigurasi terbaru, bukan snapshot milik unduhan lama.
+  Penghitungan percobaan juga bertambah ketika item antrean benar-benar dimulai.
+- Shutdown mencegah start/promosi worker baru; flag lifecycle hanya disimpan di
+  memori dan tidak masuk session.json.
+- Jeda individual tersedia untuk item antrean.
+- CI extension memasang Node.js 22 melalui `actions/setup-node`, bukan memasukkan
+  `node-version` sebagai opsi checkout.
+
+### Tests
+
+- Regression test lifecycle untuk start berulang, deferred resume, pause/cancel,
+  slot worker yang sedang berhenti, konfigurasi antrean terbaru, shutdown,
+  serialisasi flag runtime, serta runner yang menerima item pause/cancel.
+
 ## [2.10.1] - 2026-09-10
 
 ### Fixed

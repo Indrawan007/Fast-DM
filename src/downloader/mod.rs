@@ -335,16 +335,16 @@ impl DownloadEngine {
         // lolos batas max_concurrent (double-spawn / over-slot).
         let claimed: Option<(SharedInfo, usize)> = {
             let downloads = self.downloads.write().await;
+            if self.shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
             let Some(info) = downloads.get(id).cloned() else {
                 return;
             };
 
             let mut active = 0usize;
             for other in downloads.values() {
-                if matches!(
-                    other.lock().await.status,
-                    DownloadStatus::Downloading | DownloadStatus::Resolving
-                ) {
+                if other.lock().await.occupies_slot() {
                     active += 1;
                 }
             }
@@ -354,19 +354,10 @@ impl DownloadEngine {
             // (cannot move out of `info` because it is borrowed).
             let start = {
                 let mut i = info.lock().await;
-                if active >= max {
-                    // Slot penuh → antri (Queued)
-                    i.status = DownloadStatus::Queued;
-                    i.speed = 0;
-                    let _ = tx.send(DownloadEvent::Progress(i.clone()));
-                    false
-                } else {
-                    // Klaim slot: tandai Resolving + percobaan ke-N (retry tracking)
-                    i.status = DownloadStatus::Resolving;
-                    i.retry_count = i.retry_count.saturating_add(1);
-                    let _ = tx.send(DownloadEvent::Progress(i.clone()));
-                    true
-                }
+                let start = i.request_start(active < max);
+                self.mark_dirty();
+                let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                start
             };
 
             // v2.3.0 (M3): jumlah unduhan hidup (menempati bandwidth atau akan
@@ -400,8 +391,9 @@ impl DownloadEngine {
                 self.downloads.clone(),
                 info,
                 tx,
-                config,
+                self.config.clone(),
                 self.dirty.clone(),
+                self.shutting_down.clone(),
                 live,
             );
         }
@@ -413,13 +405,17 @@ impl DownloadEngine {
             let mut i = info.lock().await;
             if matches!(
                 i.status,
-                DownloadStatus::Downloading | DownloadStatus::Resolving
+                DownloadStatus::Downloading
+                    | DownloadStatus::Resolving
+                    | DownloadStatus::Queued
+                    | DownloadStatus::Paused
             ) {
-                // Kill child proses LANGSUNG (jangan menunggu baris output berikutnya,
-                // bisa lama/hang kalau aria2/yt-dlp sedang stall).
                 kill_child_pid(i.pid);
+                i.resume_pending = false;
+                i.status_detail.clear();
                 i.status = DownloadStatus::Paused;
                 i.speed = 0;
+                i.eta = 0;
                 let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
                 self.mark_dirty();
             }
@@ -452,20 +448,21 @@ impl DownloadEngine {
         let downloads = self.downloads.read().await;
         for info in downloads.values() {
             let mut i = info.lock().await;
-            match i.status {
-                DownloadStatus::Downloading | DownloadStatus::Resolving => {
-                    kill_child_pid(i.pid);
-                    i.status = DownloadStatus::Paused;
-                    i.speed = 0;
-                    let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
-                    self.mark_dirty();
-                }
-                DownloadStatus::Queued => {
-                    i.status = DownloadStatus::Paused;
-                    let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
-                    self.mark_dirty();
-                }
-                _ => {}
+            i.resume_pending = false;
+            if matches!(
+                i.status,
+                DownloadStatus::Downloading
+                    | DownloadStatus::Resolving
+                    | DownloadStatus::Queued
+                    | DownloadStatus::Paused
+            ) {
+                kill_child_pid(i.pid);
+                i.status_detail.clear();
+                i.status = DownloadStatus::Paused;
+                i.speed = 0;
+                i.eta = 0;
+                let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
+                self.mark_dirty();
             }
         }
     }
@@ -499,6 +496,9 @@ impl DownloadEngine {
                     let mut i = info.lock().await;
                     let target = (i.pid.take(), i.rpc_gid.take());
                     i.status = DownloadStatus::Cancelled;
+                    i.resume_pending = false;
+                    i.status_detail.clear();
+
                     i.speed = 0;
                     let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
                     Some(target)
@@ -529,6 +529,8 @@ impl DownloadEngine {
                     let mut i = info.lock().await;
                     let target = (i.pid.take(), i.rpc_gid.take());
                     i.status = DownloadStatus::Cancelled;
+                    i.resume_pending = false;
+                    i.status_detail.clear();
                     i.speed = 0;
                     Some(target)
                 }
@@ -565,27 +567,20 @@ fn spawn_supervised(
     downloads: DownloadMap,
     info: SharedInfo,
     tx: mpsc::UnboundedSender<DownloadEvent>,
-    config: Config,
+    shared_config: Arc<RwLock<Config>>,
     dirty: Arc<AtomicBool>,
+    shutting_down: Arc<AtomicBool>,
     live_share: usize,
 ) {
-    // v2.3.0 (M3): bagi limit total aplikasi menurut jumlah unduhan hidup saat
-    // proses ini start, bukan max_concurrent statis — unduhan tunggal kini
-    // memakai limit penuh. v2.9.0 (B2.2): bagian per-proses ini kini hanya
-    // dipakai jalur per-proses (fallback daemon RPC + fallback universal) —
-    // jalur daemon RPC menegakkan limit total LIVE secara global
-    // (changeGlobalOption), jadi memakai limit mentah (lihat di bawah).
-    //
-    // PENTING: `promote_config` harus tetap config ASLI (limit user mentah) —
-    // kalau pakai yang sudah dibagi, rantai promote akan membagi ulang limit
-    // setiap spawn berikutnya (double division → limit menyusut ke 1K).
-    let promote_config = config.clone();
-    let mut config = config;
-    if !config.max_overall_speed.is_empty() && config.max_overall_speed != "0" {
-        config.max_overall_speed =
-            aria2::resolve_speed_limit(&config.max_overall_speed, live_share);
-    }
     tokio::spawn(async move {
+        // Snapshot hanya untuk worker ini. Promosi antrean membaca ulang
+        // shared_config, tidak mewarisi snapshot lama dari worker yang selesai.
+        let original_config = shared_config.read().await.clone();
+        let mut config = original_config.clone();
+        if !config.max_overall_speed.is_empty() && config.max_overall_speed != "0" {
+            config.max_overall_speed =
+                aria2::resolve_speed_limit(&config.max_overall_speed, live_share);
+        }
         let (is_yt, url) = {
             let i = info.lock().await;
             (i.is_youtube, i.url.clone())
@@ -603,7 +598,7 @@ fn spawn_supervised(
             // per-proses M3 (juga anti double-division).
             let is_mag = aria2_rpc::is_magnet(&url);
             let mut cfg = config.clone();
-            cfg.max_overall_speed = promote_config.max_overall_speed.clone();
+            cfg.max_overall_speed = original_config.max_overall_speed.clone();
             let outcome = aria2_rpc::download(info.clone(), tx.clone(), &cfg).await;
             // B2.2: daemon tak tersedia / addUri ditolak SEBELUM unduhan jalan
             // → http/ftp jatuh ke jalur per-proses lama (nol regresi). Magnet
@@ -635,12 +630,21 @@ fn spawn_supervised(
             }
         }
 
-        // Status terminal (completed/error) → persist ke session.json
+        // Slot baru dilepas setelah seluruh cleanup backend selesai. Resume
+        // yang diminta saat pause kini aman dipromosikan sebagai worker baru.
+        {
+            let map = downloads.write().await;
+            let mut i = info.lock().await;
+            i.finish_worker(!shutting_down.load(Ordering::SeqCst));
+            if map
+                .get(&i.id)
+                .is_some_and(|current| Arc::ptr_eq(current, &info))
+            {
+                let _ = tx.send(DownloadEvent::Progress(i.clone()));
+            }
+        }
         dirty.store(true, Ordering::SeqCst);
-
-        // Slot bebas → jalankan antrian tertua.
-        // Pakai promote_config (limit mentah) — lihat komentar M3 (anti double-division).
-        promote_next(downloads, tx, promote_config, dirty).await;
+        promote_next(downloads, tx, shared_config, dirty, shutting_down).await;
     });
 }
 
@@ -700,59 +704,49 @@ pub fn is_direct_file_url(url: &str) -> bool {
 async fn promote_next(
     downloads: DownloadMap,
     tx: mpsc::UnboundedSender<DownloadEvent>,
-    config: Config,
+    shared_config: Arc<RwLock<Config>>,
     dirty: Arc<AtomicBool>,
+    shutting_down: Arc<AtomicBool>,
 ) {
-    let max = usize::from(config.max_concurrent.max(1));
+    let max = usize::from(shared_config.read().await.max_concurrent.max(1));
 
     let next = {
-        // write lock: pemilihan + penandaan status dilakukan ATOMIK,
-        // sehingga dua task yang selesai bersamaan tidak bisa sama-sama
-        // memilih antrian yang sama (over-slot / dobel spawn).
-        //
-        // B13 — KONTRAK LOCK-ORDERING (anti-deadlock): selalu kunci map
-        // (RwLock) dulu, baru Mutex info di dalamnya. Jangan pernah terbalik
-        // (kunci info lalu minta map) di kode mana pun.
         let map = downloads.write().await;
+        if shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+
         let mut active = 0usize;
-        // v2.3.0 (L4): FIFO deterministik — kunci (created_ms, id); tanpa
-        // pembanding kedua, dua download yang dibuat pada waktu sama urutannya
-        // acak mengikuti iterasi HashMap.
+        let mut queued = 0usize;
         let mut oldest: Option<((i64, String), SharedInfo)> = None;
 
-        let mut queued = 0usize;
         for info in map.values() {
             let i = info.lock().await;
-            match i.status {
-                DownloadStatus::Downloading | DownloadStatus::Resolving => active += 1,
-                DownloadStatus::Queued => {
-                    queued += 1;
-                    let key = (i.created, i.id.clone());
-                    if oldest.as_ref().is_none_or(|(k, _)| key < *k) {
-                        oldest = Some((key, info.clone()));
-                    }
+            if i.occupies_slot() {
+                active += 1;
+            } else if i.status == DownloadStatus::Queued {
+                queued += 1;
+                let key = (i.created, i.id.clone());
+                if oldest.as_ref().is_none_or(|(k, _)| key < *k) {
+                    oldest = Some((key, info.clone()));
                 }
-                _ => {}
             }
         }
 
         if active >= max {
             None
         } else if let Some((_, info)) = oldest {
-            // hidup = yang sedang jalan + yang di antrian (termasuk yang akan
-            // klaim ini) — dipakai membagi limit kecepatan (M3)
             let live = (active + queued).max(1);
-            // Scope guard: MutexGuard harus drop SEBELUM `info` dipindah keluar
             let started = {
                 let mut i = info.lock().await;
-                if i.status != DownloadStatus::Queued {
-                    false // sudah di-cancel / sudah diambil task lain
+                if i.status != DownloadStatus::Queued || !i.request_start(true) {
+                    false
                 } else {
-                    i.status = DownloadStatus::Resolving;
                     let _ = tx.send(DownloadEvent::Progress(i.clone()));
                     true
                 }
             };
+
             if started {
                 Some((info, live))
             } else {
@@ -764,7 +758,15 @@ async fn promote_next(
     };
 
     if let Some((info, live)) = next {
-        spawn_supervised(downloads, info, tx, config, dirty, live);
+        spawn_supervised(
+            downloads,
+            info,
+            tx,
+            shared_config,
+            dirty,
+            shutting_down,
+            live,
+        );
     }
 }
 
@@ -923,6 +925,13 @@ fn load_session() -> Vec<DownloadInfo> {
 fn prepare_shutdown_snapshot(info: &mut DownloadInfo) -> DownloadInfo {
     let mut snapshot = info.clone();
     snapshot.pid = None;
+    if info.resume_pending && matches!(info.status, DownloadStatus::Paused | DownloadStatus::Error)
+    {
+        // Simpan niat user untuk melanjutkan, bukan pause internal saat cleanup.
+        snapshot.status = DownloadStatus::Queued;
+        snapshot.status_detail.clear();
+    }
+    info.resume_pending = false;
 
     info.pid = None;
     if matches!(
@@ -1086,6 +1095,132 @@ pub fn extract_filename_from_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Engine fixture without startup/session/config filesystem side effects.
+    fn lifecycle_engine() -> DownloadEngine {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        DownloadEngine {
+            downloads: Arc::new(RwLock::new(HashMap::new())),
+            event_tx: tx,
+            config: Arc::new(RwLock::new(Config {
+                max_concurrent: 1,
+                ..Config::default()
+            })),
+            dirty: Arc::new(AtomicBool::new(false)),
+            session_io: Arc::new(Mutex::new(())),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            restored_ids: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    async fn lifecycle_item(
+        engine: &DownloadEngine,
+        id: &str,
+        status: DownloadStatus,
+    ) -> SharedInfo {
+        let mut info = DownloadInfo::new(
+            id.into(),
+            "https://example.test/file.zip".into(),
+            "file.zip".into(),
+            "unused".into(),
+            Default::default(),
+            None,
+        );
+        info.status = status;
+        let info = Arc::new(Mutex::new(info));
+        engine
+            .downloads
+            .write()
+            .await
+            .insert(id.into(), info.clone());
+        info
+    }
+
+    #[tokio::test]
+    async fn repeated_engine_start_preserves_active_status_at_full_capacity() {
+        let engine = Arc::new(lifecycle_engine());
+        let info = lifecycle_item(&engine, "active", DownloadStatus::Downloading).await;
+        info.lock().await.worker_active = true;
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let engine = engine.clone();
+            tasks.push(tokio::spawn(async move {
+                engine.start_download("active").await
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let info = info.lock().await;
+        assert_eq!(info.status, DownloadStatus::Downloading);
+        assert!(info.worker_active);
+        assert_eq!(info.retry_count, 0, "no second worker claimed");
+    }
+
+    #[tokio::test]
+    async fn pause_and_cancel_override_deferred_resume() {
+        let engine = lifecycle_engine();
+        let info = lifecycle_item(&engine, "stopping", DownloadStatus::Paused).await;
+        info.lock().await.worker_active = true;
+        engine.resume_download("stopping").await;
+        assert!(info.lock().await.resume_pending);
+        engine.pause_download("stopping").await;
+        assert!(!info.lock().await.resume_pending);
+        engine.resume_download("stopping").await;
+        engine.pause_all().await;
+        assert!(!info.lock().await.resume_pending);
+        engine.resume_download("stopping").await;
+        engine.cancel_download("stopping").await;
+        let mut info = info.lock().await;
+        info.finish_worker(true);
+        assert_eq!(info.status, DownloadStatus::Cancelled);
+        assert!(!info.resume_pending);
+    }
+
+    #[tokio::test]
+    async fn queue_promotion_uses_current_limit_and_counts_stopping_workers() {
+        let engine = lifecycle_engine();
+        engine.config.write().await.max_concurrent = 3;
+        let worker = lifecycle_item(&engine, "stopping", DownloadStatus::Paused).await;
+        worker.lock().await.worker_active = true;
+        let queued = lifecycle_item(&engine, "queued", DownloadStatus::Queued).await;
+        // User lowered the limit while an existing worker was still running.
+        engine.config.write().await.max_concurrent = 1;
+        promote_next(
+            engine.downloads.clone(),
+            engine.event_tx.clone(),
+            engine.config.clone(),
+            engine.dirty.clone(),
+            engine.shutting_down.clone(),
+        )
+        .await;
+        assert_eq!(queued.lock().await.status, DownloadStatus::Queued);
+        assert!(!queued.lock().await.worker_active);
+        // Even with free slots, shutdown cannot promote/start anything.
+        engine.shutting_down.store(true, Ordering::SeqCst);
+        worker.lock().await.finish_worker(false);
+        engine.config.write().await.max_concurrent = 10;
+        promote_next(
+            engine.downloads.clone(),
+            engine.event_tx.clone(),
+            engine.config.clone(),
+            engine.dirty.clone(),
+            engine.shutting_down.clone(),
+        )
+        .await;
+        engine.start_download("queued").await;
+        assert_eq!(queued.lock().await.status, DownloadStatus::Queued);
+        assert!(!queued.lock().await.worker_active);
+    }
+
+    #[tokio::test]
+    async fn queued_item_can_be_paused_individually() {
+        let engine = lifecycle_engine();
+        let queued = lifecycle_item(&engine, "queued", DownloadStatus::Queued).await;
+        engine.pause_download("queued").await;
+        assert_eq!(queued.lock().await.status, DownloadStatus::Paused);
+        assert!(!queued.lock().await.worker_active);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_adds_are_deduplicated_atomically() {
@@ -1478,6 +1613,25 @@ mod tests {
         assert_eq!(snapshot.status, DownloadStatus::Downloading);
         assert!(snapshot.pid.is_none());
         assert_eq!(snapshot.rpc_gid.as_deref(), Some("gid-1"));
+    }
+
+    #[test]
+    fn shutdown_preserves_deferred_resume_intent() {
+        let mut info = DownloadInfo::new(
+            "resume".into(),
+            "unused".into(),
+            "unused".into(),
+            "unused".into(),
+            Default::default(),
+            None,
+        );
+        info.worker_active = true;
+        info.status = DownloadStatus::Paused;
+        assert!(!info.request_start(true));
+        let snapshot = prepare_shutdown_snapshot(&mut info);
+        assert_eq!(snapshot.status, DownloadStatus::Queued);
+        assert_eq!(info.status, DownloadStatus::Paused);
+        assert!(!info.resume_pending);
     }
 
     #[test]

@@ -511,6 +511,11 @@ pub(crate) async fn run_ytdlp(
     tx: mpsc::UnboundedSender<DownloadEvent>,
 ) -> bool {
     // process_group(0) → killpg menjangkau ffmpeg anak-anaknya saat pause/cancel (K4).
+    // Spawn + publikasi PID satu lock: pause tidak bisa kehilangan child.
+    let mut i = info.lock().await;
+    if i.stop_requested() {
+        return false;
+    }
     let mut child = match tokio::process::Command::new(&cmd[0])
         .args(&cmd[1..])
         .process_group(0)
@@ -526,7 +531,6 @@ pub(crate) async fn run_ytdlp(
             } else {
                 format!("yt-dlp: {}", e)
             };
-            let mut i = info.lock().await;
             i.status = DownloadStatus::Error;
             i.error_msg = msg;
             let _ = tx.send(DownloadEvent::Error(i.clone()));
@@ -537,7 +541,8 @@ pub(crate) async fn run_ytdlp(
     // Simpan PID supaya bisa di-kill saat app ditutup (anti orphan).
     // id() -> Option; kill di bawah dijaga — JANGAN pernah killpg(0).
     let pid = child.id();
-    info.lock().await.pid = pid;
+    i.pid = pid;
+    drop(i);
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -734,6 +739,32 @@ fn parse_speed(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stopped_download_does_not_spawn_or_become_error() {
+        for status in [DownloadStatus::Paused, DownloadStatus::Cancelled] {
+            let mut item = DownloadInfo::new(
+                "stopped".into(),
+                "unused".into(),
+                "unused".into(),
+                "unused".into(),
+                Default::default(),
+                None,
+            );
+            item.status = status;
+            let info = Arc::new(Mutex::new(item));
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            run_ytdlp(
+                vec!["/nonexistent/fastdm-must-not-spawn".into()],
+                info.clone(),
+                tx,
+            )
+            .await;
+            assert_eq!(info.lock().await.status, status);
+            assert!(info.lock().await.pid.is_none());
+            assert!(rx.try_recv().is_err());
+        }
+    }
 
     #[test]
     fn network_args_keep_tls_verification_by_default() {

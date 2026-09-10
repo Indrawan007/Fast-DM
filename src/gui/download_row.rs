@@ -160,7 +160,7 @@ impl DownloadRow {
             open_btn,
             remove_btn,
         };
-        row.update_buttons(&info.status);
+        row.update_buttons(info);
         row.update_badge(&info.status);
         row
     }
@@ -215,7 +215,7 @@ impl DownloadRow {
             self.error_box.set_visible(false);
         }
 
-        self.update_buttons(&info.status);
+        self.update_buttons(info);
     }
 
     fn update_badge(&self, status: &DownloadStatus) {
@@ -255,7 +255,8 @@ impl DownloadRow {
         }
     }
 
-    fn update_buttons(&mut self, status: &DownloadStatus) {
+    fn update_buttons(&mut self, info: &DownloadInfo) {
+        let status = &info.status;
         let active = matches!(
             status,
             DownloadStatus::Downloading | DownloadStatus::Resolving
@@ -267,9 +268,11 @@ impl DownloadRow {
         let queued = matches!(status, DownloadStatus::Queued);
 
         // B4: jangan set_visible (layout melompat) — pakai sensitive + tooltip
-        self.pause_btn.set_sensitive(active);
-        self.resume_btn.set_sensitive(paused);
-        self.retry_btn.set_sensitive(error);
+        self.pause_btn
+            .set_sensitive(active || queued || info.resume_pending);
+        self.resume_btn
+            .set_sensitive(paused && !info.resume_pending);
+        self.retry_btn.set_sensitive(error && !info.resume_pending);
         self.cancel_btn
             .set_sensitive(active || paused || error || queued);
         self.open_btn.set_sensitive(done);
