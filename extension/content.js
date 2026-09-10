@@ -552,10 +552,6 @@
     document.querySelectorAll("video, audio").forEach((media) => {
       if (media.dataset.fastdmDone) return;
 
-      const src = media.src || media.querySelector("source")?.src || "";
-      const direct =
-        src && !src.startsWith("blob:") && !src.startsWith("data:");
-
       const wrapper = media.parentElement;
       if (!wrapper) return;
 
@@ -583,11 +579,13 @@
         //    menyelamatkan link *.php yang sebenarnya wrapper halaman)
         // 2) src langsung BILA jelas file media (bukan *.php/*.html)
         // 3) URL halaman — yt-dlp akan mencoba extractor situs
-        const srcLow = (src || "").toLowerCase();
+        const src = media.currentSrc || media.src || media.querySelector("source")?.src || "";
+        const direct = /^https?:/i.test(src);
+        const srcLow = src.toLowerCase();
         const srcIsPage = /\.(php|html?|aspx?|jsp|asp|cgi)(\?|$)/.test(srcLow);
         const target =
-          candidateFor() ||
           (direct && !srcIsPage ? src : null) ||
+          candidateFor() ||
           window.location.href;
         chrome.runtime.sendMessage(
           {

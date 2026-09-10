@@ -75,6 +75,11 @@
 
   function add(url) {
     try {
+      if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        candidates.clear();
+        persist();
+      }
       if (!url || typeof url !== "string") return;
       // BUG FIX: XHR/fetch sering memakai URL RELATIF ("video.m3u8") —
       // resolve terhadap location agar tetap tertangkap.
@@ -219,6 +224,8 @@
     // Navigasi SPA mengganti konten tanpa memuat ulang dokumen.
     if (location.href !== lastUrl) {
       lastUrl = location.href;
+      candidates.clear();
+      persist();
       wake();
     }
 

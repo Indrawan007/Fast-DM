@@ -2,6 +2,8 @@
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+pub(crate) const CACHE_HEADER: &str = "# Netscape HTTP Cookie File\n# Fast-DM attributes v2\n";
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserCookie {
@@ -39,7 +41,7 @@ pub(crate) fn netscape_for(
     if cookies.len() > 1024 {
         return Err("Too many cookies".into());
     }
-    let mut out = String::from("# Netscape HTTP Cookie File\n");
+    let mut out = String::from(CACHE_HEADER);
     for c in cookies {
         let domain = c.domain.trim_start_matches('.').to_ascii_lowercase();
         if domain.is_empty()

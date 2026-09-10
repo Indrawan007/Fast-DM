@@ -73,7 +73,11 @@ fn write_cookie_file(path: &Path) {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).unwrap();
     }
-    fs::write(path, "# Netscape HTTP Cookie File\n").unwrap();
+    fs::write(
+        path,
+        "# Netscape HTTP Cookie File\n# Fast-DM attributes v2\n",
+    )
+    .unwrap();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -290,4 +294,26 @@ fn case_insensitive_normalization() {
 #[test]
 fn find_cookies_skipped_on_non_linux() {
     eprintln!("find_cookies_file integration test di-skip di platform ini");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn legacy_flattened_cookie_cache_is_not_reused() {
+    let tmp = make_tempdir();
+    let _env = EnvGuard::new(&tmp);
+    let path = cookie_path("example.com");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tFALSE\t0\tsid\told\n",
+    )
+    .unwrap();
+    assert!(Config::find_cookies_file("example.com").is_none());
+    assert!(
+        path.exists(),
+        "legacy cache is left untouched, not destroyed"
+    );
+    write_cookie_file(&path);
+    assert_eq!(Config::find_cookies_file("example.com"), Some(path));
+    cleanup_tempdir(&tmp);
 }

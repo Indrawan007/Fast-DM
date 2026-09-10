@@ -197,6 +197,7 @@ async function sendDownload(
   cookies = null,
   domain = null,
 ) {
+  if (!config.enabled) return { success: false, error: "Ekstensi Fast DM dinonaktifkan" };
   if (!filename) {
     try {
       const urlObj = new URL(url);

@@ -23,7 +23,8 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
   subprocess panjang dibatasi dengan aman.
 - Update aplikasi **dan extension bersama-sama**: cookie sekarang dikirim dengan
   atribut Secure, HttpOnly, host-only, path, dan expiry. Payload cookie lama yang
-  hanya name=value ditolak. Cookie partitioned belum diekspor.
+  hanya name=value ditolak. Cache per-domain lama diabaikan tanpa dihapus;
+  ekspor ulang lewat extension terbaru. Cookie partitioned belum diekspor.
 - File cookie/config/session dibuat privat sejak awal; riwayat terminal dibatasi
   200 entri tanpa membuang unduhan belum selesai.
 - Hapus row mempertahankan hitungan worker sampai cleanup selesai. Statistik

@@ -13,6 +13,10 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 - Cookie terstruktur menjaga atribut browser; matching Netscape memeriksa domain,
   host-only, Secure, path, expiry, serta mendukung prefix HttpOnly. Payload lama
   tanpa atribut ditolak dan cookie partitioned tidak diekspor.
+- Cache cookie per-domain lama tanpa marker atribut diabaikan, tanpa menghapus
+  file lama. Ekspor extension baru membuat cache beratribut yang dapat digunakan.
+- Toggle extension menolak download manual saat disabled; kandidat sniffer SPA
+  dibersihkan saat URL berubah, dan overlay membaca src player saat diklik.
 - Config/session/cookie memakai temporary unik mode 0600 sejak create dan atomic
   rename. Session tidak menyimpan PID, tidak membuang pekerjaan non-terminal,
   dan membatasi hanya riwayat Completed/Cancelled ke 200 entri.

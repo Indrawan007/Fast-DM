@@ -205,3 +205,15 @@ test("background exports cookie attributes and ignores flattened caller cookies"
   b.requests[0].callback({ success: true });
   await response;
 });
+
+
+test("disabled extension refuses manual downloads before reading cookies", async () => {
+  const b = background();
+  b.onMessage({ action: "setConfig", config: { enabled: false } }, {}, () => {});
+  let read = false;
+  b.context.chrome.cookies.getAll = async () => { read = true; return []; };
+  const result = await new Promise(resolve => b.onMessage({ action: "download", url: "https://example.com/a.zip" }, {}, resolve));
+  assert.equal(result.success, false);
+  assert.equal(read, false);
+  assert.equal(b.requests.length, 0);
+});

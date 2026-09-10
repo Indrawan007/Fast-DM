@@ -364,7 +364,9 @@ impl Config {
         let mut h = Self::normalize_host(host);
         while !h.is_empty() {
             let p = Self::cookies_file_for_host(&h);
-            if p.exists() {
+            // Legacy flattened caches lost their original security attributes.
+            // Leave them on disk, but require a fresh structured export to use them.
+            if verified_cookie_cache(&p) {
                 return Some(p);
             }
             // Buang label kiri: "a.b.c" → "b.c"; berhenti di "c"
@@ -445,6 +447,16 @@ impl Config {
         write_private_atomic(&Self::config_file(), json.as_bytes())?;
         Ok(())
     }
+}
+
+fn verified_cookie_cache(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let header = crate::cookies::CACHE_HEADER.as_bytes();
+    let mut bytes = vec![0; header.len()];
+    file.read_exact(&mut bytes).is_ok() && bytes == header
 }
 
 /// v2.4.0 (D3): validasi proxy sebelum disimpan — nilai ngawur bikin aria2
