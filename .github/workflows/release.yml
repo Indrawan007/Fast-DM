@@ -40,6 +40,13 @@ jobs:
       - name: Build Debian package
         run: bash packaging/build-deb.sh
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Test browser extension
+        run: node --test tests/extension.test.cjs
+
       - name: Build extension zip
         run: |
           VERSION="${GITHUB_REF_NAME#v}"

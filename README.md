@@ -17,6 +17,19 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 🌐 **Proxy global** (HTTP/SOCKS5, kredensial di URL) — satu kolom di Pengaturan, berlaku untuk aria2 & yt-dlp
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 
+## Stabilitas v2.10.1
+
+- Proxy HTTP/SOCKS juga digunakan saat memeriksa nama dan ukuran file; client
+  resolver mengikuti perubahan pengaturan proxy/TLS.
+- Pengaturan verifikasi TLS berlaku konsisten untuk metadata dan unduhan yt-dlp.
+  Verifikasi tetap aktif secara default; nonaktifkan hanya untuk server tepercaya.
+- Penambahan unduhan bersamaan melakukan pemeriksaan duplikat dan penyisipan
+  secara atomik.
+- Monitor clipboard berjalan asinkron, dengan timeout 1 detik per perintah dan
+  batas output 2 KiB, agar tool clipboard yang macet tidak membekukan GUI.
+- Tombol unduh hasil pemindaian popup menunggu konfirmasi aplikasi, menampilkan
+  kegagalan, dan menyediakan kesempatan mencoba lagi.
+
 ## Download
 
 👉 https://github.com/Indrawan007/Fast-DM/releases/latest
@@ -56,6 +69,9 @@ cargo build --release
 
 # Jalankan tests
 cargo test
+
+# Regression test extension (Node.js 22+, tanpa npm install)
+node --test tests/extension.test.cjs
 
 # Buat .deb
 bash packaging/build-deb.sh

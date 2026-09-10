@@ -160,21 +160,17 @@ impl Config {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        match opts.open(&p) {
-            Ok(mut f) => {
-                use std::io::Write;
-                // Jaring pengaman untuk platform tanpa OpenOptionsExt::mode.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
-                }
-                if f.write_all(fresh.as_bytes()).is_ok() {
-                    return fresh;
-                }
+        if let Ok(mut f) = opts.open(&p) {
+            use std::io::Write;
+            // Jaring pengaman untuk platform tanpa OpenOptionsExt::mode.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
             }
-            // EEXIST = proses lain menang → pakai secret-nya.
-            Err(_) => {}
+            if f.write_all(fresh.as_bytes()).is_ok() {
+                return fresh;
+            }
         }
         Self::read_rpc_secret(&p).unwrap_or(fresh)
     }

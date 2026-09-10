@@ -263,7 +263,7 @@ pub async fn start_server(engine: Arc<DownloadEngine>) -> Result<(), Box<dyn std
 
     tracing::info!("IPC listening on {}", socket_path.display());
 
-     // v2.9.4: error `accept()` TIDAK boleh mematikan server. Dulu `?` langsung
+    // v2.9.4: error `accept()` TIDAK boleh mematikan server. Dulu `?` langsung
     // mempropagasi keluar dari `start_server`, dan pemanggilnya hanya menulis
     // log — akibatnya satu error transien (fd habis = EMFILE/ENFILE, ENOBUFS,
     // ECONNABORTED) mematikan IPC untuk SELURUH sesi aplikasi: extension tidak
@@ -376,7 +376,14 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
             let headers = sanitize_headers(msg.headers);
 
             let id = engine
-                .add_download(&url, msg.filename.as_deref(), None, true, headers, msg.quality)
+                .add_download(
+                    &url,
+                    msg.filename.as_deref(),
+                    None,
+                    true,
+                    headers,
+                    msg.quality,
+                )
                 .await;
 
             IpcResponse {
@@ -614,7 +621,11 @@ mod tests {
     // ── v2.9.4 (C3): sanitize_headers — allow-list di boundary IPC ──
 
     fn headers_of(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().copied().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .copied()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]

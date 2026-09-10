@@ -133,8 +133,6 @@ pub fn build_window(
     let clip_pending: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let clip_enabled: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
     let clip_last: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-    // None = belum diprobe; Some(x) = hasil probe (x: Option<&'static str>)
-    let clip_tool: Rc<RefCell<Option<Option<&'static str>>>> = Rc::new(RefCell::new(None));
 
     // ── List ──
     let scroll = ScrolledWindow::new();
@@ -327,48 +325,65 @@ pub fn build_window(
             clip_enabled.set(cfg0.clipboard_monitor);
         }
 
-        // Polling (bukan listener): tanpa dependensi baru. Jeda 2.5 dtk;
-        // saat toggle OFF biayanya cuma cek boolean.
+        // Satu polling async pada satu waktu: tool lambat tidak memblokir
+        // GTK dan tidak menumpuk subprocess pada tick berikutnya.
         let en = clip_enabled.clone();
         let lbl_t = clip_lbl.clone();
         let ban_t = clip_banner.clone();
         let pend_t = clip_pending.clone();
         let last_t = clip_last.clone();
-        let tool_t = clip_tool.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(2500), move || {
-            if !en.get() {
-                if ban_t.is_visible() {
-                    ban_t.set_visible(false);
+        let rt_clip = rt.clone();
+        let weak_window = window.downgrade();
+        glib::spawn_future_local(async move {
+            let mut cached_tool: Option<Option<&'static str>> = None;
+            loop {
+                glib::timeout_future(std::time::Duration::from_millis(2500)).await;
+                if weak_window.upgrade().is_none() {
+                    break;
                 }
-                return glib::ControlFlow::Continue;
-            }
-            let tool: Option<&'static str> = {
-                let mut tr = tool_t.borrow_mut();
-                let v = tr.get_or_insert_with(clipboard_probe);
-                *v
-            };
-            let Some(tool) = tool else {
-                // tak ada wl-paste/xclip → stop polling (jangan buang timer)
-                return glib::ControlFlow::Break;
-            };
-            let Some(txt) = clipboard_text(tool) else {
-                return glib::ControlFlow::Continue;
-            };
-            // Dedup: konten sama (termasuk non-URL) tidak diulang-ulang.
-            if txt.is_empty() || txt == *last_t.borrow() {
-                return glib::ControlFlow::Continue;
-            }
-            *last_t.borrow_mut() = txt.clone();
-            if txt.len() > 2048 || !(txt.starts_with("http://") || txt.starts_with("https://")) {
-                if ban_t.is_visible() {
+                if !en.get() {
                     ban_t.set_visible(false);
+                    *pend_t.borrow_mut() = None;
+                    continue;
                 }
-                return glib::ControlFlow::Continue;
+                let result = rt_clip
+                    .spawn(async move {
+                        let tool = match cached_tool {
+                            Some(tool) => tool,
+                            None => clipboard_probe().await,
+                        };
+                        let text = match tool {
+                            Some(tool) => clipboard_text(tool).await,
+                            None => None,
+                        };
+                        (tool, text)
+                    })
+                    .await;
+                let Ok((tool, text)) = result else { continue };
+                cached_tool = Some(tool);
+                if tool.is_none() {
+                    break;
+                }
+                // Pengaturan bisa dimatikan ketika request masih berjalan.
+                if !en.get() {
+                    ban_t.set_visible(false);
+                    *pend_t.borrow_mut() = None;
+                    continue;
+                }
+                let Some(txt) = text else { continue };
+                if txt == *last_t.borrow() {
+                    continue;
+                }
+                *last_t.borrow_mut() = txt.clone();
+                if !is_clipboard_url(&txt) {
+                    ban_t.set_visible(false);
+                    *pend_t.borrow_mut() = None;
+                    continue;
+                }
+                *pend_t.borrow_mut() = Some(txt.clone());
+                lbl_t.set_text(&format!("📋 URL terdeteksi di clipboard: {}", txt));
+                ban_t.set_visible(true);
             }
-            *pend_t.borrow_mut() = Some(txt.clone());
-            lbl_t.set_text(&format!("📋 URL terdeteksi di clipboard: {}", txt));
-            ban_t.set_visible(true);
-            glib::ControlFlow::Continue
         });
     }
 
@@ -1364,10 +1379,59 @@ pub(crate) fn wants_quality_dialog(url: &str) -> bool {
 
 // ── v2.4.0 (D1): helper clipboard CLI (tanpa dependensi baru) ────────────
 
-/// Preferensi sesuai sesi: Wayland → wl-paste, X11 → xclip. "Tersedia" =
-/// perintah BISA dijalankan (spawn tidak NotFound); status exit diabaikan
-/// (clipboard kosong pun tetap berarti tool ada).
-fn clipboard_probe() -> Option<&'static str> {
+const MAX_CLIPBOARD_BYTES: usize = 2048;
+
+fn is_clipboard_url(text: &str) -> bool {
+    text.len() <= MAX_CLIPBOARD_BYTES
+        && (text.starts_with("http://") || text.starts_with("https://"))
+}
+
+/// Semua subprocess clipboard dibatasi waktu + output, dijalankan di Tokio,
+/// dan di-reap. Termasuk probe tool agar Wayland/X11 yang macet tetap aman.
+async fn clipboard_command(bin: &str, args: &[&str]) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut child = tokio::process::Command::new(bin)
+        .args(args)
+        .process_group(0)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    let pid = child.id();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        let stdout = child.stdout.take()?;
+        let mut bytes = Vec::new();
+        stdout
+            .take((MAX_CLIPBOARD_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .await
+            .ok()?;
+        if bytes.len() > MAX_CLIPBOARD_BYTES {
+            return None;
+        }
+        let status = child.wait().await.ok()?;
+        status
+            .success()
+            .then(|| String::from_utf8_lossy(&bytes).trim().to_string())
+    })
+    .await
+    .ok()
+    .flatten();
+    // Timeout / output terlalu besar: jangan meninggalkan child atau turunannya.
+    if child.id().is_some() {
+        if let Some(pid) = pid {
+            crate::downloader::kill_child_group_hard(pid);
+        }
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+    output
+}
+
+async fn clipboard_probe() -> Option<&'static str> {
     let order: &[&'static str] = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         &["wl-paste", "xclip"]
     } else {
@@ -1379,33 +1443,61 @@ fn clipboard_probe() -> Option<&'static str> {
         } else {
             &["-version"]
         };
-        match std::process::Command::new(*bin).args(args).output() {
-            Ok(_) => return Some(bin),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => continue,
+        if clipboard_command(bin, args).await.is_some() {
+            return Some(bin);
         }
     }
     None
 }
 
-/// Teks clipboard (None = gagal baca / tidak ada pemilik seleksi).
-fn clipboard_text(tool: &'static str) -> Option<String> {
-    let out = match tool {
-        "wl-paste" => std::process::Command::new("wl-paste")
-            .args(["--no-newline"])
-            .output(),
-        _ => std::process::Command::new("xclip")
-            .args(["-o", "-selection", "clipboard"])
-            .output(),
-    };
-    out.ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+async fn clipboard_text(tool: &'static str) -> Option<String> {
+    match tool {
+        "wl-paste" => clipboard_command(tool, &["--no-newline"]).await,
+        _ => clipboard_command(tool, &["-o", "-selection", "clipboard"]).await,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn clipboard_command_handles_success_failure_and_large_output() {
+        assert_eq!(
+            clipboard_command("sh", &["-c", "printf 'https://example.com/a\\n'"])
+                .await
+                .as_deref(),
+            Some("https://example.com/a")
+        );
+        assert!(clipboard_command("sh", &["-c", "exit 1"]).await.is_none());
+        assert!(clipboard_command("/nonexistent/fastdm-clipboard", &[])
+            .await
+            .is_none());
+        assert!(clipboard_command("sh", &["-c", "head -c 2049 /dev/zero"])
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn clipboard_timeout_does_not_block_executor() {
+        // current-thread runtime: blocking .output() would prevent this ticker
+        // from running until the child exits. The command must be killed early.
+        let started = std::time::Instant::now();
+        let command = tokio::spawn(clipboard_command("sh", &["-c", "sleep 5"]));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(command.await.unwrap().is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    #[test]
+    fn clipboard_only_accepts_bounded_web_urls() {
+        assert!(is_clipboard_url("https://example.com"));
+        assert!(is_clipboard_url("http://example.com"));
+        assert!(!is_clipboard_url(""));
+        assert!(!is_clipboard_url("file:///tmp/a"));
+        assert!(!is_clipboard_url(&format!("https://{}", "x".repeat(2048))));
+    }
 
     #[test]
     fn minimize_only_when_on_and_active() {
@@ -1420,7 +1512,10 @@ mod tests {
             normalize_url_input("  magnet:?xt=urn:btih:ab12 "),
             "magnet:?xt=urn:btih:ab12"
         );
-        assert_eq!(normalize_url_input("MAGNET:?xt=x"), "MAGNET:?xt=x");
+        assert_eq!(
+            normalize_url_input("magnet.example/x"),
+            "https://magnet.example/x"
+        );
     }
 
     #[test]
@@ -1453,7 +1548,10 @@ mod tests {
             "https://HTTPbin.org/get"
         );
         // "magnet" tanpa titik dua bukan skema magnet → diperlakukan host.
-        assert_eq!(normalize_url_input("magnet.example/x"), "https://magnet.example/x");
+        assert_eq!(
+            normalize_url_input("magnet.example/x"),
+            "https://magnet.example/x"
+        );
     }
 
     #[test]

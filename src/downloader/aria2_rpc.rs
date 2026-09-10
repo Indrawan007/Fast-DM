@@ -282,7 +282,10 @@ pub(crate) fn adduri_options(
         "max-connection-per-server".into(),
         json!(aria2::conn_per_server(cfg.max_connections).to_string()),
     );
-    o.insert("split".into(), json!(cfg.max_connections.max(1).to_string()));
+    o.insert(
+        "split".into(),
+        json!(cfg.max_connections.max(1).to_string()),
+    );
     // Auto-rename (default ON) → JANGAN overwrite: tabrakan jadi "file (1).ext".
     o.insert(
         "allow-overwrite".into(),
@@ -687,7 +690,7 @@ pub async fn download(
     // .php" bisa masuk antrean RPC dan nama Content-Disposition/redirect
     // terlewat).
     if !is_mag {
-        if let Err(msg) = aria2::resolve_filename(&info, cfg.verify_tls).await {
+        if let Err(msg) = aria2::resolve_filename(&info, cfg).await {
             fail(&info, &tx, msg).await;
             return RpcOutcome::Done;
         }

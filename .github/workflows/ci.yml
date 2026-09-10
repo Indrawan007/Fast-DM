@@ -88,6 +88,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          node-version: "22"
+
+      - name: Test browser extension
+        run: node --test tests/extension.test.cjs
 
       - name: Zip extension
         run: |

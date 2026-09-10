@@ -262,8 +262,10 @@ impl DownloadEngine {
 
         // Deduplikasi: download live (url+dir+file sama) → kembalikan yang sudah ada.
         // Tanpa ini, dua proses aria2 bisa menulis file yang sama dan saling korup.
+        // Pengecekan + insert harus atomik terhadap add_download lain.
+        // Urutan lock tetap map -> item; lepas sebelum start_download.
+        let mut downloads = self.downloads.write().await;
         let live = {
-            let downloads = self.downloads.read().await;
             let mut found = None;
             for (existing_id, info) in downloads.iter() {
                 let i = info.lock().await;
@@ -305,20 +307,15 @@ impl DownloadEngine {
                 "Skema URL tidak didukung — http, https, ftp, atau magnet.".to_string();
 
             let _ = self.event_tx.send(DownloadEvent::Error(info.clone()));
-            self.downloads
-                .write()
-                .await
-                .insert(id.clone(), Arc::new(Mutex::new(info)));
+            downloads.insert(id.clone(), Arc::new(Mutex::new(info)));
             self.mark_dirty();
             tracing::warn!("Download ditolak (skema URL): {}", url);
             return id;
         }
 
         let info = Arc::new(Mutex::new(info));
-        self.downloads
-            .write()
-            .await
-            .insert(id.clone(), info.clone());
+        downloads.insert(id.clone(), info);
+        drop(downloads);
         self.mark_dirty();
 
         if auto_start {
@@ -671,10 +668,10 @@ pub fn is_supported_scheme(url: &str) -> bool {
 /// yt-dlp supaya segmennya di-merge benar (lihat `wants_quality_dialog`).
 pub(crate) const DIRECT_FILE_EXTENSIONS: &[&str] = &[
     ".mp4", ".webm", ".mkv", ".avi", ".mov", ".m4v", ".flv", ".wmv", ".3gp", ".ts", ".mp3", ".m4a",
-    ".aac", ".ogg", ".opus", ".flac", ".wav", ".zip", ".tar", ".gz", ".bz2", ".tbz2", ".xz", ".txz",
-    ".7z", ".rar", ".pdf", ".iso", ".img", ".bin", ".apk", ".deb", ".rpm", ".exe", ".msi", ".dmg",
-    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico", ".doc", ".docx", ".xls",
-    ".xlsx", ".ppt", ".pptx", ".odt", ".epub", ".mobi", ".txt", ".csv", ".json", ".xml",
+    ".aac", ".ogg", ".opus", ".flac", ".wav", ".zip", ".tar", ".gz", ".bz2", ".tbz2", ".xz",
+    ".txz", ".7z", ".rar", ".pdf", ".iso", ".img", ".bin", ".apk", ".deb", ".rpm", ".exe", ".msi",
+    ".dmg", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico", ".doc", ".docx",
+    ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".epub", ".mobi", ".txt", ".csv", ".json", ".xml",
 ];
 
 /// URL file langsung (punya ekstensi file/media) → langsung ke aria2 tanpa
@@ -694,7 +691,9 @@ pub fn is_direct_file_url(url: &str) -> bool {
     // dulu .exe/.msi/.dmg/.bz2/.docx dll tidak ada di sini sehingga URL-nya
     // dicoba lewat yt-dlp dulu (gagal, ±1-3 dtk terbuang) baru fallback aria2.
     // v2.10.0 (D5): keselarasan itu kini dikunci oleh test, bukan hanya komentar.
-    DIRECT_FILE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+    DIRECT_FILE_EXTENSIONS
+        .iter()
+        .any(|ext| lower.ends_with(ext))
 }
 
 /// Cari download Queued tertua dan jalankan jika ada slot kosong
@@ -954,7 +953,8 @@ pub(crate) fn redact_for_persist(d: &mut DownloadInfo) {
         return;
     }
     let before = d.headers.len();
-    d.headers.retain(|k, _| !SENSITIVE_HEADERS.contains(&k.to_ascii_lowercase().as_str()));
+    d.headers
+        .retain(|k, _| !SENSITIVE_HEADERS.contains(&k.to_ascii_lowercase().as_str()));
     if d.headers.len() != before {
         tracing::debug!(
             "{} header sensitif dibuang dari snapshot session ({})",
@@ -1086,6 +1086,101 @@ pub fn extract_filename_from_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_adds_are_deduplicated_atomically() {
+        struct TempDir(std::path::PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp = TempDir(std::env::temp_dir().join(format!("fastdm-dedup-{}", Uuid::new_v4())));
+        let dir = temp.0.to_string_lossy().to_string();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // No DownloadEngine::new: avoid startup config/session I/O and flusher.
+        let engine = Arc::new(DownloadEngine {
+            downloads: Arc::new(RwLock::new(HashMap::new())),
+            event_tx: tx,
+            config: Arc::new(RwLock::new(Config {
+                download_dir: dir.clone(),
+                ..Config::default()
+            })),
+            dirty: Arc::new(AtomicBool::new(false)),
+            session_io: Arc::new(Mutex::new(())),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            restored_ids: Arc::new(Mutex::new(Vec::new())),
+        });
+        let sentinel = Arc::new(Mutex::new(DownloadInfo::new(
+            "sentinel".into(),
+            "https://other.test/a".into(),
+            "a".into(),
+            dir.clone(),
+            Default::default(),
+            None,
+        )));
+        engine
+            .downloads
+            .write()
+            .await
+            .insert("sentinel".into(), sentinel.clone());
+        let sentinel_guard = sentinel.lock().await;
+        let barrier = Arc::new(tokio::sync::Barrier::new(17));
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let engine = engine.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                engine
+                    .add_download(
+                        "https://example.test/a.zip",
+                        Some("a.zip"),
+                        None,
+                        false,
+                        Default::default(),
+                        None,
+                    )
+                    .await
+            }));
+        }
+        barrier.wait().await;
+        // Make callers contend on the same item during the dedup check.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        drop(sentinel_guard);
+        let mut ids = std::collections::HashSet::new();
+        for task in tasks {
+            ids.insert(
+                tokio::time::timeout(std::time::Duration::from_secs(2), task)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        assert_eq!(ids.len(), 1);
+        assert_eq!(engine.downloads.read().await.len(), 2);
+        let id = ids.into_iter().next().unwrap();
+        engine
+            .downloads
+            .read()
+            .await
+            .get(&id)
+            .unwrap()
+            .lock()
+            .await
+            .status = DownloadStatus::Completed;
+        let again = engine
+            .add_download(
+                "https://example.test/a.zip",
+                Some("a.zip"),
+                None,
+                false,
+                Default::default(),
+                None,
+            )
+            .await;
+        assert_ne!(again, id, "completed downloads can be added again");
+    }
 
     // ── is_direct_file_url ──
 
@@ -1454,10 +1549,20 @@ mod tests {
         );
         redact_for_persist(&mut d);
         assert!(!d.headers.contains_key("Cookie"), "got {:?}", d.headers);
-        assert!(!d.headers.contains_key("Authorization"), "got {:?}", d.headers);
+        assert!(
+            !d.headers.contains_key("Authorization"),
+            "got {:?}",
+            d.headers
+        );
         // Header non-kredensial tetap ada — dipakai saat resume.
-        assert_eq!(d.headers.get("Referer").map(String::as_str), Some("https://x.test/page"));
-        assert_eq!(d.headers.get("Origin").map(String::as_str), Some("https://x.test"));
+        assert_eq!(
+            d.headers.get("Referer").map(String::as_str),
+            Some("https://x.test/page")
+        );
+        assert_eq!(
+            d.headers.get("Origin").map(String::as_str),
+            Some("https://x.test")
+        );
     }
 
     #[test]

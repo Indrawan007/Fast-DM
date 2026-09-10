@@ -1,13 +1,13 @@
 document.addEventListener("DOMContentLoaded", () => {
-  const urlInput        = document.getElementById("url-input");
-  const downloadBtn     = document.getElementById("download-btn");
-  const scanBtn         = document.getElementById("scan-btn");
-  const videoList       = document.getElementById("video-list");
-  const statusDot       = document.getElementById("status-dot");
-  const statusText      = document.getElementById("status-text");
-  const feedback        = document.getElementById("action-feedback");
+  const urlInput = document.getElementById("url-input");
+  const downloadBtn = document.getElementById("download-btn");
+  const scanBtn = document.getElementById("scan-btn");
+  const videoList = document.getElementById("video-list");
+  const statusDot = document.getElementById("status-dot");
+  const statusText = document.getElementById("status-text");
+  const feedback = document.getElementById("action-feedback");
   const toggleIntercept = document.getElementById("toggle-intercept");
-  const toggleEnabled   = document.getElementById("toggle-enabled");
+  const toggleEnabled = document.getElementById("toggle-enabled");
 
   // ── C5: feedback persisten (bukan menyalahgunakan placeholder) ──
   let feedbackTimer = null;
@@ -16,7 +16,9 @@ document.addEventListener("DOMContentLoaded", () => {
     feedback.className = "action-feedback " + (ok ? "ok" : "err");
     feedback.hidden = false;
     clearTimeout(feedbackTimer);
-    feedbackTimer = setTimeout(() => { feedback.hidden = true; }, 3500);
+    feedbackTimer = setTimeout(() => {
+      feedback.hidden = true;
+    }, 3500);
   }
 
   // ── Check Connection + Auto Register ──
@@ -39,17 +41,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const url = urlInput.value.trim();
     if (!url) return;
 
-    chrome.runtime.sendMessage(
-      { action: "download", url: url },
-      (response) => {
-        if (response && response.success) {
-          urlInput.value = "";
-          setFeedback("✓ Terkirim ke Fast DM!", true);
-        } else {
-          setFeedback("✕ Gagal — pastikan Fast DM berjalan", false);
-        }
+    chrome.runtime.sendMessage({ action: "download", url: url }, (response) => {
+      if (response && response.success) {
+        urlInput.value = "";
+        setFeedback("✓ Terkirim ke Fast DM!", true);
+      } else {
+        setFeedback("✕ Gagal — pastikan Fast DM berjalan", false);
       }
-    );
+    });
   });
 
   urlInput.addEventListener("keydown", (e) => {
@@ -66,7 +65,9 @@ document.addEventListener("DOMContentLoaded", () => {
           urlInput.select();
         }
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+      /* ignore */
+    }
   });
 
   // ── Scan Videos ──
@@ -100,9 +101,9 @@ document.addEventListener("DOMContentLoaded", () => {
             const name = document.createElement("span");
             name.className = "video-name";
             try {
-              name.textContent = decodeURIComponent(
-                new URL(url).pathname.split("/").pop()
-              ) || url;
+              name.textContent =
+                decodeURIComponent(new URL(url).pathname.split("/").pop()) ||
+                url;
             } catch {
               name.textContent = url;
             }
@@ -112,24 +113,44 @@ document.addEventListener("DOMContentLoaded", () => {
             btn.className = "video-dl-btn";
             btn.textContent = "⬇ Unduh";
             btn.addEventListener("click", () => {
-              chrome.runtime.sendMessage({
-                action: "download",
-                url: url,
-                headers: { Referer: tabs[0].url },
-              });
-              btn.textContent = "✓ Terkirim";
+              if (btn.disabled) return;
+              btn.textContent = "Mengirim…";
               btn.disabled = true;
-              setTimeout(() => {
-                btn.textContent = "⬇ Unduh";
-                btn.disabled = false;
-              }, 2000);
+              chrome.runtime.sendMessage(
+                {
+                  action: "download",
+                  url: url,
+                  headers: { Referer: tabs[0].url },
+                },
+                (response) => {
+                  const error = chrome.runtime.lastError;
+                  if (error || !response || !response.success) {
+                    btn.textContent = "↻ Coba lagi";
+                    btn.disabled = false;
+                    setFeedback(
+                      "✕ Gagal — " +
+                        (error?.message ||
+                          response?.error ||
+                          "Fast DM tidak merespons"),
+                      false,
+                    );
+                    return;
+                  }
+                  btn.textContent = "✓ Terkirim";
+                  setFeedback("✓ Terkirim ke Fast DM!", true);
+                  setTimeout(() => {
+                    btn.textContent = "⬇ Unduh";
+                    btn.disabled = false;
+                  }, 2000);
+                },
+              );
             });
 
             item.appendChild(name);
             item.appendChild(btn);
             videoList.appendChild(item);
           });
-        }
+        },
       );
     });
   }
@@ -143,7 +164,7 @@ document.addEventListener("DOMContentLoaded", () => {
   chrome.runtime.sendMessage({ action: "getConfig" }, (cfg) => {
     if (cfg) {
       toggleIntercept.checked = cfg.interceptDownloads !== false;
-      toggleEnabled.checked   = cfg.enabled !== false;
+      toggleEnabled.checked = cfg.enabled !== false;
     }
   });
 

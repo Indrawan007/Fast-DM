@@ -303,6 +303,18 @@ struct YtFormatJson {
     format_note: Option<String>,
 }
 
+/// Setelan jaringan identik untuk metadata, YouTube, dan resolver universal.
+pub(crate) fn network_args(config: &Config) -> Vec<String> {
+    let mut args = Vec::new();
+    if !config.proxy_url.trim().is_empty() {
+        args.extend(["--proxy".into(), config.proxy_url.trim().to_string()]);
+    }
+    if !config.verify_tls {
+        args.push("--no-check-certificates".into());
+    }
+    args
+}
+
 /// Ambil daftar format NYATA untuk sebuah URL via `yt-dlp -J` (simulated
 /// extraction, tanpa download). Gagal dalam bentuk apa pun (tool tidak ada,
 /// timeout 20 dtk, parse error) → Vec KOSONG; pemanggil fallback ke daftar
@@ -319,12 +331,7 @@ pub async fn fetch_formats(url: &str, config: &Config) -> Vec<FormatOption> {
         "10".into(),
     ];
     cmd.extend(cookie_args(url));
-    if !config.proxy_url.trim().is_empty() {
-        cmd.extend(["--proxy".into(), config.proxy_url.trim().to_string()]);
-    }
-    if !config.verify_tls {
-        cmd.push("--no-check-certificates".into());
-    }
+    cmd.extend(network_args(config));
     cmd.push(url.to_string());
 
     // v2.10.0 (C3): `process_group(0)` seperti SEMUA child lain di crate ini
@@ -475,9 +482,7 @@ pub async fn download(
     }
 
     // v2.4.0 (D3): proxy dari Pengaturan — yt-dlp & ffmpeg turunannya ikut.
-    if !config.proxy_url.trim().is_empty() {
-        cmd.extend(["--proxy".into(), config.proxy_url.trim().to_string()]);
-    }
+    cmd.extend(network_args(config));
 
     // Header kustom dari browser extension (mis. Referer)
     for (k, v) in &headers {
@@ -729,6 +734,35 @@ fn parse_speed(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_args_keep_tls_verification_by_default() {
+        assert!(network_args(&Config::default()).is_empty());
+    }
+
+    #[test]
+    fn network_args_apply_proxy_and_explicit_tls_opt_out() {
+        let mut cfg = Config {
+            proxy_url: "  socks5h://127.0.0.1:1080  ".into(),
+            verify_tls: false,
+            ..Config::default()
+        };
+        assert_eq!(
+            network_args(&cfg),
+            vec![
+                "--proxy",
+                "socks5h://127.0.0.1:1080",
+                "--no-check-certificates"
+            ]
+        );
+        cfg.verify_tls = true;
+        assert_eq!(
+            network_args(&cfg),
+            vec!["--proxy", "socks5h://127.0.0.1:1080"]
+        );
+        cfg.proxy_url = "   ".into();
+        assert!(network_args(&cfg).is_empty());
+    }
 
     // ── v2.9.3: kesegaran cookie file (murni, tanpa filesystem) ──
 

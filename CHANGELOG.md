@@ -3,6 +3,32 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.10.1] - 2026-09-10
+
+### Fixed
+
+- Resolver nama/ukuran file menggunakan proxy dari Pengaturan, termasuk SOCKS.
+  Cache HTTP client mengikuti perubahan proxy/TLS; proxy invalid ditolak tanpa
+  mencantumkan kredensial di pesan error.
+- Argumen jaringan yt-dlp dipakai bersama oleh pengambilan format, unduhan
+  YouTube, dan resolver universal. Opsi verifikasi TLS kini konsisten.
+- Deduplikasi unduhan melakukan pengecekan dan insert dalam satu write-lock,
+  sehingga request bersamaan tidak sama-sama memasukkan item identik.
+- Probe dan pembacaan clipboard dipindahkan dari thread GTK ke subprocess Tokio,
+  dibatasi 1 detik dan 2 KiB, tanpa polling bertumpuk. Proses yang macet dihentikan
+  beserta process group-nya dan di-reap.
+- Popup hasil pemindaian tidak lagi mengklaim “Terkirim” sebelum respons sukses.
+  Respons gagal/kosong atau error transport mengaktifkan kembali tombol retry;
+  badge background juga mencerminkan penolakan native host.
+- Log sukses extension tidak lagi memuat URL unduhan yang mungkin bertoken.
+
+### Tests
+
+- Regression test Rust untuk proxy resolver, setelan jaringan yt-dlp,
+  deduplikasi konkuren, serta timeout/batas output clipboard.
+- Regression test extension memakai Node.js test runner dan mock API browser
+  tanpa dependensi tambahan; dijalankan sebelum packaging extension di CI/rilis.
+
 ## [2.10.0] - 2026-09-07
 
 Rilis perbaikan hasil review kode menyeluruh: 6 bug logika, 4 celah

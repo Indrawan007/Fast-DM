@@ -435,7 +435,7 @@ mod tests {
 
     /// ID sintetis berbentuk sah (32 karakter dari satu huruf a-p).
     fn fake_id(fill: char) -> String {
-        std::iter::repeat(fill).take(EXT_ID_LEN).collect()
+        std::iter::repeat_n(fill, EXT_ID_LEN).collect()
     }
 
     fn ids(n: usize, prefix: &str) -> Vec<String> {
@@ -470,18 +470,19 @@ mod tests {
     #[test]
     fn rejects_ids_outside_alphabet() {
         // q-z, digit, dan uppercase bukan bagian alphabet ID Chrome.
-        assert!(!is_valid_extension_id(&fake_id('q')));
-        assert!(!is_valid_extension_id(&fake_id('z')));
-        assert!(!is_valid_extension_id(&fake_id('A')));
-        assert!(!is_valid_extension_id("12345678901234567890123456789012"));
+        assert!(!is_valid_extension_id("ABCDEFGHIJKLMNOPQRST")); // 20 alfanumerik
+        assert!(!is_valid_extension_id("aaaaaaaaaaaaaaaaaaaa")); // 20 huruf a
+
+        // wildcard / URL bukan ID — build.sh lama pernah memasang wildcard (K2)
+        assert!(!is_valid_extension_id("chrome-extension://*/"));
     }
 
     #[test]
     fn rejects_wrong_length() {
         assert!(!is_valid_extension_id(""));
         assert!(!is_valid_extension_id("abc"));
-        let short: String = std::iter::repeat('a').take(EXT_ID_LEN - 1).collect();
-        let long: String = std::iter::repeat('a').take(EXT_ID_LEN + 1).collect();
+        let short: String = "a".repeat(EXT_ID_LEN - 1);
+        let long: String = "a".repeat(EXT_ID_LEN + 1);
         assert!(!is_valid_extension_id(&short));
         assert!(!is_valid_extension_id(&long));
     }
@@ -492,7 +493,7 @@ mod tests {
         // bukan ID Chrome, sehingga bisa menyusup ke allowed_origins.
         assert!(!is_valid_extension_id("ABCDEFGHIJKLMNOPQRST")); // 20 alfanumerik
         assert!(!is_valid_extension_id("aaaaaaaaaaaaaaaaaaaa")); // 20 huruf a
-        // wildcard / URL bukan ID — build.sh lama pernah memasang wildcard (K2)
+                                                                 // wildcard / URL bukan ID — build.sh lama pernah memasang wildcard (K2)
         assert!(!is_valid_extension_id("chrome-extension://*/"));
     }
 
@@ -515,7 +516,10 @@ mod tests {
         // LRU: ID yang di-register ulang digeser ke paling baru supaya tidak
         // ter-evict lebih dulu padahal masih aktif dipakai.
         let mut got = ids(MAX_REGISTERED_IDS, "id");
-        assert!(!push_registered_id(&mut got, "id0"), "refresh LRU bukan ID baru");
+        assert!(
+            !push_registered_id(&mut got, "id0"),
+            "refresh LRU bukan ID baru"
+        );
         assert_eq!(got.len(), MAX_REGISTERED_IDS, "tidak boleh tumbuh");
         assert_eq!(got[0], "id1");
         assert_eq!(got[MAX_REGISTERED_IDS - 1], "id0");
@@ -527,7 +531,10 @@ mod tests {
         let mut got: Vec<String> = Vec::new();
         for i in 0..total {
             let id = format!("id{i}");
-            assert!(push_registered_id(&mut got, &id), "{id} harus dilaporkan baru");
+            assert!(
+                push_registered_id(&mut got, &id),
+                "{id} harus dilaporkan baru"
+            );
         }
         assert_eq!(got.len(), MAX_REGISTERED_IDS, "cap wajib ditegakkan");
         // Tiga entri TERLAMA terbuang; sisanya tetap urutan kronologis.
@@ -587,7 +594,10 @@ mod tests {
         let (summary, body) = new_origin_notice(id);
         assert!(!summary.is_empty(), "notifikasi butuh ringkasan");
         assert!(body.contains(id), "body harus menyebut ID: {body}");
-        assert!(body.contains(REGISTRY_FILE), "body harus menyebut cara cabut: {body}");
+        assert!(
+            body.contains(REGISTRY_FILE),
+            "body harus menyebut cara cabut: {body}"
+        );
     }
 
     // ── make_origins ──

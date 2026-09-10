@@ -59,7 +59,7 @@ pub async fn download(
     }
 
     // Resolve filename + tolak halaman HTML (penyebab "file .php" terdownload)
-    if let Err(msg) = resolve_filename(&info, config.verify_tls).await {
+    if let Err(msg) = resolve_filename(&info, config).await {
         let mut i = info.lock().await;
         i.status = DownloadStatus::Error;
         i.error_msg = msg;
@@ -424,8 +424,10 @@ pub(crate) fn available_bytes(blocks_available: u64, fragment_size: u64, block_s
 
 /// Cek ruang disk tersedia untuk direktori tujuan. Gagal cek → izinkan (jangan blokir).
 /// `pub(crate)`: dipakai jalur RPC (`aria2_rpc.rs`, B2.2) sebelum `addUri`.
-pub(crate) fn has_space(dir: &str, needed: u64) -> bool {          // 427
-    match nix::sys::statvfs::statvfs(std::path::Path::new(dir)) {  // 428
+pub(crate) fn has_space(dir: &str, needed: u64) -> bool {
+    // 427
+    match nix::sys::statvfs::statvfs(std::path::Path::new(dir)) {
+        // 428
         Ok(stat) => {
             let avail = available_bytes(
                 stat.blocks_available(),
@@ -435,7 +437,7 @@ pub(crate) fn has_space(dir: &str, needed: u64) -> bool {          // 427
             needed <= avail
         }
         Err(_) => true,
-    }      // ← BARIS INI YANG HILANG (4 spasi, menutup `match`)
+    } // ← BARIS INI YANG HILANG (4 spasi, menutup `match`)
 }
 
 /// v2.9.3: `--max-connection-per-server` aria2 hanya menerima 1–16; nilai di
@@ -519,26 +521,39 @@ fn parse_aria2_size(s: &str) -> u64 {
     (val * mult) as u64
 }
 
-/// HTTP client resolve — DI-BAGIKAN (dibuat sekali, bukan per-download).
-/// Membuat client baru tiap unduhan berarti setup TLS + koneksi ulang yang
-/// tidak perlu. Return Option untuk mempertahankan semantics lama: kalau
-/// client gagal dibangun, resolve dilewati (bukan panic → abort).
-fn resolve_client(verify_tls: bool) -> Option<&'static reqwest::Client> {
-    static VERIFY: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    static NO_VERIFY: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    let slot = if verify_tls { &VERIFY } else { &NO_VERIFY };
-    if slot.get().is_none() {
-        let client = reqwest::Client::builder()
-            .user_agent(CHROME_UA)
-            .danger_accept_invalid_certs(!verify_tls)
-            .redirect(reqwest::redirect::Policy::limited(10))
-            .timeout(std::time::Duration::from_secs(10))
-            .build();
-        if let Ok(c) = client {
-            let _ = slot.set(c);
+/// Cache satu client berdasarkan setelan jaringan. Clone Client berbagi pool;
+/// perubahan proxy/TLS mengganti cache, bukan menggunakan setelan startup lama.
+fn resolve_client(config: &Config) -> Result<reqwest::Client, String> {
+    type CachedClient = Option<(bool, String, reqwest::Client)>;
+    static CACHE: std::sync::Mutex<CachedClient> = std::sync::Mutex::new(None);
+    let proxy = config.proxy_url.trim();
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((verify_tls, cached_proxy, client)) = cache.as_ref() {
+        if *verify_tls == config.verify_tls && cached_proxy == proxy {
+            return Ok(client.clone());
         }
     }
-    slot.get()
+    let mut builder = reqwest::Client::builder()
+        .user_agent(CHROME_UA)
+        .danger_accept_invalid_certs(!config.verify_tls)
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(std::time::Duration::from_secs(10))
+        .no_proxy();
+    if !proxy.is_empty() {
+        if !crate::config::is_valid_proxy_url(proxy) {
+            return Err("Proxy resolver tidak valid — periksa Pengaturan".into());
+        }
+        // Jangan sertakan error reqwest/URL proxy: bisa memuat kredensial.
+        builder = builder.proxy(
+            reqwest::Proxy::all(proxy)
+                .map_err(|_| "Proxy resolver tidak valid — periksa Pengaturan".to_string())?,
+        );
+    }
+    let client = builder
+        .build()
+        .map_err(|_| "Gagal membuat HTTP client resolver".to_string())?;
+    *cache = Some((config.verify_tls, proxy.to_string(), client.clone()));
+    Ok(client)
 }
 
 /// Resolve filename + ukuran + tolak HTML/non-2xx.
@@ -547,18 +562,14 @@ fn resolve_client(verify_tls: bool) -> Option<&'static reqwest::Client> {
 /// dengan jalur per-proses — tanpa ini "file .php" bisa masuk antrean RPC.
 pub(crate) async fn resolve_filename(
     info: &Arc<Mutex<DownloadInfo>>,
-    verify_tls: bool,
+    config: &Config,
 ) -> Result<(), String> {
     let (url, headers) = {
         let i = info.lock().await;
         (i.url.clone(), i.headers.clone())
     };
 
-    let Some(client) = resolve_client(verify_tls) else {
-        // Client tidak bisa dibangun → lewati resolve (sebutir nama dari URL
-        // tetap dipakai) — perilaku sama seperti versi sebelumnya.
-        return Ok(());
-    };
+    let client = resolve_client(config)?;
 
     // Header kustom (mis. Referer) juga dipakai saat resolve agar server yang
     // butuh auth tidak menolak → nama & ukuran tetap terdeteksi.
@@ -833,6 +844,78 @@ fn parse_content_disposition(cd: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn resolver_uses_proxy_and_refreshes_it_after_settings_change() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // A different listener for each request catches stale cached clients.
+        // No Internet, real config directory, cookies, or env mutation needed.
+        for _ in 0..2 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let byte = stream.read_u8().await.unwrap();
+                    request.push(byte);
+                    if request.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                    assert!(request.len() < 8192);
+                }
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                String::from_utf8(request).unwrap()
+            });
+            let cfg = Config {
+                proxy_url: format!("http://{addr}"),
+                ..Config::default()
+            };
+            let response = resolve_client(&cfg)
+                .unwrap()
+                .get("http://fastdm-origin.invalid/archive.zip")
+                .send()
+                .await;
+            if response.is_err() {
+                server.abort();
+            }
+            assert!(response.unwrap().status().is_success());
+            let request = server.await.unwrap();
+            assert!(
+                request.starts_with("GET http://fastdm-origin.invalid/archive.zip HTTP/1.1\r\n")
+            );
+        }
+    }
+
+    #[test]
+    fn resolver_rejects_invalid_proxy_without_exposing_credentials() {
+        let cfg = Config {
+            proxy_url: "invalid://user:secret@proxy.test".into(),
+            ..Config::default()
+        };
+        let error = resolve_client(&cfg).unwrap_err();
+        assert!(!error.contains("secret"));
+        assert!(!error.contains("user"));
+        assert!(error.contains("Proxy"));
+    }
+
+    #[test]
+    fn resolver_accepts_socks_and_tls_settings() {
+        for scheme in ["socks4", "socks4a", "socks5", "socks5h"] {
+            for verify_tls in [true, false] {
+                let cfg = Config {
+                    proxy_url: format!("{scheme}://127.0.0.1:1080"),
+                    verify_tls,
+                    ..Config::default()
+                };
+                assert!(resolve_client(&cfg).is_ok());
+            }
+        }
+        assert!(resolve_client(&Config::default()).is_ok());
+    }
 
     // ── parse_aria2_size ──
 

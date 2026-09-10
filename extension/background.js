@@ -252,7 +252,17 @@ async function sendDownload(
 
   try {
     const response = await sendToNative(message);
-    console.log("[FastDM] Download sent:", filename || url);
+    if (!response || !response.success) {
+      showBadge("!", "#f38ba8");
+      return (
+        response || {
+          success: false,
+          error: "Native host tidak memberi respons",
+        }
+      );
+    }
+    // URL bisa mengandung token; cukup log status, bukan URL/nama file.
+    console.log("[FastDM] Download accepted");
     showBadge("⬇", "#89b4fa");
     return response;
   } catch (err) {

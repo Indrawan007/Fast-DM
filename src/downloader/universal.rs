@@ -1,6 +1,8 @@
 use super::types::*;
 use crate::config::Config;
-use crate::downloader::youtube::{cookie_args, output_template, quality_args, run_ytdlp};
+use crate::downloader::youtube::{
+    cookie_args, network_args, output_template, quality_args, run_ytdlp,
+};
 use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -108,9 +110,7 @@ pub async fn download(
     }
 
     // v2.4.0 (D3): proxy juga untuk jalur resolver universal
-    if !config.proxy_url.trim().is_empty() {
-        cmd.extend(["--proxy".into(), config.proxy_url.trim().to_string()]);
-    }
+    cmd.extend(network_args(config));
     for (k, v) in &headers {
         let k = k.replace(['\r', '\n'], "");
         let v = v.replace(['\r', '\n'], "");
