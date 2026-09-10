@@ -152,6 +152,27 @@ impl DownloadInfo {
         slot_available
     }
 
+    /// Pause manual juga membatalkan retry tertunda pada worker berstatus Error.
+    /// Error biasa (tanpa retry) dan hasil terminal tidak diubah menjadi Paused.
+    pub(crate) fn request_pause(&mut self) -> bool {
+        let pausable = matches!(
+            self.status,
+            DownloadStatus::Downloading
+                | DownloadStatus::Resolving
+                | DownloadStatus::Queued
+                | DownloadStatus::Paused
+        ) || (self.status == DownloadStatus::Error && self.resume_pending);
+        if !pausable {
+            return false;
+        }
+        self.resume_pending = false;
+        self.status_detail.clear();
+        self.status = DownloadStatus::Paused;
+        self.speed = 0;
+        self.eta = 0;
+        true
+    }
+
     /// Hanya supervisor pemilik yang boleh melepas slot, setelah backend return.
     pub(crate) fn finish_worker(&mut self, restart_allowed: bool) {
         self.worker_active = false;

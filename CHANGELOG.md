@@ -3,6 +3,24 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.10.3] - 2026-09-10
+
+### Fixed
+
+- Kontrol Jeda/Lanjut Semua memakai satu aturan untuk label dan aksi, mencakup
+  item antrean serta resume/retry tertunda. Status dibaca kembali saat klik,
+  bukan membalik boolean GUI yang mungkin tertinggal.
+- Tombol operasi massal dinonaktifkan selama request berlangsung, termasuk
+  ketika event statistik datang; label sesudah operasi mengikuti state engine.
+- Pause individual dan massal memakai transisi yang sama. Retry tertunda pada
+  status Error dapat dibatalkan menjadi Paused, mengirim event, dan menandai
+  sesi perlu disimpan. Error biasa tanpa retry tidak diubah.
+
+### Tests
+
+- Lima regression test untuk pemilihan aksi massal, campuran status, pembatalan
+  retry tertunda (individual/massal), event/dirty flag, dan preservasi error biasa.
+
 ## [2.10.2] - 2026-09-10
 
 ### Fixed

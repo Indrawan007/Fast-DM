@@ -595,33 +595,39 @@ pub fn build_window(
         }
     });
 
-    // ── C3: Jeda Semua / Lanjut Semua ──
-    // state=false → masih ada yang aktif (aksi = Jeda); state=true → aksi = Lanjut.
-    // Label & state disinkronkan ulang oleh event listener (state nyata), bukan hanya klik.
-    let pause_all_state = Rc::new(Cell::new(false));
-    let pause_all_btn_h = pause_all_btn.clone();
+    // Satu operasi massal pada satu waktu. Aksi dibaca dari engine saat klik,
+    // bukan membalik boolean GUI yang bisa tertinggal dari event async.
+    let batch_busy = Rc::new(Cell::new(false));
     let engine_pa = engine.clone();
     let rt_pa = rt.clone();
-    let state_pa = pause_all_state.clone();
-    pause_all_btn.connect_clicked(move |_| {
+    let busy_pa = batch_busy.clone();
+    pause_all_btn.connect_clicked(move |button| {
+        if busy_pa.replace(true) {
+            return;
+        }
+        button.set_sensitive(false);
         let eng = engine_pa.clone();
-        let rt = rt_pa.clone();
-        let state = state_pa.clone();
-        let btn = pause_all_btn_h.clone();
-        glib::spawn_future_local(async move {
-            let do_pause = !state.get();
-            if do_pause {
-                let _ = rt.spawn(async move { eng.pause_all().await }).await;
-            } else {
-                let _ = rt.spawn(async move { eng.resume_all().await }).await;
+        let busy = busy_pa.clone();
+        let btn = button.clone();
+        let task = rt_pa.spawn(async move {
+            match batch_action(&eng.get_all_downloads().await) {
+                BatchAction::Pause => eng.pause_all().await,
+                BatchAction::Resume => eng.resume_all().await,
+                BatchAction::None => {}
             }
-            // state=false → masih ada yang aktif (aksi berikutnya = Jeda)
-            state.set(do_pause);
-            btn.set_label(if do_pause {
-                "Lanjut Semua"
-            } else {
-                "Jeda Semua"
-            });
+            batch_action(&eng.get_all_downloads().await)
+        });
+        glib::spawn_future_local(async move {
+            let result = task.await;
+            busy.set(false);
+            match result {
+                Ok(action) => update_batch_button(&btn, action),
+                Err(e) => {
+                    tracing::warn!("Operasi jeda/lanjut semua gagal: {}", e);
+                    btn.set_label("Coba Lagi");
+                    btn.set_sensitive(true);
+                }
+            }
         });
     });
 
@@ -696,7 +702,7 @@ pub fn build_window(
     let stats_t = stats_total.clone();
     let statuses_ev = download_statuses.clone();
     let pa_btn = pause_all_btn.clone();
-    let pa_state = pause_all_state.clone();
+    let busy_ev = batch_busy.clone();
 
     glib::spawn_future_local(async move {
         let mut last_stats = std::time::Instant::now();
@@ -859,7 +865,7 @@ pub fn build_window(
                 let sq = stats_q.clone();
                 let st = stats_t.clone();
                 let pa_btn_l = pa_btn.clone();
-                let pa_state_l = pa_state.clone();
+                let busy_stats = busy_ev.clone();
 
                 glib::spawn_future_local(async move {
                     if let Ok(all) = rt.spawn(async move { eng.get_all_downloads().await }).await {
@@ -890,27 +896,11 @@ pub fn build_window(
                         });
                         st.set_text(&format!("Total {}", all.len()));
 
-                        // Sinkron tombol Jeda/Lanjut Semua dengan state NYATA (C3)
-                        let has_active = all.iter().any(|d| {
-                            matches!(
-                                d.status,
-                                DownloadStatus::Downloading | DownloadStatus::Resolving
-                            )
-                        });
-                        let has_pausable = all.iter().any(|d| {
-                            matches!(d.status, DownloadStatus::Paused | DownloadStatus::Error)
-                        });
-                        if has_active {
-                            pa_state_l.set(false);
-                            pa_btn_l.set_label("Jeda Semua");
-                        } else if has_pausable {
-                            pa_state_l.set(true);
-                            pa_btn_l.set_label("Lanjut Semua");
-                        } else {
-                            pa_state_l.set(false);
-                            pa_btn_l.set_label("Jeda Semua");
+                        // Event statistik tidak boleh membuka tombol kembali
+                        // ketika operasi massal sebelumnya masih berjalan.
+                        if !busy_stats.get() {
+                            update_batch_button(&pa_btn_l, batch_action(&all));
                         }
-                        pa_btn_l.set_sensitive(has_active || has_pausable);
                     }
                 });
             }
@@ -1092,6 +1082,42 @@ pub fn build_window(
     });
 
     window.present();
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchAction {
+    None,
+    Pause,
+    Resume,
+}
+
+/// Antrean dan resume/retry tertunda juga merupakan pekerjaan yang bisa dijeda.
+/// Campuran aktif+paused memilih Pause terlebih dahulu agar "Jeda Semua" benar.
+fn batch_action(downloads: &[DownloadInfo]) -> BatchAction {
+    if downloads.iter().any(|d| {
+        d.resume_pending
+            || matches!(
+                d.status,
+                DownloadStatus::Downloading | DownloadStatus::Resolving | DownloadStatus::Queued
+            )
+    }) {
+        BatchAction::Pause
+    } else if downloads
+        .iter()
+        .any(|d| matches!(d.status, DownloadStatus::Paused | DownloadStatus::Error))
+    {
+        BatchAction::Resume
+    } else {
+        BatchAction::None
+    }
+}
+
+fn update_batch_button(button: &Button, action: BatchAction) {
+    button.set_label(match action {
+        BatchAction::Resume => "Lanjut Semua",
+        BatchAction::Pause | BatchAction::None => "Jeda Semua",
+    });
+    button.set_sensitive(action != BatchAction::None);
 }
 
 fn settings_row(label: &str, widget: &impl IsA<gtk4::Widget>) -> GtkBox {
@@ -1460,6 +1486,61 @@ async fn clipboard_text(tool: &'static str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn batch_item(status: DownloadStatus, resume_pending: bool) -> DownloadInfo {
+        let mut info = DownloadInfo::new(
+            "batch".into(),
+            "unused".into(),
+            "unused".into(),
+            "unused".into(),
+            Default::default(),
+            None,
+        );
+        info.status = status;
+        info.resume_pending = resume_pending;
+        info
+    }
+
+    #[test]
+    fn batch_action_covers_queue_and_deferred_resume() {
+        for (status, pending, expected) in [
+            (DownloadStatus::Downloading, false, BatchAction::Pause),
+            (DownloadStatus::Resolving, false, BatchAction::Pause),
+            (DownloadStatus::Queued, false, BatchAction::Pause),
+            (DownloadStatus::Paused, false, BatchAction::Resume),
+            (DownloadStatus::Error, false, BatchAction::Resume),
+            (DownloadStatus::Paused, true, BatchAction::Pause),
+            (DownloadStatus::Error, true, BatchAction::Pause),
+            (DownloadStatus::Completed, false, BatchAction::None),
+            (DownloadStatus::Cancelled, false, BatchAction::None),
+        ] {
+            assert_eq!(
+                batch_action(&[batch_item(status, pending)]),
+                expected,
+                "status={status:?}, pending={pending}"
+            );
+        }
+        assert_eq!(batch_action(&[]), BatchAction::None);
+    }
+
+    #[test]
+    fn batch_action_prioritizes_pause_for_mixed_downloads() {
+        let paused = batch_item(DownloadStatus::Paused, false);
+        let queued = batch_item(DownloadStatus::Queued, false);
+        assert_eq!(
+            batch_action(&[paused.clone(), queued.clone()]),
+            BatchAction::Pause
+        );
+        assert_eq!(batch_action(&[queued, paused]), BatchAction::Pause);
+    }
+
+    #[test]
+    fn batch_action_tracks_deferred_retry_then_manual_pause() {
+        let mut info = batch_item(DownloadStatus::Error, true);
+        assert_eq!(batch_action(&[info.clone()]), BatchAction::Pause);
+        assert!(info.request_pause());
+        assert_eq!(batch_action(&[info]), BatchAction::Resume);
+    }
 
     #[tokio::test]
     async fn clipboard_command_handles_success_failure_and_large_output() {

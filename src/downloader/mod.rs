@@ -403,19 +403,8 @@ impl DownloadEngine {
         let downloads = self.downloads.read().await;
         if let Some(info) = downloads.get(id) {
             let mut i = info.lock().await;
-            if matches!(
-                i.status,
-                DownloadStatus::Downloading
-                    | DownloadStatus::Resolving
-                    | DownloadStatus::Queued
-                    | DownloadStatus::Paused
-            ) {
+            if i.request_pause() {
                 kill_child_pid(i.pid);
-                i.resume_pending = false;
-                i.status_detail.clear();
-                i.status = DownloadStatus::Paused;
-                i.speed = 0;
-                i.eta = 0;
                 let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
                 self.mark_dirty();
             }
@@ -448,19 +437,8 @@ impl DownloadEngine {
         let downloads = self.downloads.read().await;
         for info in downloads.values() {
             let mut i = info.lock().await;
-            i.resume_pending = false;
-            if matches!(
-                i.status,
-                DownloadStatus::Downloading
-                    | DownloadStatus::Resolving
-                    | DownloadStatus::Queued
-                    | DownloadStatus::Paused
-            ) {
+            if i.request_pause() {
                 kill_child_pid(i.pid);
-                i.status_detail.clear();
-                i.status = DownloadStatus::Paused;
-                i.speed = 0;
-                i.eta = 0;
                 let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
                 self.mark_dirty();
             }
@@ -1155,6 +1133,56 @@ mod tests {
         assert_eq!(info.status, DownloadStatus::Downloading);
         assert!(info.worker_active);
         assert_eq!(info.retry_count, 0, "no second worker claimed");
+    }
+
+    #[tokio::test]
+    async fn pause_cancels_error_retry_and_publishes_the_new_state() {
+        for all in [false, true] {
+            let mut engine = lifecycle_engine();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            engine.event_tx = tx;
+            let info = lifecycle_item(&engine, "retry", DownloadStatus::Error).await;
+            {
+                let mut i = info.lock().await;
+                i.worker_active = true;
+                assert!(!i.request_start(true));
+                assert!(i.resume_pending);
+            }
+            if all {
+                engine.pause_all().await;
+            } else {
+                engine.pause_download("retry").await;
+            }
+            let event = rx.try_recv().expect("pause must publish its state");
+            let DownloadEvent::Progress(event) = event else {
+                panic!("expected Progress")
+            };
+            assert_eq!(event.status, DownloadStatus::Paused);
+            assert!(!event.resume_pending);
+            assert!(event.status_detail.is_empty());
+            assert!(engine.dirty.load(Ordering::SeqCst));
+            let mut i = info.lock().await;
+            assert!(i.worker_active, "cleanup still owns its slot");
+            i.finish_worker(true);
+            assert_eq!(
+                i.status,
+                DownloadStatus::Paused,
+                "retry must not be requeued"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pause_preserves_errors_without_a_pending_retry() {
+        let engine = lifecycle_engine();
+        let info = lifecycle_item(&engine, "error", DownloadStatus::Error).await;
+        info.lock().await.error_msg = "Original failure".into();
+        engine.pause_download("error").await;
+        engine.pause_all().await;
+        let i = info.lock().await;
+        assert_eq!(i.status, DownloadStatus::Error);
+        assert_eq!(i.error_msg, "Original failure");
+        assert!(!engine.dirty.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

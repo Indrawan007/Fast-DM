@@ -17,6 +17,15 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 🌐 **Proxy global** (HTTP/SOCKS5, kredensial di URL) — satu kolom di Pengaturan, berlaku untuk aria2 & yt-dlp
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 
+## Stabilitas v2.10.3
+
+- Tombol Jeda/Lanjut Semua memperhitungkan antrean dan resume/retry tertunda,
+  bukan hanya unduhan yang sedang mentransfer data.
+- Aksi tombol dibaca ulang dari engine saat diklik; klik berulang diblokir selama
+  operasi massal masih berlangsung.
+- Jeda individual maupun Jeda Semua membatalkan retry tertunda pada status Error
+  tanpa mengubah unduhan gagal biasa yang belum diminta retry.
+
 ## Stabilitas v2.10.2
 
 - Start/resume berulang tidak membuat worker unduhan ganda. Resume yang diminta
