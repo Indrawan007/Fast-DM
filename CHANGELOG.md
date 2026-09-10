@@ -3,6 +3,21 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.10.4] - 2026-09-10
+
+### Fixed
+
+- Lanjut Semua mengurutkan pengajuan resume berdasarkan `(created, id)`, bukan
+  urutan acak HashMap. Snapshot kandidat melepas semua lock sebelum start;
+  validasi status dan batas slot tetap dilakukan oleh start_download.
+
+### Tests
+
+- Dua regression test async memeriksa urutan waktu, tie-break ID terlepas dari
+  urutan insert, seleksi status, serta daftar kandidat kosong. Slot penuh
+  memastikan test tidak menjalankan backend; item non-resumable tidak berubah
+  dan item yang diantrekan tidak menambah worker maupun hitungan percobaan.
+
 ## [2.10.3] - 2026-09-10
 
 ### Fixed

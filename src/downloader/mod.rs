@@ -447,18 +447,23 @@ impl DownloadEngine {
 
     /// Resume SEMUA unduhan yang paused/error — dipakai tombol "Lanjut Semua" (UI-UX C3).
     pub async fn resume_all(&self) {
-        let ids: Vec<String> = {
+        let mut candidates = {
             let downloads = self.downloads.read().await;
             let mut v = Vec::new();
             for (id, info) in downloads.iter() {
-                let status = info.lock().await.status;
-                if matches!(status, DownloadStatus::Paused | DownloadStatus::Error) {
-                    v.push(id.clone());
+                let info = info.lock().await;
+                if matches!(info.status, DownloadStatus::Paused | DownloadStatus::Error) {
+                    v.push((info.created, id.clone()));
                 }
             }
             v
         };
-        for id in ids {
+        // HashMap tidak memiliki urutan stabil. Ajukan resume tertua dahulu,
+        // dengan tie-break ID yang sama seperti promosi antrean.
+        candidates.sort_unstable();
+        // Semua guard map/item harus lepas sebelum start_download mengambil
+        // write-lock. Validasi status dan kapasitas tetap dilakukan di sana.
+        for (_, id) in candidates {
             self.start_download(&id).await;
         }
     }
@@ -1183,6 +1188,73 @@ mod tests {
         assert_eq!(i.status, DownloadStatus::Error);
         assert_eq!(i.error_msg, "Original failure");
         assert!(!engine.dirty.load(Ordering::SeqCst));
+    }
+
+    // Slot sengaja penuh: menguji urutan pengajuan lewat event Queued tanpa
+    // menjalankan backend, mengakses jaringan, atau menulis konfigurasi user.
+    async fn resume_all_order(items: &[(&str, i64, DownloadStatus)]) -> Vec<String> {
+        let mut engine = lifecycle_engine();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        engine.event_tx = tx;
+        let active = lifecycle_item(&engine, "active", DownloadStatus::Downloading).await;
+        active.lock().await.worker_active = true;
+        for &(id, created, status) in items {
+            let item = lifecycle_item(&engine, id, status).await;
+            item.lock().await.created = created;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), engine.resume_all())
+            .await
+            .expect("resume_all must release locks before starting downloads");
+        let mut order = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            let DownloadEvent::Progress(info) = event else {
+                panic!("expected queued progress")
+            };
+            assert_eq!(info.status, DownloadStatus::Queued);
+            assert!(!info.worker_active);
+            assert_eq!(info.retry_count, 0);
+            order.push(info.id);
+        }
+        for &(id, _, status) in items {
+            if !matches!(status, DownloadStatus::Paused | DownloadStatus::Error) {
+                let downloads = engine.downloads.read().await;
+                assert_eq!(downloads.get(id).unwrap().lock().await.status, status);
+            }
+        }
+        assert!(active.lock().await.worker_active);
+        order
+    }
+
+    #[tokio::test]
+    async fn resume_all_submits_oldest_first_and_only_resumable_items() {
+        let order = resume_all_order(&[
+            ("new", 30, DownloadStatus::Paused),
+            ("done", 0, DownloadStatus::Completed),
+            ("old", 10, DownloadStatus::Error),
+            ("queued", 0, DownloadStatus::Queued),
+            ("middle", 20, DownloadStatus::Paused),
+            ("cancelled", 0, DownloadStatus::Cancelled),
+            ("resolving", 0, DownloadStatus::Resolving),
+        ])
+        .await;
+        assert_eq!(order, vec!["old", "middle", "new"]);
+    }
+
+    #[tokio::test]
+    async fn resume_all_breaks_timestamp_ties_by_id() {
+        for items in [
+            [
+                ("z", 10, DownloadStatus::Paused),
+                ("a", 10, DownloadStatus::Error),
+            ],
+            [
+                ("a", 10, DownloadStatus::Error),
+                ("z", 10, DownloadStatus::Paused),
+            ],
+        ] {
+            assert_eq!(resume_all_order(&items).await, vec!["a", "z"]);
+        }
+        assert!(resume_all_order(&[]).await.is_empty());
     }
 
     #[tokio::test]
