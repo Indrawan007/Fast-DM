@@ -739,6 +739,7 @@ pub fn build_window(
             glib::timeout_future(std::time::Duration::from_millis(500)).await;
         }
     });
+    let statuses_ev = download_statuses.clone();
     let removed_ev = removed_ids.clone();
     glib::spawn_future_local(async move {
         while let Some(event) = event_rx.recv().await {

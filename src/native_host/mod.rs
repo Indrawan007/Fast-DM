@@ -117,6 +117,7 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
 
             match forward_to_gui(&socket_path, &msg) {
                 Ok(resp) => resp,
+                Err(e) if !e.starts_with("connect: ") => invalid_ack(),
                 Err(e) => {
                     // Launch GUI dengan setsid agar TIDAK jadi child dari browser.
                     // Jangan paksa GDK_BACKEND=x11 — pada sesi Wayland-only GUI tidak bisa start.
@@ -200,7 +201,7 @@ fn forward_to_gui(
     use std::io::BufRead;
     use std::os::unix::net::UnixStream;
 
-    let mut stream = UnixStream::connect(socket_path).map_err(|e| e.to_string())?;
+    let mut stream = UnixStream::connect(socket_path).map_err(|e| format!("connect: {e}"))?;
 
     // Timeout supaya native host tidak hang selamanya jika GUI macet
     let timeout = Some(std::time::Duration::from_secs(5));
