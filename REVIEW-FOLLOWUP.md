@@ -31,6 +31,6 @@ Baseline review: 24f8246. Patch kerja: v2.10.5.
 
 ## Verifikasi
 
-- Lokal: 10 test extension lulus; syntax JavaScript/shell dan git diff --check lulus.
+- Lokal: 12 test extension lulus; syntax JavaScript/shell dan git diff --check lulus.
 - Rust: CI 34439548761 pada b4f4739 sukses (format, test/build, binary smoke, ZIP, .deb). Patch lanjutan cache legacy/extension setelah commit tersebut memerlukan CI ulang. Formatter WASM digunakan lokal; jangan menyamakan parsing dengan build.
 - Perubahan belum boleh disebut penyelesaian seluruh review sebelum daftar di atas ditutup dengan test reproduksi.

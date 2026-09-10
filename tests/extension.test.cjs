@@ -217,3 +217,45 @@ test("disabled extension refuses manual downloads before reading cookies", async
   assert.equal(read, false);
   assert.equal(b.requests.length, 0);
 });
+
+function sniffer() {
+  const location = { href: "https://example.com/first" };
+  const root = { dataset: {} };
+  let onMutation;
+  const window = { fetch() {}, addEventListener() {} };
+  const document = {
+    readyState: "complete", documentElement: root,
+    querySelectorAll: () => [], querySelector: () => null,
+  };
+  class XMLHttpRequest { open() {} }
+  class MutationObserver {
+    constructor(callback) { onMutation = callback; }
+    observe() {}
+  }
+  vm.runInNewContext(source("sniffer.js"), {
+    window, document, location, URL, XMLHttpRequest, MutationObserver,
+    setTimeout: () => 1,
+  });
+  return { window, location, root, mutate: () => onMutation([]) };
+}
+
+test("sniffer removes old candidates when SPA navigation precedes a fetch", async () => {
+  const s = sniffer();
+  s.window.fetch("https://example.com/old.mp4");
+  await new Promise(setImmediate);
+  assert.deepEqual(JSON.parse(s.root.dataset.fastdmMedia), ["https://example.com/old.mp4"]);
+  s.location.href = "https://example.com/next";
+  s.window.fetch("https://example.com/new.m3u8");
+  await new Promise(setImmediate);
+  assert.deepEqual(JSON.parse(s.root.dataset.fastdmMedia), ["https://example.com/new.m3u8"]);
+});
+
+test("sniffer clears stale candidates on navigation without a new media request", async () => {
+  const s = sniffer();
+  s.window.fetch("https://example.com/old.mp4");
+  await new Promise(setImmediate);
+  s.location.href = "https://example.com/empty";
+  s.mutate();
+  await new Promise(setImmediate);
+  assert.deepEqual(JSON.parse(s.root.dataset.fastdmMedia), []);
+});
