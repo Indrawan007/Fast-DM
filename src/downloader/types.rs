@@ -53,6 +53,10 @@ pub struct DownloadInfo {
     #[serde(default)]
     pub quality: Option<String>,
     #[serde(default)]
+    pub filename_explicit: bool,
+    #[serde(skip)]
+    pub(crate) removed: bool,
+    #[serde(default)]
     pub pid: Option<u32>,
     /// v2.9.1: GID unduhan di daemon aria2 RPC. Disimpan agar pause/resume
     /// native (`forcePause`/`unpause`) memakai task yang SAMA — bukan
@@ -98,6 +102,8 @@ impl DownloadInfo {
             is_youtube: false,
             headers,
             quality,
+            filename_explicit: false,
+            removed: false,
             pid: None,
             rpc_gid: None,
             worker_active: false,
@@ -123,6 +129,9 @@ impl DownloadInfo {
 
     /// Dipanggil dengan write-lock map lalu item: klaim start idempotent.
     pub(crate) fn request_start(&mut self, slot_available: bool) -> bool {
+        if self.removed {
+            return false;
+        }
         if self.worker_active {
             if matches!(self.status, DownloadStatus::Paused | DownloadStatus::Error) {
                 self.resume_pending = true;

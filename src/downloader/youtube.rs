@@ -72,6 +72,11 @@ fn detect_browser() -> Option<&'static str> {
 
 fn detect_browser_inner() -> Option<&'static str> {
     let home = dirs::home_dir()?;
+    let xdg = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
+    let profile = |path: &str| match path.strip_prefix(".config/") {
+        Some(relative) => xdg.join(relative),
+        None => home.join(path),
+    };
     let candidates = [
         ("chrome", ".config/google-chrome"),
         ("chromium", ".config/chromium"),
@@ -92,7 +97,7 @@ fn detect_browser_inner() -> Option<&'static str> {
             let desktop = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
             if let Some(name) = desktop_to_browser(&desktop) {
                 if let Some(&(_, path)) = candidates.iter().find(|c| c.0 == name) {
-                    if home.join(path).is_dir() {
+                    if profile(path).is_dir() {
                         return Some(name);
                     }
                 }
@@ -101,7 +106,7 @@ fn detect_browser_inner() -> Option<&'static str> {
     }
 
     for (name, path) in &candidates {
-        if home.join(path).is_dir() {
+        if profile(path).is_dir() {
             return Some(*name);
         }
     }
@@ -557,9 +562,7 @@ pub(crate) async fn run_ytdlp(
             // Batasi 16 KB (pertahankan yang terbaru) — situs bermasalah
             // bisa membanjiri stderr tanpa batas
             if buf.len() > 16 * 1024 {
-                let cut = buf.len() - 8 * 1024;
-                let drop = buf[..cut].find('\n').map(|i| i + 1).unwrap_or(cut);
-                buf.drain(..drop);
+                super::retain_utf8_tail(&mut buf, 8 * 1024);
             }
         }
         buf

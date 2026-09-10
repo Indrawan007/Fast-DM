@@ -3,6 +3,41 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.10.5] - 2026-09-10
+
+### Fixed
+
+- ACK native host fail-closed, respons dibatasi, dan kegagalan membaca ACK tidak
+  otomatis mengirim ulang aksi yang sudah diteruskan.
+- Tail stderr UTF-8-safe pada kedua runner; akumulasi satu baris dibatasi 64 KiB.
+- Cookie terstruktur menjaga atribut browser; matching Netscape memeriksa domain,
+  host-only, Secure, path, expiry, serta mendukung prefix HttpOnly. Payload lama
+  tanpa atribut ditolak dan cookie partitioned tidak diekspor.
+- Config/session/cookie memakai temporary unik mode 0600 sejak create dan atomic
+  rename. Session tidak menyimpan PID, tidak membuang pekerjaan non-terminal,
+  dan membatasi hanya riwayat Completed/Cancelled ke 200 entri.
+- Worker yang dihapus tetap dihitung sampai supervisor cleanup. GUI mengabaikan
+  event stale untuk ID terhapus dan mengambil satu snapshot statistik berkala.
+- Resolver menghormati nama eksplisit Simpan Sebagai; penemuan profil Rust
+  mengikuti XDG_CONFIG_HOME.
+- Pengaturan disinkronkan ke daemon milik aplikasi; promosi mengisi kapasitas
+  tersedia. Pergantian rpc_port live ditolak, gunakan restart.
+- URL dengan control character ditolak; request masuk setelah shutdown tidak
+  diakui sukses. IPC membatasi koneksi aktif dan waktu baca request.
+- Build/test memakai lockfile dan workflow rilis memeriksa konsistensi versi tag.
+
+### Tests
+
+- Regression test ACK, UTF-8 stderr, batas baris, cookie scope/ekspor, private
+  atomic write, retensi sesi, clear worker, dan penolakan URL control character.
+
+### Compatibility
+
+- Upgrade aplikasi dan extension bersama. Cookie lama di disk tidak dapat
+  dipulihkan atribut aslinya; ekspor ulang melalui extension yang diperbarui.
+- Pengujian browser/GUI nyata, failure recovery RPC, dan cleanup shutdown penuh
+  masih memerlukan validasi lanjutan; lihat REVIEW-FOLLOWUP.md.
+
 ## [2.10.4] - 2026-09-10
 
 ### Fixed

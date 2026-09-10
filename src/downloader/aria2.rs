@@ -278,9 +278,7 @@ async fn run_aria2c(
             // Batasi 16 KB (pertahankan yang terbaru) — log error bisa
             // sangat panjang untuk download yang bermasalah
             if buf.len() > 16 * 1024 {
-                let cut = buf.len() - 8 * 1024;
-                let drop = buf[..cut].find('\n').map(|i| i + 1).unwrap_or(cut);
-                buf.drain(..drop);
+                super::retain_utf8_tail(&mut buf, 8 * 1024);
             }
         }
         buf
@@ -645,7 +643,7 @@ pub(crate) async fn resolve_filename(
         if let Ok(cd_str) = cd.to_str() {
             if let Some(name) = parse_content_disposition(cd_str) {
                 let cleaned = super::sanitize_filename(&name);
-                if !cleaned.is_empty() && cleaned.contains('.') {
+                if !i.filename_explicit && !cleaned.is_empty() && cleaned.contains('.') {
                     tracing::info!("Filename from Content-Disposition: {}", cleaned);
                     i.filename = cleaned;
                 }
@@ -654,7 +652,7 @@ pub(crate) async fn resolve_filename(
     }
 
     // 2. Jika filename masih generic, coba dari URL final (setelah redirect)
-    if is_generic_filename(&i.filename) {
+    if !i.filename_explicit && is_generic_filename(&i.filename) {
         let final_url = resp.url().to_string();
         if final_url != url {
             let name = super::extract_filename_from_url(&final_url);
@@ -690,7 +688,7 @@ pub(crate) async fn resolve_filename(
     //    a. nama tanpa ekstensi → tambahkan ekstensi media
     //    b. nama *.php / *.asp / *.jsp / *.do / *.html yang ternyata
     //       mengembalikan video → GANTI ekstensi ke ekstensi media asli
-    if let Some(ext) = content_type_to_ext(&ct) {
+    if let Some(ext) = content_type_to_ext(&ct).filter(|_| !i.filename_explicit) {
         let lower = i.filename.to_lowercase();
         let fake_ext = [
             ".php", ".asp", ".aspx", ".jsp", ".do", ".action", ".html", ".htm",
@@ -735,33 +733,7 @@ pub(crate) fn cookie_header_for(url: &str) -> Option<String> {
     let path = Config::find_cookies_file(&host)
         .unwrap_or_else(|| Config::config_dir().join("cookies.txt"));
     let text = std::fs::read_to_string(&path).ok()?;
-    let mut pairs: Vec<String> = Vec::new();
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let f: Vec<&str> = line.split('\t').collect();
-        if f.len() < 7 {
-            continue;
-        }
-        let domain = f[0].trim_start_matches('.').to_ascii_lowercase();
-        // Cookie berlaku bila domain sama / subdomain dari domain cookie
-        if host == domain || host.ends_with(&format!(".{}", domain)) {
-            let name = f[5].trim();
-            let value = f[6].trim();
-            if !name.is_empty() {
-                pairs.push(format!("{}={}", name, value));
-            }
-        }
-    }
-
-    if pairs.is_empty() {
-        None
-    } else {
-        Some(pairs.join("; "))
-    }
+    crate::cookies::header_for(url, &text, chrono::Utc::now().timestamp())
 }
 
 pub(crate) fn is_generic_filename(name: &str) -> bool {

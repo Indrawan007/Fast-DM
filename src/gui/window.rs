@@ -200,6 +200,7 @@ pub fn build_window(
     let rows: Rc<RefCell<HashMap<String, DownloadRow>>> = Rc::new(RefCell::new(HashMap::new()));
 
     // Track download status for clear done
+    let removed_ids = Rc::new(RefCell::new(std::collections::HashSet::<String>::new()));
     let download_statuses: Rc<RefCell<HashMap<String, DownloadStatus>>> =
         Rc::new(RefCell::new(HashMap::new()));
 
@@ -553,6 +554,7 @@ pub fn build_window(
     let rt_clear = rt.clone();
     let statuses_clear = download_statuses.clone();
 
+    let removed_clear = removed_ids.clone();
     clear_btn.connect_clicked(move |_| {
         let statuses = statuses_clear.borrow();
         let to_remove: Vec<String> = statuses
@@ -568,6 +570,7 @@ pub fn build_window(
         drop(statuses);
 
         for id in &to_remove {
+            removed_clear.borrow_mut().insert(id.clone());
             // Remove row from listbox
             let mut rows_map = rows_clear.borrow_mut();
             if let Some(row) = rows_map.remove(id) {
@@ -696,22 +699,58 @@ pub fn build_window(
     let listbox_ev = listbox.clone();
     let engine_ev = engine.clone();
     let rt_ev = rt.clone();
-    let stats_a = stats_active.clone();
-    let stats_s = stats_speed.clone();
-    let stats_q = stats_queued.clone();
-    let stats_t = stats_total.clone();
-    let statuses_ev = download_statuses.clone();
-    let pa_btn = pause_all_btn.clone();
-    let busy_ev = batch_busy.clone();
-
+    let stats_engine = engine.clone();
+    let stats_rt = rt.clone();
+    let stats_window = window.downgrade();
+    let stats_busy = batch_busy.clone();
+    let stats_button = pause_all_btn.clone();
     glib::spawn_future_local(async move {
-        let mut last_stats = std::time::Instant::now();
+        loop {
+            if stats_window.upgrade().is_none() {
+                break;
+            }
+            let eng = stats_engine.clone();
+            if let Ok(all) = stats_rt
+                .spawn(async move { eng.get_all_downloads().await })
+                .await
+            {
+                let active: Vec<_> = all
+                    .iter()
+                    .filter(|d| {
+                        matches!(
+                            d.status,
+                            DownloadStatus::Downloading | DownloadStatus::Resolving
+                        )
+                    })
+                    .collect();
+                let queued = all
+                    .iter()
+                    .filter(|d| d.status == DownloadStatus::Queued)
+                    .count();
+                let speed: u64 = active.iter().map(|d| d.speed).sum();
+                stats_active.set_text(&format!("Aktif {}", active.len()));
+                stats_queued.set_text(&format!("Antri {queued}"));
+                stats_total.set_text(&format!("Total {}", all.len()));
+                stats_speed.set_text(&format!("{}/s", format_size(speed)));
+                if !stats_busy.get() {
+                    update_batch_button(&stats_button, batch_action(&all));
+                }
+            }
+            glib::timeout_future(std::time::Duration::from_millis(500)).await;
+        }
+    });
+    let removed_ev = removed_ids.clone();
+    glib::spawn_future_local(async move {
         while let Some(event) = event_rx.recv().await {
             let info = match &event {
                 DownloadEvent::Progress(i) => i,
                 DownloadEvent::Completed(i) => i,
                 DownloadEvent::Error(i) => i,
             };
+
+            if info.removed || removed_ev.borrow().contains(&info.id) {
+                continue;
+            }
 
             // Track status
             statuses_ev
@@ -819,7 +858,9 @@ pub fn build_window(
                 let rows_rm = rows_ev.clone();
                 let listbox_rm = listbox_ev.clone();
                 let statuses_rm = statuses_ev.clone();
+                let removed_row = removed_ev.clone();
                 row.remove_btn.connect_clicked(move |_| {
+                    removed_row.borrow_mut().insert(id_rm.clone());
                     // Remove row
                     let mut rmap = rows_rm.borrow_mut();
                     if let Some(r) = rmap.remove(&id_rm) {
@@ -847,63 +888,7 @@ pub fn build_window(
                 rows_map.insert(id, row);
             }
 
-            // Update stats — selalu refresh saat status berubah;
-            // throttle 500ms saat download aktif (hindari spawn task 5x/detik per download)
             drop(rows_map);
-            let is_active = matches!(
-                info.status,
-                DownloadStatus::Downloading | DownloadStatus::Resolving
-            );
-
-            if !is_active || last_stats.elapsed().as_millis() >= 500 {
-                last_stats = std::time::Instant::now();
-
-                let eng = engine_ev.clone();
-                let rt = rt_ev.clone();
-                let sa = stats_a.clone();
-                let ss = stats_s.clone();
-                let sq = stats_q.clone();
-                let st = stats_t.clone();
-                let pa_btn_l = pa_btn.clone();
-                let busy_stats = busy_ev.clone();
-
-                glib::spawn_future_local(async move {
-                    if let Ok(all) = rt.spawn(async move { eng.get_all_downloads().await }).await {
-                        // "Aktif" = mengunduh ATAU memproses (resolving) —
-                        // konsisten dengan logika slot engine (keduanya
-                        // menempati slot download bersamaan).
-                        let active: Vec<_> = all
-                            .iter()
-                            .filter(|d| {
-                                matches!(
-                                    d.status,
-                                    DownloadStatus::Downloading | DownloadStatus::Resolving
-                                )
-                            })
-                            .collect();
-                        let queued = all
-                            .iter()
-                            .filter(|d| matches!(d.status, DownloadStatus::Queued))
-                            .count();
-                        let total_speed: u64 = active.iter().map(|d| d.speed).sum();
-
-                        sa.set_text(&format!("Aktif {}", active.len()));
-                        sq.set_text(&format!("Antri {}", queued));
-                        ss.set_text(&if total_speed > 0 {
-                            format!("{}/s", format_size(total_speed))
-                        } else {
-                            "0 B/s".to_string()
-                        });
-                        st.set_text(&format!("Total {}", all.len()));
-
-                        // Event statistik tidak boleh membuka tombol kembali
-                        // ketika operasi massal sebelumnya masih berjalan.
-                        if !busy_stats.get() {
-                            update_batch_button(&pa_btn_l, batch_action(&all));
-                        }
-                    }
-                });
-            }
         }
     });
 

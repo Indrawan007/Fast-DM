@@ -18,6 +18,7 @@ struct IpcMessage {
     #[serde(default)]
     headers: std::collections::HashMap<String, String>,
     cookies: Option<String>,
+    cookie_jar: Option<Vec<crate::cookies::BrowserCookie>>,
     domain: Option<String>,
 }
 
@@ -269,6 +270,7 @@ pub async fn start_server(engine: Arc<DownloadEngine>) -> Result<(), Box<dyn std
     // ECONNABORTED) mematikan IPC untuk SELURUH sesi aplikasi: extension tidak
     // akan pernah bisa mencapai GUI lagi sampai app di-restart. Sekarang setiap
     // error dicatat lalu dicoba lagi dengan backoff eksponensial terbatas.
+    let connections = Arc::new(tokio::sync::Semaphore::new(64));
     let mut accept_failures = 0u32;
     loop {
         let (stream, _) = match listener.accept().await {
@@ -295,11 +297,21 @@ pub async fn start_server(engine: Arc<DownloadEngine>) -> Result<(), Box<dyn std
             continue;
         }
 
+        let Ok(permit) = connections.clone().try_acquire_owned() else {
+            continue;
+        };
         let engine = engine.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             let (reader, mut writer) = stream.into_split();
 
-            let line = match read_request_line(reader, MAX_REQUEST_LINE).await {
+            let read = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                read_request_line(reader, MAX_REQUEST_LINE),
+            )
+            .await;
+            let Ok(read) = read else { return };
+            let line = match read {
                 Ok(RequestLine::Value(line)) => line,
                 Ok(RequestLine::Eof) | Err(_) => return,
                 Ok(RequestLine::TooLarge) => {
@@ -365,14 +377,25 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
             }
 
             // Tulis cookies.txt SEBELUM download start (yt-dlp membacanya saat spawn)
-            if let (Some(c), Some(d)) = (msg.cookies.as_deref(), msg.domain.as_deref()) {
-                if let Err(e) = write_cookies_txt(c, d) {
-                    tracing::warn!("set cookies: {}", e);
+            if let Some(jar) = msg.cookie_jar.as_deref() {
+                if let Err(e) = write_cookie_jar(&url, jar) {
+                    return IpcResponse {
+                        success: false,
+                        id: None,
+                        error: Some(e),
+                        message: None,
+                    };
                 }
+            } else if msg.cookies.is_some() {
+                // A name=value string cannot preserve Secure/path/hostOnly.
+                return IpcResponse {
+                    success: false,
+                    id: None,
+                    error: Some("Perbarui extension: cookie harus menyertakan atribut asli".into()),
+                    message: None,
+                };
             }
 
-            // v2.9.4 (C3): header disaring di boundary ini — sebelum mencapai
-            // engine dan argumen CLI aria2/yt-dlp. Lihat `sanitize_headers`.
             let headers = sanitize_headers(msg.headers);
 
             let id = engine
@@ -386,11 +409,20 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
                 )
                 .await;
 
-            IpcResponse {
-                success: true,
-                id: Some(id),
-                error: None,
-                message: None,
+            if id.is_empty() {
+                IpcResponse {
+                    success: false,
+                    id: None,
+                    error: Some("Fast DM sedang ditutup".into()),
+                    message: None,
+                }
+            } else {
+                IpcResponse {
+                    success: true,
+                    id: Some(id),
+                    error: None,
+                    message: None,
+                }
             }
         }
 
@@ -501,56 +533,12 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
 
 /// Konversi cookie string browser ("k=v; k=v") → file Netscape per-domain
 /// untuk yt-dlp/aria2 (B7: per-domain agar tidak saling menimpa)
-fn write_cookies_txt(cookie_header: &str, domain: &str) -> Result<(), String> {
-    if cookie_header.len() > 256 * 1024 {
-        return Err("cookies too large".into());
-    }
-    let host = domain.trim().trim_start_matches("www.");
-    if host.is_empty() || host.chars().any(|c| c.is_whitespace()) {
-        return Err("invalid domain".into());
-    }
-
-    // v2.3.0 (M7): TTL 24 jam — dulu 1 tahun (!) padahal ini salinan sesi
-    // browser; GC engine (7 hari) + kedaluwarsa mandiri menjamin tidak ada
-    // kredensial basi menumpuk di disk. Cookie session browser memang pendek
-    // umurnya, 24 jam lebih dari cukup untuk menyelesaikan unduhan.
-    let expires = chrono::Utc::now().timestamp() + 24 * 3600;
-    let mut out = String::from("# Netscape HTTP Cookie File\n");
-    let mut count = 0;
-
-    for pair in cookie_header.split(';') {
-        let pair = pair.trim();
-        if pair.is_empty() {
-            continue;
-        }
-        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let name = name.trim().replace(['\t', '\r', '\n'], "");
-        let value = value.trim().replace(['\t', '\r', '\n'], "");
-        if name.is_empty() {
-            continue;
-        }
-        out.push_str(&format!(
-            ".{}\tTRUE\t/\tFALSE\t{}\t{}\t{}\n",
-            host, expires, name, value
-        ));
-        count += 1;
-    }
-
-    if count == 0 {
-        return Err("no cookies".into());
-    }
-
-    let path = Config::cookies_file_for(host);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    std::fs::write(&path, out).map_err(|e| e.to_string())?;
-
-    // Cookies = rahasia → 0600
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-
-    Ok(())
+fn write_cookie_jar(url: &str, jar: &[crate::cookies::BrowserCookie]) -> Result<(), String> {
+    let text = crate::cookies::netscape_for(url, jar, chrono::Utc::now().timestamp())?;
+    let parsed = url::Url::parse(url).map_err(|_| "Invalid cookie URL")?;
+    let host = parsed.host_str().ok_or("Missing cookie host")?;
+    crate::config::write_private_atomic(&Config::cookies_file_for(host), text.as_bytes())
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

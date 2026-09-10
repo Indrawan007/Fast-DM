@@ -226,28 +226,19 @@ async function sendDownload(
 
   // Ambil cookies situs via API bila tidak dikirim eksplisit
   // (download login-protected — dipakai yt-dlp & aria2 --load-cookies)
-  if (!cookies) {
-    try {
-      const jar = await chrome.cookies.getAll({ url });
-      if (jar && jar.length > 0) {
-        cookies = jar.map((c) => c.name + "=" + c.value).join("; ");
-        domain = new URL(url).hostname;
-      }
-    } catch (e) {
-      /* ignore */
-    }
+  // Always read attributes from the browser, never accept flattened page data.
+  // Partitioned cookies are omitted until their top-level partition is carried.
+  try {
+    const jar = await chrome.cookies.getAll({ url });
+    message.cookie_jar = (jar || []).filter((c) => !c.partitionKey).map((c) => ({
+      domain: c.domain, name: c.name, value: c.value, path: c.path,
+      secure: c.secure, hostOnly: c.hostOnly, httpOnly: c.httpOnly,
+      session: c.session, expirationDate: c.expirationDate ?? null,
+    }));
+  } catch (_) {
+    // Do not claim a cookie snapshot was read if the browser API failed.
   }
 
-  // Cookies halaman (untuk yt-dlp — video membersih+/login)
-  if (cookies && domain) {
-    message.cookies = cookies;
-    message.domain = domain;
-  }
-
-  // B4f: badge pending — sendToNative menunggu hingga 25 detik sebelum
-  // timeout. Tanpa penanda ini user tidak dapat umpan balik sama sekali saat
-  // native host lambat atau tidak merespons. `holdMs = 0` menahannya sampai
-  // badge hasil (⬇/!) menggantikannya.
   showBadge("…", "#a6adc8", 0);
 
   try {

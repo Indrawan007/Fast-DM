@@ -182,3 +182,26 @@ for (const outcome of ["success", "rejected", "missing", "transport"]) {
     assert.ok(b.logs.every((line) => !line.includes("private")));
   });
 }
+
+
+test("background exports cookie attributes and ignores flattened caller cookies", async () => {
+  const b = background();
+  b.context.chrome.cookies.getAll = async () => [
+    { domain: "example.com", name: "sid", value: "private", path: "/login", secure: true,
+      hostOnly: true, httpOnly: true, session: false, expirationDate: 2000000000 },
+    { domain: "example.com", name: "partition", value: "omit", partitionKey: { topLevelSite: "https://other.test" } },
+  ];
+  const response = new Promise(resolve => b.onMessage({ action: "download",
+    url: "https://example.com/login/file.zip", cookies: "untrusted=wrong", domain: "other.test" }, {}, resolve));
+  await new Promise(setImmediate);
+  const message = b.requests[0].message;
+  assert.equal(message.cookies, undefined);
+  assert.equal(message.cookie_jar.length, 1);
+  assert.equal(message.cookie_jar[0].secure, true);
+  assert.equal(message.cookie_jar[0].hostOnly, true);
+  assert.equal(message.cookie_jar[0].httpOnly, true);
+  assert.equal(message.cookie_jar[0].path, "/login");
+  assert.equal(message.cookie_jar[0].expirationDate, 2000000000);
+  b.requests[0].callback({ success: true });
+  await response;
+});

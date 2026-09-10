@@ -363,7 +363,7 @@ fn get_all_nmh_dirs() -> Vec<PathBuf> {
         None => return dirs,
     };
 
-    let config = home.join(".config");
+    let config = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
     let local_share = home.join(".local").join("share");
 
     // ── 1. Standard Chromium-based browsers ──
