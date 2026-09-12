@@ -262,6 +262,16 @@ pub fn build_window(
             let win_q = win_add.clone();
             let start_q = start.clone();
             glib::spawn_future_local(async move {
+                // v2.10.5 (UX/perf): dialog tampil SEKARANG dengan preset;
+                // format nyata (yt-dlp -J) diisi async begitu fetch selesai.
+                // Sebelumnya dialog menunggu fetch (±20 dtk) sebelum muncul.
+                let mut handle = youtube_dialog::show_quality_dialog(
+                    win_q.upcast_ref(),
+                    "Pilih kualitas",
+                    &url_q,
+                    "",
+                    move |q| start_q(Some(q)),
+                );
                 let fmts = {
                     let eng = engine_q.clone();
                     let cfg = rt_q
@@ -275,14 +285,7 @@ pub fn build_window(
                     .await
                     .unwrap_or_default()
                 };
-                youtube_dialog::show_quality_dialog(
-                    win_q.upcast_ref(),
-                    "Pilih kualitas",
-                    &url_q,
-                    "",
-                    fmts,
-                    move |q| start_q(Some(q)),
-                );
+                handle.append_formats(&fmts);
             });
         } else {
             start(None);
@@ -475,12 +478,11 @@ pub fn build_window(
                     if wants_quality_dialog(&url) {
                         // v2.6.0: jalur save-as memakai preset statis (tanpa
                         // fetch) — dialog file-nya saja sudah dua langkah.
-                        youtube_dialog::show_quality_dialog(
+                        let _ = youtube_dialog::show_quality_dialog(
                             win_cb.upcast_ref(),
                             "Pilih kualitas",
                             &url,
                             "",
-                            Vec::new(),
                             move |q| start(Some(q)),
                         );
                     } else {
@@ -1408,8 +1410,15 @@ pub(crate) fn wants_quality_dialog(url: &str) -> bool {
 const MAX_CLIPBOARD_BYTES: usize = 2048;
 
 fn is_clipboard_url(text: &str) -> bool {
-    text.len() <= MAX_CLIPBOARD_BYTES
-        && (text.starts_with("http://") || text.starts_with("https://"))
+    if text.len() > MAX_CLIPBOARD_BYTES {
+        return false;
+    }
+    let lower = text.to_ascii_lowercase();
+    // v2.10.5: ftp & magnet juga URL unduhan — clipboard monitor dulu hanya
+    // mengenali http(s) sehingga link ftp/magnet tidak pernah muncul.
+    ["http://", "https://", "ftp://", "magnet:"]
+        .iter()
+        .any(|s| lower.starts_with(s))
 }
 
 /// Semua subprocess clipboard dibatasi waktu + output, dijalankan di Tokio,
@@ -1575,6 +1584,11 @@ mod tests {
     fn clipboard_only_accepts_bounded_web_urls() {
         assert!(is_clipboard_url("https://example.com"));
         assert!(is_clipboard_url("http://example.com"));
+        // v2.10.5: ftp & magnet kini ikut dikenali (case-insensitive).
+        assert!(is_clipboard_url("ftp://host/pub/file.iso"));
+        assert!(is_clipboard_url("magnet:?xt=urn:btih:abcdef"));
+        assert!(is_clipboard_url("HTTP://Example.COM/a.zip"));
+
         assert!(!is_clipboard_url(""));
         assert!(!is_clipboard_url("file:///tmp/a"));
         assert!(!is_clipboard_url(&format!("https://{}", "x".repeat(2048))));

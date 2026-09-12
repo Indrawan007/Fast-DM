@@ -3,6 +3,40 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.10.5] - 2026-09-12
+
+### Fixed
+
+- Unduhan magnet kini menonaktifkan seeding (`--seed-time=0`). Tanpa ini daemon
+  memakai default `--seed-ratio=1.0` sehingga task magnet tetap berstatus
+  `active` (seeding) dan UI tampak "MENGUNDUH" selamanya meski file lengkap.
+- Format video-only (mis. "137") dari dialog kualitas kini dipasangkan dengan
+  audio terbaik (`137+bestaudio`) — sebelumnya mengunduh video bisu.
+- Deteksi URL clipboard kini mengenali `ftp:` dan `magnet:` (case-insensitive),
+  bukan hanya http(s).
+
+### Performance
+
+- Fragmen HLS/DASH (m3u8/mpd) diunduh paralel via `--concurrent-fragments`
+  (mengikuti "Koneksi per server", clamp 1–16) — default yt-dlp 1 fragmen
+  per waktu adalah bottleneck utama situs streaming.
+- Merge video+audio memakai `mkv` (remux, tanpa re-encode) untuk preset
+  resolusi/format nyata; MP4 hanya untuk pilihan MP4/audio eksplisit.
+  Sebelumnya stream webm (VP9/Opus/AV1, YouTube ≥1440p) di-re-encode ke MP4
+  — lambat dan menurunkan kualitas.
+- `--embed-thumbnail` dihapus dari jalur unduh (pass ffmpeg ekstra yang
+  menunda file selesai); metadata tetap ditanam.
+- `--retries` yt-dlp kini mengikuti `retry_count` Pengaturan (dulu hardcoded 5).
+- Dialog kualitas tampil segera dengan preset; "Format lengkap dari situs"
+  diisi asinkron setelah `yt-dlp -J` selesai — menghilangkan jeda ±20 dtk
+  sebelum dialog muncul.
+- Deskripsi preset "Kualitas Terbaik (MP4)" diluruskan ("umumnya ≤1080p").
+
+### Tests
+
+- `merge_output_format` (mkv vs mp4), pemasangan audio pada format video-only,
+  flag `--seed-time=0` pada argumen daemon, dan deteksi clipboard ftp/magnet.
+
 ## [2.10.4] - 2026-09-10
 
 ### Fixed

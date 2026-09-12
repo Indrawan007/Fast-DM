@@ -1,3 +1,4 @@
+use super::aria2::conn_per_server;
 use super::types::*;
 use crate::config::Config;
 use regex::Regex;
@@ -252,10 +253,23 @@ pub(crate) fn quality_args(quality: Option<&str>) -> Vec<String> {
     }
 }
 
+/// v2.10.5 (perf): kontainer merge video+audio.
+///
+/// MP4 memaksa ffmpeg RE-ENCODE bila stream-nya webm (VP9/Opus/AV1 — YouTube
+/// ≥1440p umumnya hanya menyediakan webm): lambat, CPU 100%, kualitas turun.
+/// Matroska (mkv) selalu cukup di-remux (tanpa re-encode) untuk stream apa
+/// pun. MP4 dipertahankan HANYA untuk pilihan yang memang eksplisit
+/// minta MP4/audio — di sana selectornya sudah membatasi ke codec mp4/m4a
+/// sehingga merge tetap remux cepat.
+pub(crate) fn merge_output_format(quality: Option<&str>) -> &'static str {
+    match quality {
+        Some("best_mp4") | Some("audio_best") | Some("audio_mp3") => "mp4",
+        _ => "mkv",
+    }
+}
+
 /// v2.6.0 (D6): token terlihat seperti id/selector format yt-dlp — tanpa
 /// whitespace, panjang terbatas, dan karakter ter-batasi whitelist.
-/// (Command API tidak melewati shell, tapi pembatasan ini defense-in-depth
-/// karena string bisa berasal dari data halaman.)
 fn looks_like_format_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 32
@@ -399,6 +413,15 @@ pub(crate) fn parse_formats_json(s: &str) -> Vec<FormatOption> {
             (false, true) => "audio",
             _ => continue, // container tanpa stream? lewati
         };
+        // v2.10.5: format video-only (mis. "137") wajib dipasangkan dengan
+        // audio terbaik — selector mentah "137" mengunduh video BISU. Audio
+        // & video+audio dibiarkan apa adanya.
+        let id = if kind == "video" {
+            format!("{}+bestaudio", fmt.format_id)
+        } else {
+            fmt.format_id.clone()
+        };
+
         let label = match fmt.height {
             Some(h) if h > 0 => format!("{} {}p", ext, h),
             _ => format!("{} {}", ext, kind),
@@ -412,14 +435,11 @@ pub(crate) fn parse_formats_json(s: &str) -> Vec<FormatOption> {
                 desc = format!("{} · {}", desc, note);
             }
         }
-        if !seen.insert(fmt.format_id.clone()) {
+        if !seen.insert(id.clone()) {
             continue;
         }
-        out.push(FormatOption {
-            id: fmt.format_id,
-            label,
-            desc,
-        });
+        out.push(FormatOption { id, label, desc });
+
         if out.len() >= 24 {
             break; // dialog sudah panjang; 24 entri lebih dari cukup
         }
@@ -453,6 +473,13 @@ pub async fn download(
 
     let mut cmd = vec!["yt-dlp".to_string()];
     cmd.extend(quality_args(quality.as_deref()));
+    // v2.10.5 (perf): fragmen HLS/DASH (m3u8/mpd) diunduh PARALEL — default
+    // yt-dlp adalah 1 fragmen per waktu, yang menjadi bottleneck utama situs
+    // streaming. Ikuti "Koneksi per server" (clamp 1–16, sama dengan aria2).
+    cmd.extend([
+        "--concurrent-fragments".into(),
+        conn_per_server(config.max_connections).to_string(),
+    ]);
     cmd.extend([
         "--output".into(),
         output_template(&save_dir, &filename),
@@ -465,10 +492,9 @@ pub async fn download(
         "--socket-timeout".into(),
         "15".into(),
         "--retries".into(),
-        "5".into(),
+        config.retry_count.to_string(),
         "--merge-output-format".into(),
-        "mp4".into(),
-        "--embed-thumbnail".into(),
+        merge_output_format(quality.as_deref()).into(),
         "--embed-metadata".into(),
     ]);
 
@@ -965,107 +991,147 @@ mod tests {
         assert_eq!(v[0].id, "251");
         assert_eq!(v[0].label, "webm audio");
         assert!(v[0].desc.contains("audio"));
+        // v2.10.5: "137" video-only → id menjadi "137+bestaudio" (bukan video bisu).
+        assert_eq!(v[1].id, "137+bestaudio");
         assert_eq!(v[1].label, "mp4 1080p");
         assert_eq!(v[2].desc, "video+audio · low res");
     }
 
     #[test]
-    fn parse_formats_json_garbage_is_empty() {
-        assert!(parse_formats_json("").is_empty());
-        assert!(parse_formats_json("bukan json").is_empty());
-        assert!(parse_formats_json("{}").is_empty());
-        assert!(parse_formats_json(r#"{"formats": null}"#).is_empty());
+    fn parse_formats_json_pairs_video_only_with_audio() {
+        let j = r#"{"formats":[
+            {"format_id":"137","ext":"mp4","acodec":"none","vcodec":"avc1.640028","height":1080},
+            {"format_id":"251","ext":"webm","acodec":"opus","vcodec":"none"},
+            {"format_id":"18","ext":"mp4","acodec":"mp4a.40.2","vcodec":"avc1.42001E","height":360}
+        ]}"#;
+        let v = parse_formats_json(j);
+        assert_eq!(v.len(), 3);
+        assert_eq!(v[0].id, "137+bestaudio", "video-only harus dapat audio");
+        assert_eq!(v[1].id, "251", "audio-only tidak ditambahi apa pun");
+        assert_eq!(v[2].id, "18", "video+audio tidak diubah");
+        // Selector hasil tetap lolos looks_like_format_id → passthrough aman.
+        assert!(looks_like_format_id(&v[0].id));
     }
+}
 
-    #[test]
-    fn quality_args_passthrough_real_format_id() {
-        assert_eq!(
-            quality_args(Some("137+140")),
-            vec!["--format".to_string(), "137+140/best".to_string()]
-        );
-        // preset tidak boleh ter-bajak passthrough
-        assert!(quality_args(Some("audio_mp3")).contains(&"--audio-format".to_string()));
-        assert!(quality_args(Some("720p"))
-            .iter()
-            .any(|a| a.contains("height<=720")));
-        // bukan format id (whitespace dsb.) → tetap default teraman
-        assert_eq!(
-            quality_args(Some("rm -rf /")),
-            vec![
-                "--format".to_string(),
-                "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best".to_string()
-            ]
-        );
-    }
+#[test]
+fn parse_formats_json_garbage_is_empty() {
+    assert!(parse_formats_json("").is_empty());
+    assert!(parse_formats_json("bukan json").is_empty());
+    assert!(parse_formats_json("{}").is_empty());
+    assert!(parse_formats_json(r#"{"formats": null}"#).is_empty());
+}
 
-    #[test]
-    fn quality_args_resolution_p() {
-        let args = quality_args(Some("1080p"));
-        assert!(args.contains(&"--format".to_string()));
-        let fmt = &args[1];
-        assert!(fmt.contains("height<=1080"));
-        assert!(fmt.contains("bestaudio"));
-    }
+#[test]
+fn quality_args_passthrough_real_format_id() {
+    assert_eq!(
+        quality_args(Some("137+140")),
+        vec!["--format".to_string(), "137+140/best".to_string()]
+    );
+    // preset tidak boleh ter-bajak passthrough
+    assert!(quality_args(Some("audio_mp3")).contains(&"--audio-format".to_string()));
+    assert!(quality_args(Some("720p"))
+        .iter()
+        .any(|a| a.contains("height<=720")));
+    // bukan format id (whitespace dsb.) → tetap default teraman
+    assert_eq!(
+        quality_args(Some("rm -rf /")),
+        vec![
+            "--format".to_string(),
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best".to_string()
+        ]
+    );
+}
 
-    #[test]
-    fn quality_args_4k() {
-        let args = quality_args(Some("2160p"));
-        assert!(args[1].contains("height<=2160"));
-    }
+#[test]
+fn quality_args_resolution_p() {
+    let args = quality_args(Some("1080p"));
+    assert!(args.contains(&"--format".to_string()));
+    let fmt = &args[1];
+    assert!(fmt.contains("height<=1080"));
+    assert!(fmt.contains("bestaudio"));
+}
 
-    #[test]
-    fn quality_args_audio_best() {
-        let args = quality_args(Some("audio_best"));
-        assert!(args.contains(&"--extract-audio".to_string()));
-        assert!(args.contains(&"m4a".to_string()));
-    }
+#[test]
+fn quality_args_4k() {
+    let args = quality_args(Some("2160p"));
+    assert!(args[1].contains("height<=2160"));
+}
 
-    #[test]
-    fn quality_args_audio_mp3() {
-        let args = quality_args(Some("audio_mp3"));
-        assert!(args.contains(&"--extract-audio".to_string()));
-        assert!(args.contains(&"mp3".to_string()));
-        assert!(args.contains(&"--audio-quality".to_string()));
-        assert!(args.contains(&"0".to_string())); // best quality
-    }
+#[test]
+fn quality_args_audio_best() {
+    let args = quality_args(Some("audio_best"));
+    assert!(args.contains(&"--extract-audio".to_string()));
+    assert!(args.contains(&"m4a".to_string()));
+}
 
-    #[test]
-    fn quality_args_default() {
-        // None atau string non-sens → default "best MP4" dengan fallback
-        // berjenjang (/best di akhir → video AV1/VP9-only tetap terunduh).
-        let args = quality_args(None);
-        assert!(args.contains(&"--format".to_string()));
-        assert!(args[1].contains("mp4"));
+#[test]
+fn quality_args_audio_mp3() {
+    let args = quality_args(Some("audio_mp3"));
+    assert!(args.contains(&"--extract-audio".to_string()));
+    assert!(args.contains(&"mp3".to_string()));
+    assert!(args.contains(&"--audio-quality".to_string()));
+    assert!(args.contains(&"0".to_string())); // best quality
+}
 
-        // v2.6.1: kata bebas BUKAN id format (tak mengandung digit) → default,
-        // bukan "--format unknown/best" (bug guard D6 yang test ini tangkap).
-        let args = quality_args(Some("unknown"));
-        assert!(args[1].contains("mp4"));
-    }
+#[test]
+fn quality_args_default() {
+    // None atau string non-sens → default "best MP4" dengan fallback
+    // berjenjang (/best di akhir → video AV1/VP9-only tetap terunduh).
+    let args = quality_args(None);
+    assert!(args.contains(&"--format".to_string()));
+    assert!(args[1].contains("mp4"));
 
-    #[test]
-    fn quality_args_non_numeric_p_ignored() {
-        // "high" tidak berakhir digit+"p" dan tanpa digit → default
-        let args = quality_args(Some("high"));
-        assert!(args[1].contains("mp4")); // default fallback
-    }
+    // v2.6.1: kata bebas BUKAN id format (tak mengandung digit) → default,
+    // bukan "--format unknown/best" (bug guard D6 yang test ini tangkap).
+    let args = quality_args(Some("unknown"));
+    assert!(args[1].contains("mp4"));
+}
 
-    // ── desktop_to_browser ──
+#[test]
+fn quality_args_non_numeric_p_ignored() {
+    // "high" tidak berakhir digit+"p" dan tanpa digit → default
+    let args = quality_args(Some("high"));
+    assert!(args[1].contains("mp4")); // default fallback
+}
 
-    #[test]
-    fn desktop_to_browser_known_browsers() {
-        assert_eq!(desktop_to_browser("google-chrome.desktop"), Some("chrome"));
-        assert_eq!(desktop_to_browser("chromium.desktop"), Some("chromium"));
-        assert_eq!(desktop_to_browser("firefox.desktop"), Some("firefox"));
-        assert_eq!(desktop_to_browser("brave-browser.desktop"), Some("brave"));
-        assert_eq!(desktop_to_browser("opera.desktop"), Some("opera"));
-        assert_eq!(desktop_to_browser("vivaldi.desktop"), Some("vivaldi"));
-        assert_eq!(desktop_to_browser("microsoft-edge.desktop"), Some("edge"));
-    }
+// ── v2.10.5: merge_output_format ──
 
-    #[test]
-    fn desktop_to_browser_unknown() {
-        assert_eq!(desktop_to_browser("libreoffice.desktop"), None);
-        assert_eq!(desktop_to_browser(""), None);
-    }
+#[test]
+fn merge_output_format_uses_mkv_to_avoid_reencode() {
+    // Resolusi tinggi ("2160p"), default, dan id format nyata → mkv:
+    // remux tanpa re-encode (webm VP9/Opus/AV1 tidak bisa di-mux ke mp4
+    // tanpa re-encode yang lambat).
+    assert_eq!(merge_output_format(None), "mkv");
+    assert_eq!(merge_output_format(Some("2160p")), "mkv");
+    assert_eq!(merge_output_format(Some("137")), "mkv");
+    assert_eq!(merge_output_format(Some("137+bestaudio")), "mkv");
+}
+
+#[test]
+fn merge_output_format_keeps_mp4_for_explicit_mp4_and_audio() {
+    // Selector ini sudah membatasi ke codec mp4/m4a → merge ke mp4 tetap
+    // remux cepat dan ekstensi output sesuai harapan user.
+    assert_eq!(merge_output_format(Some("best_mp4")), "mp4");
+    assert_eq!(merge_output_format(Some("audio_best")), "mp4");
+    assert_eq!(merge_output_format(Some("audio_mp3")), "mp4");
+}
+
+// ── desktop_to_browser ──
+
+#[test]
+fn desktop_to_browser_known_browsers() {
+    assert_eq!(desktop_to_browser("google-chrome.desktop"), Some("chrome"));
+    assert_eq!(desktop_to_browser("chromium.desktop"), Some("chromium"));
+    assert_eq!(desktop_to_browser("firefox.desktop"), Some("firefox"));
+    assert_eq!(desktop_to_browser("brave-browser.desktop"), Some("brave"));
+    assert_eq!(desktop_to_browser("opera.desktop"), Some("opera"));
+    assert_eq!(desktop_to_browser("vivaldi.desktop"), Some("vivaldi"));
+    assert_eq!(desktop_to_browser("microsoft-edge.desktop"), Some("edge"));
+}
+
+#[test]
+fn desktop_to_browser_unknown() {
+    assert_eq!(desktop_to_browser("libreoffice.desktop"), None);
+    assert_eq!(desktop_to_browser(""), None);
 }

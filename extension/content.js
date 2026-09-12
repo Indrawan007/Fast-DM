@@ -579,16 +579,18 @@
         e.preventDefault();
         e.stopPropagation();
         // PRIORITAS:
-        // 1) URL media asli dari sniffer (.m3u8/.mpd/.mp4 — paling andal, bisa
-        //    menyelamatkan link *.php yang sebenarnya wrapper halaman)
-        // 2) src langsung BILA jelas file media (bukan *.php/*.html)
+        // 1) src langsung BILA jelas file media (bukan *.php/*.html)
+        // 2) URL media asli dari sniffer (.m3u8/.mpd/.mp4 — menyelamatkan link
+        //    *.php yang sebenarnya wrapper halaman)
         // 3) URL halaman — yt-dlp akan mencoba extractor situs
         const srcLow = (src || "").toLowerCase();
         const srcIsPage = /\.(php|html?|aspx?|jsp|asp|cgi)(\?|$)/.test(srcLow);
-        const target =
-          candidateFor() ||
-          (direct && !srcIsPage ? src : null) ||
-          window.location.href;
+        // v2.10.5: src media ASLI lebih otoritatif daripada kandidat hasil
+        // sniffing — kandidat terakhir bisa berupa permintaan lain (iklan/
+        // thumbnail) yang bukan video yang sedang diputar. Sniffer hanya
+        // dipakai saat src sendiri adalah halaman (.php/.html).
+        const directMedia = direct && !srcIsPage ? src : null;
+        const target = directMedia || candidateFor() || window.location.href;
         chrome.runtime.sendMessage(
           {
             action: "download",

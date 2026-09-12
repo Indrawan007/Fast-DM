@@ -215,12 +215,8 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
 /// punya tiga bug nyata:
 /// 1. pause/cancel hanya dicek saat baris output baru tiba — aria2c yang stall
 ///    (tanpa output) membuat tombol user tidak berdampak sampai ada baris lagi;
-/// 2. `child.wait()` tanpa batas — child yang tidak merespons SIGTERM (pause)
-///     membekukan thread blocking selamanya;
-/// 3. thread khusus stderr yang bisa bocor saat panic.
-/// Sekarang: `ChildLines` (baca cancellation-safe), ticker 500ms untuk cek
-/// status walau child diam, wait PAUSA terbatas 30 dtk dengan eskalasi SIGKILL,
-/// dan `kill_on_drop` sebagai jaring pengaman bila future seluruhnya di-drop.
+/// 2. `child.wait()` tanpa batas — child yang tidak merespons SIGTERM (pause) membekukan thread blocking selamanya;
+/// 3. thread khusus stderr yang bisa bocor saat panic.Sekarang: `ChildLines` (baca cancellation-safe), ticker 500ms untuk cek tatus walau child diam, wait PAUSA terbatas 30 dtk dengan eskalasi SIGKILL, dan `kill_on_drop` sebagai jaring pengaman bila future seluruhnya di-drop.
 async fn run_aria2c(
     cmd: Vec<String>,
     info: Arc<Mutex<DownloadInfo>>,
