@@ -204,6 +204,13 @@ impl DownloadInfo {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DownloadSummary {
+    pub status: DownloadStatus,
+    pub speed: u64,
+    pub resume_pending: bool,
+}
+
 pub fn format_size(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
     if bytes == 0 {

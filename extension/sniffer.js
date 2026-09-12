@@ -38,6 +38,13 @@
   const MEDIA_RE =
     /\.(m3u8|mpd|mp4|webm|mkv|m4v|mov|flv|wmv|mp3|m4a|aac|ogg|opus|flac)([?#].*)?$/i;
 
+  const MEDIA_QUERY_RE =
+    /[?&][^&#]*=[^&#]*\.(m3u8|mpd|mp4|webm|mkv|m4v|mov|flv|wmv|mp3|m4a|aac|ogg|opus|flac)(?:[&#]|$)/i;
+
+  function isMediaUrl(clean) {
+    return MEDIA_RE.test(clean) || MEDIA_QUERY_RE.test(clean);
+  }
+
   const candidates = new Set();
   const MAX = 50;
 
@@ -88,7 +95,8 @@
       }
       if (!/^https?:/i.test(abs)) return; // abaikan blob:, data:, file:
       const clean = abs.split("#")[0];
-      if (!MEDIA_RE.test(clean)) return;
+      if (!isMediaUrl(clean)) return;
+      return !!href && isMediaUrl(href.split("#")[0]);
       // B4a: URL yang sudah tercatat tidak mengubah isi Set — keluar lebih
       // awal supaya tidak memicu serialisasi ulang yang sia-sia.
       if (candidates.has(clean)) return;

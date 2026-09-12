@@ -322,33 +322,65 @@ function consumeSelfInitiated(url) {
   return true;
 }
 
+function isSelfInitiated(url) {
+  const now = Date.now();
+  for (const [key, expiry] of selfInitiated) {
+    if (expiry <= now) selfInitiated.delete(key);
+  }
+  return selfInitiated.has(url);
+}
+
+const handledUrls = new Map();
+
+function markHandled(url) {
+  handledUrls.set(url, Date.now() + SELF_INITIATED_TTL_MS);
+}
+
+function wasHandled(url) {
+  const now = Date.now();
+  for (const [key, expiry] of handledUrls) {
+    if (expiry <= now) handledUrls.delete(key);
+  }
+  return handledUrls.has(url);
+}
+
+function basename(path) {
+  if (!path) return null;
+  const parts = path.replace(/\\/g, "/").split("/");
+  const last = parts[parts.length - 1];
+  return last && last.includes(".") ? last : null;
+}
+
+function filenameHasInterceptedExt(filename) {
+  if (!filename) return false;
+  const lower = filename.toLowerCase();
+  const allExts = [...config.videoExtensions, ...config.fileExtensions];
+  return allExts.some((ext) => lower.endsWith(ext));
+}
+
 chrome.downloads.onCreated.addListener(async (downloadItem) => {
   if (!config.enabled || !config.interceptDownloads) return;
 
   const url = downloadItem.finalUrl || downloadItem.url;
   if (!url || url.startsWith("blob:") || url.startsWith("data:")) return;
 
-  // Jangan intercept download yang kita sendiri buat ulang (fallback)
   if (consumeSelfInitiated(url)) {
+    markHandled(url);
     return;
   }
 
-  // CATATAN (B18): saat onCreated, fileSize umumnya masih 0 dan mime kosong,
-  // jadi deteksi dalam praktiknya mengandalkan ekstensi file di URL
-  // (limitasi API chrome.downloads — bukan bug).
+  if (wasHandled(url)) return;
+
   if (!shouldInterceptUrl(url, downloadItem.fileSize, downloadItem.mime))
     return;
 
-  // Cancel Chrome download immediately to prevent partial file
+  markHandled(url);
+
   chrome.downloads.cancel(downloadItem.id, () => {
     chrome.downloads.erase({ id: downloadItem.id });
   });
 
-  let filename = null;
-  if (downloadItem.filename) {
-    const parts = downloadItem.filename.replace(/\\/g, "/").split("/");
-    filename = parts[parts.length - 1];
-  }
+  const filename = basename(downloadItem.filename);
 
   const headers = {};
   if (downloadItem.referrer) headers["Referer"] = downloadItem.referrer;
@@ -362,6 +394,43 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
     markSelfInitiated(url);
     chrome.downloads.download(opts);
   }
+});
+
+chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+  const keep = () => suggest({ filename: downloadItem.filename });
+
+  if (!config.enabled || !config.interceptDownloads) return keep();
+
+  const url = downloadItem.finalUrl || downloadItem.url;
+  if (!url || url.startsWith("blob:") || url.startsWith("data:")) return keep();
+
+  if (isSelfInitiated(url) || wasHandled(url)) return keep();
+
+  const filename = basename(downloadItem.filename);
+  const intercept =
+    shouldInterceptUrl(url, downloadItem.fileSize, downloadItem.mime) ||
+    filenameHasInterceptedExt(filename);
+
+  if (!intercept) return keep();
+
+  markHandled(url);
+  chrome.downloads.cancel(downloadItem.id, () => {
+    chrome.downloads.erase({ id: downloadItem.id });
+  });
+
+  const headers = {};
+  if (downloadItem.referrer) headers["Referer"] = downloadItem.referrer;
+
+  sendDownload(url, filename, headers).then((result) => {
+    if (!result || !result.success) {
+      const opts = { url, saveAs: true };
+      if (filename) opts.filename = filename;
+      markSelfInitiated(url);
+      chrome.downloads.download(opts);
+    }
+  });
+
+  keep();
 });
 
 function shouldInterceptUrl(url, fileSize, mimeType) {

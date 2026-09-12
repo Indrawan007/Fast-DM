@@ -543,6 +543,20 @@ impl DownloadEngine {
         }
         result
     }
+
+    pub async fn get_all_summaries(&self) -> Vec<DownloadSummary> {
+        let downloads = self.downloads.read().await;
+        let mut result = Vec::with_capacity(downloads.len());
+        for info in downloads.values() {
+            let i = info.lock().await;
+            result.push(DownloadSummary {
+                status: i.status,
+                speed: i.speed,
+                resume_pending: i.resume_pending,
+            });
+        }
+        result
+    }
 }
 
 /// Jalankan download lalu promote antrian berikutnya saat selesai

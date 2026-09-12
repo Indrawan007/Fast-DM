@@ -544,9 +544,23 @@
     // v2.10.0 (C4): ambil yang TERBARU — untuk tombol per-elemen media,
     // kandidat terakhir biasanya yang sedang diputar. Seluruh daftar tetap
     // tersedia lewat `readSniffedCandidates()` untuk popup.
-    function candidateFor() {
+    function candidateFor(media) {
       const cands = readSniffedCandidates();
-      return cands.length ? cands[cands.length - 1] : null;
+      if (!cands.length) return null;
+      const current = media.currentSrc || media.src || "";
+      if (
+        current &&
+        !current.startsWith("blob:") &&
+        !current.startsWith("data:")
+      ) {
+        const exact = cands.find((u) => u === current);
+        if (exact) return exact;
+      }
+      const streamRe = /\.(m3u8|mpd)([?#]|$)/i;
+      for (let i = cands.length - 1; i >= 0; i--) {
+        if (streamRe.test(cands[i])) return cands[i];
+      }
+      return cands[cands.length - 1];
     }
 
     document.querySelectorAll("video, audio").forEach((media) => {
@@ -590,7 +604,8 @@
         // thumbnail) yang bukan video yang sedang diputar. Sniffer hanya
         // dipakai saat src sendiri adalah halaman (.php/.html).
         const directMedia = direct && !srcIsPage ? src : null;
-        const target = directMedia || candidateFor() || window.location.href;
+        const target =
+          directMedia || candidateFor(media) || window.location.href;
         chrome.runtime.sendMessage(
           {
             action: "download",

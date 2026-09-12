@@ -612,12 +612,12 @@ pub fn build_window(
         let busy = busy_pa.clone();
         let btn = button.clone();
         let task = rt_pa.spawn(async move {
-            match batch_action(&eng.get_all_downloads().await) {
+            match batch_action(&eng.get_all_summaries().await) {
                 BatchAction::Pause => eng.pause_all().await,
                 BatchAction::Resume => eng.resume_all().await,
                 BatchAction::None => {}
             }
-            batch_action(&eng.get_all_downloads().await)
+            batch_action(&eng.get_all_summaries().await)
         });
         glib::spawn_future_local(async move {
             let result = task.await;
@@ -870,7 +870,7 @@ pub fn build_window(
                 let busy_stats = busy_ev.clone();
 
                 glib::spawn_future_local(async move {
-                    if let Ok(all) = rt.spawn(async move { eng.get_all_downloads().await }).await {
+                    if let Ok(all) = rt.spawn(async move { eng.get_all_summaries().await }).await {
                         // "Aktif" = mengunduh ATAU memproses (resolving) —
                         // konsisten dengan logika slot engine (keduanya
                         // menempati slot download bersamaan).
@@ -1009,7 +1009,7 @@ pub fn build_window(
         }
 
         let eng = engine_close.clone();
-        let all = rt_close.block_on(async move { eng.get_all_downloads().await });
+        let all = rt_close.block_on(async move { eng.get_all_summaries().await });
         let active: usize = all
             .iter()
             .filter(|d| {
@@ -1095,7 +1095,7 @@ enum BatchAction {
 
 /// Antrean dan resume/retry tertunda juga merupakan pekerjaan yang bisa dijeda.
 /// Campuran aktif+paused memilih Pause terlebih dahulu agar "Jeda Semua" benar.
-fn batch_action(downloads: &[DownloadInfo]) -> BatchAction {
+fn batch_action(downloads: &[DownloadSummary]) -> BatchAction {
     if downloads.iter().any(|d| {
         d.resume_pending
             || matches!(
@@ -1496,18 +1496,12 @@ async fn clipboard_text(tool: &'static str) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn batch_item(status: DownloadStatus, resume_pending: bool) -> DownloadInfo {
-        let mut info = DownloadInfo::new(
-            "batch".into(),
-            "unused".into(),
-            "unused".into(),
-            "unused".into(),
-            Default::default(),
-            None,
-        );
-        info.status = status;
-        info.resume_pending = resume_pending;
-        info
+    fn batch_item(status: DownloadStatus, resume_pending: bool) -> DownloadSummary {
+        DownloadSummary {
+            status,
+            speed: 0,
+            resume_pending,
+        }
     }
 
     #[test]
@@ -1536,18 +1530,16 @@ mod tests {
     fn batch_action_prioritizes_pause_for_mixed_downloads() {
         let paused = batch_item(DownloadStatus::Paused, false);
         let queued = batch_item(DownloadStatus::Queued, false);
-        assert_eq!(
-            batch_action(&[paused.clone(), queued.clone()]),
-            BatchAction::Pause
-        );
+        assert_eq!(batch_action(&[paused, queued]), BatchAction::Pause);
         assert_eq!(batch_action(&[queued, paused]), BatchAction::Pause);
     }
 
     #[test]
     fn batch_action_tracks_deferred_retry_then_manual_pause() {
         let mut info = batch_item(DownloadStatus::Error, true);
-        assert_eq!(batch_action(&[info.clone()]), BatchAction::Pause);
-        assert!(info.request_pause());
+        assert_eq!(batch_action(&[info]), BatchAction::Pause);
+        info.status = DownloadStatus::Paused;
+        info.resume_pending = false;
         assert_eq!(batch_action(&[info]), BatchAction::Resume);
     }
 
