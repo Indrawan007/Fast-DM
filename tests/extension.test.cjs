@@ -109,12 +109,39 @@ for (const failure of ["rejected", "missing", "transport"]) {
   });
 }
 
+// Event mock yang menangkap handler untuk bisa di-fire oleh test.
+function listener() {
+  let handler = null;
+  return {
+    addListener(h) {
+      handler = h;
+    },
+    fire(...args) {
+      return handler ? handler(...args) : undefined;
+    },
+  };
+}
+
 function background() {
   const badges = [];
   const requests = [];
   const logs = [];
+  const cancels = [];
+  const fallbacks = [];
   let onMessage;
   const event = { addListener() {} };
+  const downloads = {
+    onCreated: listener(),
+    onDeterminingFilename: listener(),
+    cancel: (id, callback) => {
+      cancels.push(id);
+      if (callback) callback();
+    },
+    erase: () => {},
+    download: (opts) => {
+      fallbacks.push(opts);
+    },
+  };
   const context = vm.createContext({
     URL,
     setTimeout: () => 1,
@@ -139,7 +166,7 @@ function background() {
         onChanged: event,
       },
       cookies: { getAll: async () => [] },
-      downloads: { onCreated: event },
+      downloads,
       contextMenus: { onClicked: event },
       action: {
         setBadgeText: ({ text }) => badges.push(text),
@@ -148,7 +175,7 @@ function background() {
     },
   });
   vm.runInContext(source("background.js"), context);
-  return { badges, requests, logs, onMessage, context };
+  return { badges, requests, logs, onMessage, context, downloads, cancels, fallbacks };
 }
 
 for (const outcome of ["success", "rejected", "missing", "transport"]) {
@@ -182,3 +209,120 @@ for (const outcome of ["success", "rejected", "missing", "transport"]) {
     assert.ok(b.logs.every((line) => !line.includes("private")));
   });
 }
+
+// ── v2.10.5: onDeterminingFilename (jaring kedua untuk URL query-string) ──
+
+test("onDeterminingFilename intercepts query-string downloads by resolved filename", async () => {
+  const b = background();
+  const suggested = [];
+  b.downloads.onDeterminingFilename.fire(
+    {
+      id: 7,
+      url: "https://example.com/download?id=123",
+      finalUrl: "https://example.com/download?id=123",
+      filename: "/home/user/Downloads/report.zip",
+      referrer: "https://example.com/page",
+      fileSize: 0,
+      mime: "",
+    },
+    (o) => suggested.push(o),
+  );
+  await new Promise(setImmediate);
+  assert.equal(b.cancels.length, 1, "query-string download harus di-cancel");
+  assert.equal(b.cancels[0], 7);
+  assert.equal(b.requests.length, 1, "diteruskan ke native host");
+  assert.equal(b.requests[0].message.filename, "report.zip");
+  assert.equal(b.requests[0].message.headers.Referer, "https://example.com/page");
+  assert.equal(suggested.length, 1, "suggest tetap dipanggil (anti-race)");
+  assert.equal(suggested[0].filename, "/home/user/Downloads/report.zip");
+});
+
+test("onDeterminingFilename leaves non-media downloads untouched", async () => {
+  const b = background();
+  const suggested = [];
+  b.downloads.onDeterminingFilename.fire(
+    {
+      id: 8,
+      url: "https://example.com/notes",
+      finalUrl: "https://example.com/notes",
+      filename: "/home/user/Downloads/notes.txt",
+      referrer: "",
+      fileSize: 0,
+      mime: "",
+    },
+    (o) => suggested.push(o),
+  );
+  await new Promise(setImmediate);
+  assert.equal(b.cancels.length, 0);
+  assert.equal(b.requests.length, 0);
+  assert.equal(suggested.length, 1);
+});
+
+test("onDeterminingFilename does not double-handle a URL onCreated already intercepted", async () => {
+  const b = background();
+  b.downloads.onCreated.fire({
+    id: 9,
+    url: "https://example.com/movie.mp4",
+    finalUrl: "https://example.com/movie.mp4",
+    filename: "/home/user/Downloads/movie.mp4",
+    referrer: "",
+    fileSize: 0,
+    mime: "",
+  });
+  await new Promise(setImmediate);
+  assert.equal(b.cancels.length, 1, "onCreated harus intercept movie.mp4");
+
+  const suggested = [];
+  b.downloads.onDeterminingFilename.fire(
+    {
+      id: 9,
+      url: "https://example.com/movie.mp4",
+      finalUrl: "https://example.com/movie.mp4",
+      filename: "/home/user/Downloads/movie.mp4",
+      referrer: "",
+      fileSize: 0,
+      mime: "",
+    },
+    (o) => suggested.push(o),
+  );
+  await new Promise(setImmediate);
+  assert.equal(b.cancels.length, 1, "tidak boleh cancel dua kali");
+  assert.equal(suggested.length, 1);
+});
+
+test("fallback download is not re-intercepted (no loop)", async () => {
+  const b = background();
+  b.downloads.onCreated.fire({
+    id: 10,
+    url: "https://example.com/movie.mp4",
+    finalUrl: "https://example.com/movie.mp4",
+    filename: "/home/user/Downloads/movie.mp4",
+    referrer: "",
+    fileSize: 0,
+    mime: "",
+  });
+  await new Promise(setImmediate);
+  assert.equal(b.requests.length, 1);
+  b.requests[0].callback({ success: false, error: "host down" }); // native gagal
+  await new Promise(setImmediate);
+  assert.equal(b.fallbacks.length, 1, "fallback ke Chrome di-issue");
+
+  // Unduhan fallback yang sama kini memicu onDeterminingFilename → harus dilewati.
+  const suggested = [];
+  b.downloads.onDeterminingFilename.fire(
+    {
+      id: 11,
+      url: "https://example.com/movie.mp4",
+      finalUrl: "https://example.com/movie.mp4",
+      filename: "/home/user/Downloads/movie.mp4",
+      referrer: "",
+      fileSize: 0,
+      mime: "",
+    },
+    (o) => suggested.push(o),
+  );
+  await new Promise(setImmediate);
+  assert.equal(b.cancels.length, 1, "fallback tidak boleh di-cancel lagi");
+  assert.equal(b.requests.length, 1, "tidak ada request native ekstra");
+  assert.equal(suggested.length, 1);
+});

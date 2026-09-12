@@ -38,6 +38,18 @@
   const MEDIA_RE =
     /\.(m3u8|mpd|mp4|webm|mkv|m4v|mov|flv|wmv|mp3|m4a|aac|ogg|opus|flac)([?#].*)?$/i;
 
+  // v2.10.5: MEDIA_RE menuntut ekstensi di akhir PATH, sehingga URL yang
+  // menyimpan nama media di QUERY string terlewat — mis.
+  //   https://cdn.test/download?file=video.mp4&token=…
+  //   https://cdn.test/stream?src=master.m3u8
+  // Cocokkan pula bila NILAI sebuah parameter query memuat ekstensi media.
+  const MEDIA_QUERY_RE =
+    /[?&][^&#]*=[^&#]*\.(m3u8|mpd|mp4|webm|mkv|m4v|mov|flv|wmv|mp3|m4a|aac|ogg|opus|flac)(?:[&#]|$)/i;
+
+  function isMediaUrl(clean) {
+    return MEDIA_RE.test(clean) || MEDIA_QUERY_RE.test(clean);
+  }
+
   const candidates = new Set();
   const MAX = 50;
 
@@ -88,7 +100,7 @@
       }
       if (!/^https?:/i.test(abs)) return; // abaikan blob:, data:, file:
       const clean = abs.split("#")[0];
-      if (!MEDIA_RE.test(clean)) return;
+      if (!isMediaUrl(clean)) return;
       // B4a: URL yang sudah tercatat tidak mengubah isi Set — keluar lebih
       // awal supaya tidak memicu serialisasi ulang yang sia-sia.
       if (candidates.has(clean)) return;
@@ -188,7 +200,7 @@
       // Link media langsung: cocokkan href terhadap pola, jauh lebih murah
       // daripada bangun lalu menyapu subtree.
       const href = node.getAttribute && node.getAttribute("href");
-      return !!href && MEDIA_RE.test(href.split("#")[0]);
+      return !!href && isMediaUrl(href.split("#")[0]);
     }
     if (!node.querySelector) return false;
     // Subtree baru yang memuat player — short-circuit pada kecocokan pertama.

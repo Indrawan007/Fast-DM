@@ -14,8 +14,33 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   audio terbaik (`137+bestaudio`) — sebelumnya mengunduh video bisu.
 - Deteksi URL clipboard kini mengenali `ftp:` dan `magnet:` (case-insensitive),
   bukan hanya http(s).
+- Sniffer ekstensi kini juga menangkap media yang ekstensinya tersimpan di
+  query string (mis. `…/download?file=video.mp4&token=…`), bukan hanya di
+  akhir path — sebelumnya URL semacam itu terlewat.
+- Tombol ⚡ pada pemutar non-YouTube memilih kandidat yang benar-benar milik
+  elemen media (currentSrc tepat → manifest .m3u8/.mpd terbaru → terbaru),
+  bukan sekadar kandidat terakhir global yang bisa berupa iklan/thumbnail.
+- Ekstensi menambahkan jaring kedua intersep di `onDeterminingFilename`: URL
+  unduhan tanpa ekstensi (mis. `…/download?id=123` yang mengembalikan .zip)
+  kini tetap di-intercept lewat nama file hasil Content-Disposition —
+  sebelumnya terlewat karena `fileSize`/`mime` kosong di `onCreated`.
 
 ### Performance
+
+- `--min-split-size`/`--piece-length` 1M → 512K (jalur per-proses & daemon RPC):
+  file kecil (beberapa MB) kini ter-split lebih awal sehingga ramp-up koneksi
+  lebih cepat — 1M dulu membuat bandwidth awal terbuang menunggu 1 MB pertama.
+- Batas kecepatan sub-kilobyte tidak lagi di-floor ke `1K` (overshoot ~2×):
+  `512` kini benar-benar 512 B/detik, dan pembagian ke banyak unduhan hidup
+  memakai byte persis (tidak lagi 10× overshoot).
+- Polling RPC `tellStatus` 600ms → 300ms — progress/kecepatan UI ±3.3
+  update/detik (lebih responsif).
+- Resolve nama file & penyiapan daemon RPC kini berjalan PARALEL
+  (`tokio::join!`) — dulu serial, sehingga unduhan pertama membayar
+  HEAD/GET resolver lalu spawn+probe daemon (±6 dtk) berturut-turut.
+- `get_all_downloads()` (klon penuh `DownloadInfo`: URL + header + save_dir)
+  tidak lagi dipakai untuk polling UI; jalur statistik/Jeda Semua/dialog tutup
+  memakai `get_all_summaries()` (snapshot `Copy` status+kecepatan).
 
 - Fragmen HLS/DASH (m3u8/mpd) diunduh paralel via `--concurrent-fragments`
   (mengikuti "Koneksi per server", clamp 1–16) — default yt-dlp 1 fragmen
@@ -36,6 +61,9 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 - `merge_output_format` (mkv vs mp4), pemasangan audio pada format video-only,
   flag `--seed-time=0` pada argumen daemon, dan deteksi clipboard ftp/magnet.
+- `resolve_speed_limit` sub-kilobyte (byte persis, bukan floor 1K).
+- Ekstensi: intersep `onDeterminingFilename` (URL query-string, non-media
+  dilewati, anti-double-handle, anti-loop fallback).
 
 ## [2.10.4] - 2026-09-10
 

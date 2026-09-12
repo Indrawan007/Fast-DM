@@ -322,33 +322,84 @@ function consumeSelfInitiated(url) {
   return true;
 }
 
+/** true = fallback kita sendiri, TANPA menghapus (peek). Dipakai
+ * onDeterminingFilename agar tidak bersaing hapus dengan onCreated — urutan
+ * kedua event bisa berbeda-beda per unduhan. */
+function isSelfInitiated(url) {
+  const now = Date.now();
+  for (const [key, expiry] of selfInitiated) {
+    if (expiry <= now) selfInitiated.delete(key);
+  }
+  return selfInitiated.has(url);
+}
+
+// URL yang SUDAH diputuskan (di-intercept ke native host ATAU dibiarkan jalan
+// di Chrome karena fallback). Dipakai onDeterminingFilename & onCreated agar
+// satu unduhan tidak diproses dua kali — dua event itu bisa tumpang tindih.
+const handledUrls = new Map();
+
+function markHandled(url) {
+  handledUrls.set(url, Date.now() + SELF_INITIATED_TTL_MS);
+}
+
+function wasHandled(url) {
+  const now = Date.now();
+  for (const [key, expiry] of handledUrls) {
+    if (expiry <= now) handledUrls.delete(key);
+  }
+  return handledUrls.has(url);
+}
+
+/// Nama file terakhir dari path (dipakai onCreated & onDeterminingFilename).
+function basename(path) {
+  if (!path) return null;
+  const parts = path.replace(/\\/g, "/").split("/");
+  const last = parts[parts.length - 1];
+  return last && last.includes(".") ? last : null;
+}
+
+/// Apakah nama file (hasil resolve Chrome dari Content-Disposition) berakhiran
+/// ekstensi yang masuk daftar intersep?
+function filenameHasInterceptedExt(filename) {
+  if (!filename) return false;
+  const lower = filename.toLowerCase();
+  const allExts = [...config.videoExtensions, ...config.fileExtensions];
+  return allExts.some((ext) => lower.endsWith(ext));
+}
+
 chrome.downloads.onCreated.addListener(async (downloadItem) => {
   if (!config.enabled || !config.interceptDownloads) return;
 
   const url = downloadItem.finalUrl || downloadItem.url;
   if (!url || url.startsWith("blob:") || url.startsWith("data:")) return;
 
-  // Jangan intercept download yang kita sendiri buat ulang (fallback)
+  // Jangan intercept download yang kita sendiri buat ulang (fallback) —
+  // biarkan jalan di Chrome; tandai handled agar onDeterminingFilename skip.
   if (consumeSelfInitiated(url)) {
+    markHandled(url);
     return;
   }
 
+  // Sudah diputuskan onDeterminingFilename (bila menyala lebih dulu)?
+  if (wasHandled(url)) return;
+
   // CATATAN (B18): saat onCreated, fileSize umumnya masih 0 dan mime kosong,
   // jadi deteksi dalam praktiknya mengandalkan ekstensi file di URL
-  // (limitasi API chrome.downloads — bukan bug).
+  // (limitasi API chrome.downloads — bukan bug). Kasus URL tanpa ekstensi
+  // (query-string download) ditangani onDeterminingFilename di bawah.
   if (!shouldInterceptUrl(url, downloadItem.fileSize, downloadItem.mime))
     return;
+
+  // Tandai SEBELUM cancel: onDeterminingFilename untuk unduhan yang sama
+  // (bila sempat menyala) harus melewatkannya — jangan intercept ganda.
+  markHandled(url);
 
   // Cancel Chrome download immediately to prevent partial file
   chrome.downloads.cancel(downloadItem.id, () => {
     chrome.downloads.erase({ id: downloadItem.id });
   });
 
-  let filename = null;
-  if (downloadItem.filename) {
-    const parts = downloadItem.filename.replace(/\\/g, "/").split("/");
-    filename = parts[parts.length - 1];
-  }
+  const filename = basename(downloadItem.filename);
 
   const headers = {};
   if (downloadItem.referrer) headers["Referer"] = downloadItem.referrer;
@@ -362,6 +413,52 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
     markSelfInitiated(url);
     chrome.downloads.download(opts);
   }
+});
+
+// v2.10.5: jaring kedua untuk unduhan yang di onCreated belum jelas — URL
+// tanpa ekstensi (mis. .../download?id=123 yang mengembalikan .zip) di mana
+// fileSize/mime masih kosong di onCreated. onDeterminingFilename dipanggil
+// SETELAH Chrome menyelesaikan nama file (dari Content-Disposition), sehingga
+// ekstensi final (dan kadang mime/ukuran) sudah tersedia.
+chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+  const keep = () => suggest({ filename: downloadItem.filename });
+
+  if (!config.enabled || !config.interceptDownloads) return keep();
+
+  const url = downloadItem.finalUrl || downloadItem.url;
+  if (!url || url.startsWith("blob:") || url.startsWith("data:"))
+    return keep();
+
+  // Fallback kita sendiri / sudah diputuskan onCreated → biarkan Chrome lanjut.
+  if (isSelfInitiated(url) || wasHandled(url)) return keep();
+
+  const filename = basename(downloadItem.filename);
+  const intercept =
+    shouldInterceptUrl(url, downloadItem.fileSize, downloadItem.mime) ||
+    filenameHasInterceptedExt(filename);
+
+  if (!intercept) return keep();
+
+  markHandled(url);
+  // Cancel + teruskan ke native host. keep() tetap dipanggil supaya bila
+  // cancel gagal/racing, unduhan lanjut dengan nama final yang benar.
+  chrome.downloads.cancel(downloadItem.id, () => {
+    chrome.downloads.erase({ id: downloadItem.id });
+  });
+
+  const headers = {};
+  if (downloadItem.referrer) headers["Referer"] = downloadItem.referrer;
+
+  sendDownload(url, filename, headers).then((result) => {
+    if (!result || !result.success) {
+      const opts = { url, saveAs: true };
+      if (filename) opts.filename = filename;
+      markSelfInitiated(url);
+      chrome.downloads.download(opts);
+    }
+  });
+
+  keep();
 });
 
 function shouldInterceptUrl(url, fileSize, mimeType) {

@@ -140,8 +140,11 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
             conn_per_server(config.max_connections)
         ),
         format!("--split={}", config.max_connections.max(1)),
-        "--min-split-size=1M".into(),
-        "--piece-length=1M".into(),
+        // v2.10.5 (perf): 1M dulu membuat file kecil (beberapa MB) baru ter-split
+        // setelah 1 MB — ramp-up koneksi lambat, bandwidth awal terbuang.
+        // 512K memungkinkan split lebih awal tanpa fragmentasi berlebih.
+        "--min-split-size=512K".into(),
+        "--piece-length=512K".into(),
         format!("--timeout={}", config.timeout),
         "--connect-timeout=15".into(),
         "--lowest-speed-limit=1K".into(),
@@ -467,7 +470,13 @@ pub(crate) fn resolve_speed_limit(total: &str, live_share: usize) -> String {
     }
     let per = total_bytes / (live_share.max(1) as u64);
     if per < 1024 {
-        return "1K".into();
+        // v2.10.5 (perf): kembalikan byte/detik PERSIS — aria2 menerima angka
+        // tanpa satuan = byte/detik. Floor lama "1K" membuat limit sub-kilobyte
+        // melonjak: total "512" (512 B/s) menjadi "1K" (1024 B/s) ≈ 2×
+        // overshoot, dan pembagian ke banyak unduhan hidup bisa overshoot
+        // lebih jauh (mis. "1K" dibagi 10 → tiap proses tetap "1K" = 10×).
+        // Jaga agar tidak 0 (0 artinya tanpa batas).
+        return format!("{}", per.max(1));
     }
     format!("{:.0}K", per as f64 / 1024.0)
 }
@@ -1116,10 +1125,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_speed_limit_floor_at_1k() {
-        // Limit kecil / banyak unduhan → minimum 1K
-        assert_eq!(resolve_speed_limit("1K", 10), "1K");
-        assert_eq!(resolve_speed_limit("512", 1), "1K"); // 512 B/s → floor
+    fn resolve_speed_limit_sub_kilobyte_exact() {
+        // v2.10.5: limit <1KB tidak lagi di-floor ke "1K" (yang overshoot 2×).
+        // Byte persis dikirim — aria2 menerima angka tanpa satuan = byte/detik.
+        assert_eq!(resolve_speed_limit("512", 1), "512"); // 512 B/s, bukan 1K
+        assert_eq!(resolve_speed_limit("1K", 10), "102"); // 1024/10 = 102 B/s per proses
+        assert_eq!(resolve_speed_limit("2", 3), "1"); // pembagian <1 B → jangan 0 (0 = tanpa batas)
     }
 
     #[test]

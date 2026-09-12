@@ -27,6 +27,12 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - Unduhan magnet langsung selesai (seeding dinonaktifkan lewat `--seed-time=0`).
 - Format video-only dari dialog kualitas otomatis dipasangkan dengan audio.
 - Dialog kualitas muncul seketika; daftar format nyata menyusul secara asinkron.
+- `--min-split-size` 512K mempercepat ramp-up koneksi file kecil; polling RPC
+  300ms membuat UI lebih responsif; resolve nama file & penyiapan daemon
+  berjalan paralel.
+- Ekstensi: intersep `onDeterminingFilename` menangkap URL query-string tanpa
+  ekstensi; sniffer mengenali media ber-ekstensi di query string; tombol ⚡
+  memilih kandidat media yang benar-benar diputar.
 
 ## Stabilitas v2.10.4
 

@@ -543,6 +543,26 @@ impl DownloadEngine {
         }
         result
     }
+
+    /// v2.10.5 (perf): snapshot ringan untuk polling UI — statistik, tombol
+    /// "Jeda Semua", dialog tutup hanya butuh status/kecepatan/resume_pending,
+    /// bukan `DownloadInfo` utuh (URL + header + save_dir + pesan). Hindari
+    /// klon penuh yang diulang tiap refresh (statistik bisa ±2×/detik saat
+    /// unduhan aktif). Pemanggil yang butuh info lengkap (restore session,
+    /// IPC `list`) tetap memakai `get_all_downloads`.
+    pub async fn get_all_summaries(&self) -> Vec<DownloadSummary> {
+        let downloads = self.downloads.read().await;
+        let mut result = Vec::with_capacity(downloads.len());
+        for info in downloads.values() {
+            let i = info.lock().await;
+            result.push(DownloadSummary {
+                status: i.status,
+                speed: i.speed,
+                resume_pending: i.resume_pending,
+            });
+        }
+        result
+    }
 }
 
 /// Jalankan download lalu promote antrian berikutnya saat selesai

@@ -541,12 +541,31 @@
 
     // Kandidat ditulis sniffer.js di MAIN world lewat DOM (ISOLATED world
     // tidak berbagi objek JS dengan MAIN world — window.* tidak bisa dibaca).
-    // v2.10.0 (C4): ambil yang TERBARU — untuk tombol per-elemen media,
-    // kandidat terakhir biasanya yang sedang diputar. Seluruh daftar tetap
-    // tersedia lewat `readSniffedCandidates()` untuk popup.
-    function candidateFor() {
+    //
+    // v2.10.5: kandidat TERAKHIR global sering kali bukan milik elemen ini —
+    // bisa iklan/thumbnail permintaan lain. Pilih kandidat untuk elemen
+    // `media` ini secara sadar:
+    //   1) URL yang persis = currentSrc/src elemen (pasti sedang diputar),
+    //   2) manifest streaming (.m3u8/.mpd) TERBARU — paling berguna untuk
+    //      yt-dlp (segmen/fragmen justru tidak ingin diunduh langsung),
+    //   3) fallback: kandidat terbaru.
+    function candidateFor(media) {
       const cands = readSniffedCandidates();
-      return cands.length ? cands[cands.length - 1] : null;
+      if (!cands.length) return null;
+      const current = media.currentSrc || media.src || "";
+      if (
+        current &&
+        !current.startsWith("blob:") &&
+        !current.startsWith("data:")
+      ) {
+        const exact = cands.find((u) => u === current);
+        if (exact) return exact;
+      }
+      const streamRe = /\.(m3u8|mpd)([?#]|$)/i;
+      for (let i = cands.length - 1; i >= 0; i--) {
+        if (streamRe.test(cands[i])) return cands[i];
+      }
+      return cands[cands.length - 1];
     }
 
     document.querySelectorAll("video, audio").forEach((media) => {
@@ -592,7 +611,7 @@
         const directMedia = direct && !srcIsPage ? src : null;
         const target =
           directMedia ||
-          candidateFor() ||
+          candidateFor(media) ||
           window.location.href;
         chrome.runtime.sendMessage(
           {

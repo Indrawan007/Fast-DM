@@ -279,8 +279,10 @@ pub(crate) fn adduri_options(
     o.insert("connect-timeout".into(), json!("15"));
     o.insert("max-tries".into(), json!(cfg.retry_count.to_string()));
     o.insert("retry-wait".into(), json!(cfg.retry_wait.to_string()));
-    o.insert("min-split-size".into(), json!("1M"));
-    o.insert("piece-length".into(), json!("1M"));
+    // v2.10.5 (perf): sama dengan jalur per-proses — 512K mempercepat ramp-up
+    // koneksi pada file kecil (1M dulu = split baru mulai setelah 1 MB).
+    o.insert("min-split-size".into(), json!("512K"));
+    o.insert("piece-length".into(), json!("512K"));
     // v2.9.3: koneksi/segmen mengikuti Pengaturan SAAT unduhan ditambahkan —
     // dulu hanya nilai global daemon (dibaca sekali saat daemon lahir), jadi
     // perubahan "Koneksi per server" tidak berlaku sampai app di-restart.
@@ -692,11 +694,25 @@ pub async fn download(
     // pre-check disk (identik dengan pipeline per-proses; tanpa ini "file
     // .php" bisa masuk antrean RPC dan nama Content-Disposition/redirect
     // terlewat).
-    if !is_mag {
-        if let Err(msg) = aria2::resolve_filename(&info, cfg).await {
-            fail(&info, &tx, msg).await;
-            return RpcOutcome::Done;
+    //
+    // v2.10.5 (perf): resolve & penyiapan daemon dulu SERIAL — unduhan pertama
+    // membayar HEAD/GET resolver LALU spawn+probe daemon (±6 dtk worst case)
+    // berturut-turut. Keduanya independen → jalankan PARALEL (tokio::join!).
+    let resolve_fut = async {
+        if is_mag {
+            Ok(())
+        } else {
+            aria2::resolve_filename(&info, cfg).await
         }
+    };
+    let (resolve_res, daemon_res) = tokio::join!(resolve_fut, ensure_daemon(cfg));
+
+    if let Err(msg) = resolve_res {
+        fail(&info, &tx, msg).await;
+        return RpcOutcome::Done;
+    }
+
+    if !is_mag {
         let (size, dir) = {
             let i = info.lock().await;
             (i.total_size, i.save_dir.clone())
@@ -722,7 +738,7 @@ pub async fn download(
         }
     }
 
-    let rpc = match ensure_daemon(cfg).await {
+    let rpc = match daemon_res {
         Ok(r) => r,
         Err(e) => {
             if is_mag {
@@ -870,7 +886,10 @@ pub async fn download(
         return RpcOutcome::Done;
     }
 
-    let mut tick = tokio::time::interval(Duration::from_millis(600));
+    // v2.10.5 (perf): 600ms dulu membuat progress/kecepatan UI terasa lambat
+    // (±1.6 update/detik). 300ms = ±3.3 update/detik — lebih responsif, biaya
+    // tellStatus loopback dapat diabaikan.
+    let mut tick = tokio::time::interval(Duration::from_millis(300));
     loop {
         tick.tick().await;
 
@@ -1124,8 +1143,8 @@ mod tests {
         assert_eq!(o["connect-timeout"], "15");
         assert_eq!(o["max-tries"], "5");
         assert_eq!(o["retry-wait"], "3");
-        assert_eq!(o["min-split-size"], "1M");
-        assert_eq!(o["piece-length"], "1M");
+        assert_eq!(o["min-split-size"], "512K");
+        assert_eq!(o["piece-length"], "512K");
         assert_eq!(o["allow-overwrite"], "false"); // auto_file_renaming default true
         assert!(o.get("out").is_none());
         assert!(o.get("cookie").is_none());

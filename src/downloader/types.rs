@@ -204,6 +204,18 @@ impl DownloadInfo {
     }
 }
 
+/// v2.10.5 (perf): snapshot ringan untuk polling UI (statistik, "Jeda Semua",
+/// dialog tutup). `get_all_downloads()` mengklon `DownloadInfo` UTUH — URL,
+/// header, save_dir, pesan error — padahal jalur ini hanya butuh status &
+/// kecepatan. Snapshot `Copy` ini menghindari alokasi besar yang diulang tiap
+/// refresh (hingga ±2×/detik saat unduhan aktif).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DownloadSummary {
+    pub status: DownloadStatus,
+    pub speed: u64,
+    pub resume_pending: bool,
+}
+
 pub fn format_size(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
     if bytes == 0 {
