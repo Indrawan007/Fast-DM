@@ -1141,8 +1141,8 @@ mod tests {
         assert_eq!(o["connect-timeout"], "15");
         assert_eq!(o["max-tries"], "5");
         assert_eq!(o["retry-wait"], "3");
-        assert_eq!(o["min-split-size"], "1M");
-        assert_eq!(o["piece-length"], "1M");
+        assert_eq!(o["min-split-size"], "512K");
+        assert_eq!(o["piece-length"], "512K");
         assert_eq!(o["allow-overwrite"], "false"); // auto_file_renaming default true
         assert!(o.get("out").is_none());
         assert!(o.get("cookie").is_none());
