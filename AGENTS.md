@@ -1,7 +1,7 @@
 # AGENTS.md — Panduan AI/Contributor Fast-DM
 
-Version: 0.2.0 (disinkronkan dengan arsitektur kode nyata — sebelumnya dokumen
-ini menggambarkan desain lama "aria2 JSON-RPC + src/hls" yang **tidak** dipakai)
+Version: 0.2.1 (0.2.0: disinkronkan dengan arsitektur kode nyata; 0.2.1:
+menambahkan aturan "tampilkan kode lama + kode baru" pada setiap perbaikan)
 
 ## 1. Role & Objective
 
@@ -90,6 +90,10 @@ fast-dm --native  ──1 baris JSON──►  Unix socket (Config::ipc_socket_p
 
 ## 6. Keluaran Standar
 
+- Saat melakukan perbaikan/perubahan kode, SELALU tampilkan kode lama
+  (SEBELUM) dan kode baru (SESUDAH) berdampingan — jangan hanya memberi diff
+  atau menjelaskan secara verbal. Ini memudahkan reviewer memverifikasi apa
+  yang benar-benar berubah.
 - Sajikan kode lengkap, tidak terpotong; sertakan test untuk perilaku baru.
 - Untuk perubahan user-facing, perbarui `README.md` + `CHANGELOG.md` di commit yang sama.
 - Jangan menyimpan dependensi/artefak besar di repo; log sensitif (token URL)
