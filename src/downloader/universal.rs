@@ -1,7 +1,8 @@
 use super::types::*;
 use crate::config::Config;
+use crate::downloader::aria2::conn_per_server;
 use crate::downloader::youtube::{
-    cookie_args, network_args, output_template, quality_args, run_ytdlp,
+    cookie_args, merge_output_format, network_args, output_template, quality_args, run_ytdlp,
 };
 use std::process::Command;
 use std::sync::Arc;
@@ -85,6 +86,11 @@ pub async fn download(
 
     let mut cmd = vec!["yt-dlp".to_string()];
     cmd.extend(quality_args(quality.as_deref()));
+    // v2.10.5 (perf): fragmen HLS/DASH paralel (lihat youtube.rs).
+    cmd.extend([
+        "--concurrent-fragments".into(),
+        conn_per_server(config.max_connections).to_string(),
+    ]);
     cmd.extend([
         "--output".into(),
         output_template(&save_dir, &filename),
@@ -97,9 +103,9 @@ pub async fn download(
         "--socket-timeout".into(),
         "15".into(),
         "--retries".into(),
-        "5".into(),
+        config.retry_count.to_string(),
         "--merge-output-format".into(),
-        "mp4".into(),
+        merge_output_format(quality.as_deref()).into(),
     ]);
 
     // Cookies (dari cookies.txt / browser) + Referer & header kustom extension

@@ -213,6 +213,12 @@ pub(crate) fn daemon_args(port: u16, secret: &str, cfg: &Config) -> Vec<String> 
         format!("--file-allocation={}", cfg.file_allocation),
         format!("--user-agent={}", aria2::CHROME_UA),
         "--summary-interval=0".into(),
+        // v2.10.5 (perf): nonaktifkan seeding magnet. Default aria2 adalah
+        // --seed-ratio=1.0, sehingga task magnet tetap berstatus "active"
+        // (seeding) SELAMANYA setelah file lengkap — UI tampak "MENGUNDUH"
+        // tak kunjung selesai. --seed-time=0 memaksa selesai begitu unduhan
+        // selesai (tetap bisa upload saat masih mengunduh).
+        "--seed-time=0".into(),
         // lanjutkan dari control file lintas sesi app; cek hash utk yang lengkap
         "--continue=true".into(),
     ];
@@ -1095,6 +1101,8 @@ mod tests {
         assert!(j.contains("--rpc-listen-port=6800"));
         assert!(j.contains("--rpc-secret=sec"));
         assert!(j.contains("--auto-save-interval=20"));
+        // v2.10.5: seeding wajib nonaktif — magnet harus "selesai", bukan seeding.
+        assert!(j.contains("--seed-time=0"));
         assert!(j.contains("--max-overall-download-limit=5M"));
         assert!(j.contains("--check-certificate=false"));
         assert!(j.contains("--all-proxy=http://127.0.0.1:8118"));

@@ -14,7 +14,7 @@ pub const QUALITIES: &[QualityOption] = &[
     QualityOption {
         id: "best_mp4",
         label: "Kualitas Terbaik (MP4)",
-        desc: "Resolusi tertinggi",
+        desc: "MP4 terbaik (umumnya ≤1080p)",
     },
     QualityOption {
         id: "2160p",
@@ -58,6 +58,53 @@ pub const QUALITIES: &[QualityOption] = &[
     },
 ];
 
+/// Handle dialog kualitas — dipakai untuk menyuntikkan format nyata
+/// (`yt-dlp -J`) ke dialog yang SUDAH tampil. v2.10.5: ini menghilangkan
+/// jeda ±20 dtk sebelum dialog muncul (sebelumnya dialog menunggu fetch
+/// format selesai dulu).
+pub struct QualityDialogHandle {
+    quality_box: gtk4::Box,
+    selected: std::rc::Rc<std::cell::RefCell<String>>,
+    first_btn: Option<CheckButton>,
+    formats_added: bool,
+}
+
+impl QualityDialogHandle {
+    /// Tambah "Format lengkap dari situs" (hasil `yt-dlp -J`). Aman dipanggil
+    /// kapan pun — bila dialog sudah ditutup, widget-nya hanya terlepas dari
+    /// layar sehingga append menjadi no-op yang tidak berbahaya.
+    pub fn append_formats(&mut self, formats: &[crate::downloader::youtube::FormatOption]) {
+        if formats.is_empty() {
+            return;
+        }
+        if !self.formats_added {
+            let hdr = Label::new(Some(&format!(
+                "Format lengkap dari situs ({}):",
+                formats.len()
+            )));
+            hdr.set_halign(gtk4::Align::Start);
+            hdr.set_margin_top(8);
+            hdr.add_css_class("detail-label");
+            self.quality_box.append(&hdr);
+            self.formats_added = true;
+        }
+        for f in formats {
+            let (radio, row) = quality_row(
+                &self.selected,
+                self.first_btn.as_ref(),
+                &f.id,
+                &f.label,
+                &f.desc,
+                false,
+            );
+            if self.first_btn.is_none() {
+                self.first_btn = Some(radio.clone());
+            }
+            self.quality_box.append(&row);
+        }
+    }
+}
+
 /// Dialog pemilihan kualitas ala IDM.
 ///
 /// v2.3.2 (M4): pola callback event-driven — `on_ok(String)` dipanggil dari
@@ -70,14 +117,16 @@ pub const QUALITIES: &[QualityOption] = &[
 /// sudah mengklaimnya hilang bersama `QualityOption`/`QUALITIES`, tapi
 /// atributnya tertinggal. Fungsinya dipanggil dari dua tempat di
 /// `gui/window.rs` (alur "Unduh" dan "Simpan Sebagai…").
+/// v2.10.5: mengembalikan `QualityDialogHandle` — dialog tampil langsung
+/// dengan preset, lalu pemanggil mengisi format nyata via `append_formats`.
 pub fn show_quality_dialog<F>(
     parent: &Window,
     title: &str,
     uploader: &str,
     duration_str: &str,
-    formats: Vec<crate::downloader::youtube::FormatOption>,
     on_ok: F,
-) where
+) -> QualityDialogHandle
+where
     F: FnOnce(String) + 'static,
 {
     let dialog = Dialog::with_buttons(
@@ -157,34 +206,6 @@ pub fn show_quality_dialog<F>(
         quality_box.append(&row);
     }
 
-    // v2.6.0 (D6): format NYATA dari situs (hasil `yt-dlp -J` yang diambil
-    // window.rs sebelum dialog dibuka). Kosong = fetch gagal/tidak diminta →
-    // dialog persis seperti versi sebelumnya (hanya preset).
-    if !formats.is_empty() {
-        let hdr = Label::new(Some(&format!(
-            "Format lengkap dari situs ({}):",
-            formats.len()
-        )));
-        hdr.set_halign(gtk4::Align::Start);
-        hdr.set_margin_top(8);
-        hdr.add_css_class("detail-label");
-        quality_box.append(&hdr);
-        for f in &formats {
-            let (radio, row) = quality_row(
-                &selected,
-                first_btn.as_ref(),
-                &f.id,
-                &f.label,
-                &f.desc,
-                false,
-            );
-            if first_btn.is_none() {
-                first_btn = Some(radio.clone());
-            }
-            quality_box.append(&row);
-        }
-    }
-
     scroll.set_child(Some(&quality_box));
     content.append(&scroll);
 
@@ -233,6 +254,13 @@ pub fn show_quality_dialog<F>(
         d.close();
     });
     dialog.show();
+
+    QualityDialogHandle {
+        quality_box,
+        selected,
+        first_btn,
+        formats_added: false,
+    }
 }
 
 /// Satu baris dialog: radio (se-group) + nama + detail. TEKS BIASA, bukan
