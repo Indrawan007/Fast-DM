@@ -1533,7 +1533,7 @@ mod tests {
         let paused = batch_item(DownloadStatus::Paused, false);
         let queued = batch_item(DownloadStatus::Queued, false);
         assert_eq!(
-            batch_action(&[paused.clone(), queued.clone()]),
+            batch_action(&[paused, queued]),
             BatchAction::Pause
         );
         assert_eq!(batch_action(&[queued, paused]), BatchAction::Pause);
