@@ -240,6 +240,17 @@ pub(crate) fn quality_args(quality: Option<&str>) -> Vec<String> {
             "--audio-quality".into(),
             "0".into(),
         ],
+        // v2.10.5 (bugfix): preset default dialog "best_mp4" mengandung digit
+        // ('4') sehingga LOLOS `looks_like_format_id` di bawah dan menjadi
+        // "--format best_mp4/best" — selector yang TIDAK dikenali yt-dlp
+        // (unduhan jatuh ke /best = bisa WebM/AV1 yang tidak bisa di-mux ke
+        // mp4, atau langsung error). Petakan eksplisit ke selector MP4 yang
+        // sama dengan default. TANPA arm ini preset "Kualitas Terbaik (MP4)"
+        // — pilihan default dialog & overlay — tidak pernah berfungsi.
+        Some("best_mp4") => vec![
+            "--format".into(),
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best".into(),
+        ],
         // v2.6.0 (D6): id format NYATA dari yt-dlp ("137", "137+140") —
         // diteruskan sebagai selector, dengan fallback /best agar tetap jalan
         // bila id tidak tersedia saat eksekusi (mis. dialog basi).
@@ -1075,6 +1086,21 @@ mod tests {
         assert!(args.contains(&"mp3".to_string()));
         assert!(args.contains(&"--audio-quality".to_string()));
         assert!(args.contains(&"0".to_string())); // best quality
+    }
+
+    #[test]
+    fn quality_args_best_mp4_preset_uses_real_mp4_selector() {
+        // Regresi v2.10.5: "best_mp4" (preset default dialog & overlay)
+        // mengandung digit '4' sehingga dulu lolos `looks_like_format_id`
+        // dan menjadi "--format best_mp4/best" — selector tak dikenal yt-dlp.
+        // Sekarang harus memakai selector MP4 eksplisit, bukan passthrough.
+        let args = quality_args(Some("best_mp4"));
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "--format");
+        assert_eq!(
+            args[1],
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+        );
     }
 
     #[test]

@@ -1065,7 +1065,27 @@ pub fn sanitize_filename(name: &str) -> String {
     if cleaned.is_empty() {
         format!("download_{}", chrono::Utc::now().timestamp())
     } else if cleaned.len() > 200 {
-        // Truncate on a char boundary — raw byte slicing panics on multi-byte UTF-8
+        // v2.10.5 (bugfix): pertahankan ekstensi saat memotong. Potongan mentah
+        // 200 char bisa membuang ".mp4"/".zip"/".mkv" di ujung nama panjang
+        // (Content-Disposition dari server) sehingga file tersimpan tanpa
+        // ekstensi dan tak dikenali. Bila ekstensi akhir pendek (≤10 char
+        // alfanumerik), potong STEM-nya saja lalu tempel ekstensi kembali.
+        if let Some(dot) = cleaned.rfind('.') {
+            let ext = &cleaned[dot + 1..];
+            let ext_ok = !ext.is_empty()
+                && ext.len() <= 10
+                && ext.chars().all(|c| c.is_ascii_alphanumeric());
+            let stem_len = 200usize.saturating_sub(ext.len() + 1);
+            if ext_ok && stem_len >= 1 {
+                let mut end = stem_len;
+                while !cleaned.is_char_boundary(end) {
+                    end -= 1;
+                }
+                return format!("{}.{}", &cleaned[..end], ext);
+            }
+        }
+        // Fallback: potong di char boundary (raw byte slicing panics on
+        // multi-byte UTF-8) — untuk nama tanpa ekstensi yang bisa dipertahankan.
         let mut end = 200;
         while !cleaned.is_char_boundary(end) {
             end -= 1;
@@ -1597,6 +1617,32 @@ mod tests {
         let s = sanitize_filename(with_ctrl);
         assert!(!s.contains('\x00'));
         assert!(!s.contains('\x01'));
+    }
+
+    #[test]
+    fn sanitize_filename_truncate_preserves_extension() {
+        // v2.10.5: nama > 200 char harus tetap menyimpan ekstensi akhir —
+        // potongan mentah dulu membuang ".mp4" dan menyimpan file tanpa ekstensi.
+        let long = format!("{}.mp4", "a".repeat(250));
+        let s = sanitize_filename(&long);
+        assert!(s.len() <= 200, "len {s}");
+        assert!(s.ends_with(".mp4"), "ekstensi harus dipertahankan: {s:?}");
+        // Stem dipotong, bukan dibiarkan 250 char.
+        assert!(!s.starts_with(&"a".repeat(250)));
+
+        let long_zip = format!("{}.tar.gz", "b".repeat(250));
+        let s2 = sanitize_filename(&long_zip);
+        assert!(s2.ends_with(".gz"), "multi-ekstensi: ekstensi akhir disimpan: {s2:?}");
+    }
+
+    #[test]
+    fn sanitize_filename_truncate_without_extension_still_bounded() {
+        // Nama panjang tanpa titik (atau ekstensi > 10 char) → potong biasa,
+        // tetap ≤ 200 byte dan tidak panic pada UTF-8 multi-byte.
+        let long_no_ext = "x".repeat(300);
+        let s = sanitize_filename(&long_no_ext);
+        assert_eq!(s.len(), 200);
+        assert_eq!(s, "x".repeat(200));
     }
 
     // ── extract_filename_from_url ──

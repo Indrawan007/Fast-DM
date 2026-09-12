@@ -24,6 +24,13 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   unduhan tanpa ekstensi (mis. `…/download?id=123` yang mengembalikan .zip)
   kini tetap di-intercept lewat nama file hasil Content-Disposition —
   sebelumnya terlewat karena `fileSize`/`mime` kosong di `onCreated`.
+- Preset "Kualitas Terbaik (MP4)" (`best_mp4`) kini dipetakan ke selector MP4
+  yang benar. Sebelumnya string itu lolos `looks_like_format_id` (mengandung
+  digit '4') dan menjadi `--format best_mp4/best` — selector tak dikenal
+  yt-dlp — padahal ini pilihan DEFAULT dialog & overlay.
+- `sanitize_filename` mempertahankan ekstensi saat memotong nama > 200 char.
+  Sebelumnya potongan mentah bisa membuang `.mp4`/`.zip`/`.mkv` sehingga file
+  tersimpan tanpa ekstensi.
 
 ### Performance
 
@@ -56,12 +63,21 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   diisi asinkron setelah `yt-dlp -J` selesai — menghilangkan jeda ±20 dtk
   sebelum dialog muncul.
 - Deskripsi preset "Kualitas Terbaik (MP4)" diluruskan ("umumnya ≤1080p").
+- Mode native host tidak lagi menjalankan `check_and_setup()` (scan profil
+  browser + glob + baca/tulis manifest) di setiap pesan. Native host adalah
+  proses sekali-pakai per unduhan; manifest awal dibuat oleh GUI /
+  `setup-browser.sh` dan origin baru ditangani aksi `register` — jadi scan
+  filesystem redundan itu hanya dibuang dari jalur panas.
 
 ### Tests
 
 - `merge_output_format` (mkv vs mp4), pemasangan audio pada format video-only,
   flag `--seed-time=0` pada argumen daemon, dan deteksi clipboard ftp/magnet.
 - `resolve_speed_limit` sub-kilobyte (byte persis, bukan floor 1K).
+- `quality_args` preset `best_mp4` memakai selector MP4 eksplisit (regresi
+  passthrough format-ID).
+- `sanitize_filename` mempertahankan ekstensi saat truncate > 200 char, dan
+  tetap terbatas/aman UTF-8 untuk nama tanpa ekstensi.
 - Ekstensi: intersep `onDeterminingFilename` (URL query-string, non-media
   dilewati, anti-double-handle, anti-loop fallback).
 

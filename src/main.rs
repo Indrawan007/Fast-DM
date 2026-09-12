@@ -33,15 +33,23 @@ fn main() {
 
     let cli = Cli::parse();
 
-    // Auto-setup browser NMH manifests (aman dilakukan di kedua mode)
-    if let Err(e) = native_host::setup::check_and_setup() {
-        tracing::warn!("NMH setup: {}", e);
-    }
-
+    // Mode native host = proses pendek yang di-spawn Chrome SEKALI per pesan
+    // (satu unduhan dari extension = satu proses). Setup manifest browser
+    // (scan profil + glob + baca/tulis manifest) TIDAK perlu diulang tiap
+    // pesan: manifest awal sudah dibuat saat GUI/setup-browser.sh berjalan
+    // (tanpa manifest, Chrome tidak akan bisa men-spawn native host sama
+    // sekali), dan penambahan origin baru ditangani aksi `register` secara
+    // langsung. Jadi jalankan setup HANYA di mode GUI — memangkas scan
+    // filesystem yang redundan dari jalur panas setiap unduhan.
     if cli.native {
         // Native messaging host mode
         native_host::run();
         return;
+    }
+
+    // Auto-setup browser NMH manifests
+    if let Err(e) = native_host::setup::check_and_setup() {
+        tracing::warn!("NMH setup: {}", e);
     }
 
     // GUI mode — propagate inisialisasi error (bukan panic).
