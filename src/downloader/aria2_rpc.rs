@@ -562,14 +562,11 @@ async fn forget(rpc: &Rpc, gid: &str) -> Result<(), String> {
 
     // Idempotent terhadap race dengan supervisor lain: bila salah satu
     // operasi berhasil, task tidak lagi dapat berjalan/meninggalkan result.
-    if remove.is_ok() || cleanup.is_ok() {
-        Ok(())
-    } else {
-        Err(format!(
-            "forceRemove: {}; removeDownloadResult: {}",
-            remove.unwrap_err(),
-            cleanup.unwrap_err()
-        ))
+    match (remove, cleanup) {
+        (Ok(_), _) | (_, Ok(_)) => Ok(()),
+        (Err(remove), Err(cleanup)) => Err(format!(
+            "forceRemove: {remove}; removeDownloadResult: {cleanup}"
+        )),
     }
 }
 
@@ -1177,11 +1174,13 @@ mod tests {
 
     #[test]
     fn adduri_options_follows_user_settings() {
-        let mut cfg = Config::default();
-        cfg.auto_file_renaming = false;
-        cfg.timeout = 60;
-        cfg.retry_count = 9;
-        cfg.retry_wait = 7;
+        let cfg = Config {
+            auto_file_renaming: false,
+            timeout: 60,
+            retry_count: 9,
+            retry_wait: 7,
+            ..Config::default()
+        };
         let o = adduri_options("/dl", None, None, &HashMap::new(), &cfg);
         assert_eq!(o["allow-overwrite"], "true");
         assert_eq!(o["timeout"], "60");
@@ -1196,8 +1195,10 @@ mod tests {
         // Regresi: dulu koneksi/split hanya nilai global daemon (dibaca sekali
         // saat daemon lahir) dan `auto-file-renaming` tidak pernah dikirim,
         // sehingga perilaku jalur RPC bisa menyimpang dari jalur CLI.
-        let mut cfg = Config::default();
-        cfg.max_connections = 8;
+        let cfg = Config {
+            max_connections: 8,
+            ..Config::default()
+        };
         let o = adduri_options("/dl", None, None, &HashMap::new(), &cfg);
         assert_eq!(o["max-connection-per-server"], "8");
         assert_eq!(o["split"], "8");
@@ -1209,8 +1210,10 @@ mod tests {
     fn adduri_options_clamps_connection_per_server_but_not_split() {
         // aria2 menolak --max-connection-per-server > 16; Pengaturan
         // mengizinkan sampai 32 → nilai harus di-clamp, split tetap penuh.
-        let mut cfg = Config::default();
-        cfg.max_connections = 32;
+        let cfg = Config {
+            max_connections: 32,
+            ..Config::default()
+        };
         let o = adduri_options("/dl", None, None, &HashMap::new(), &cfg);
         assert_eq!(o["max-connection-per-server"], "16");
         assert_eq!(o["split"], "32");
@@ -1220,9 +1223,11 @@ mod tests {
     fn adduri_options_proxy_and_tls_are_per_uri() {
         // Daemon bisa yatim dari sesi sebelumnya dengan Pengaturan lama →
         // proxy & check-certificate dikirim per-URI.
-        let mut cfg = Config::default();
-        cfg.proxy_url = "  socks5://127.0.0.1:1080  ".into();
-        cfg.verify_tls = false;
+        let cfg = Config {
+            proxy_url: "  socks5://127.0.0.1:1080  ".into(),
+            verify_tls: false,
+            ..Config::default()
+        };
         let o = adduri_options("/dl", None, None, &HashMap::new(), &cfg);
         assert_eq!(o["all-proxy"], "socks5://127.0.0.1:1080");
         assert_eq!(o["check-certificate"], "false");
@@ -1235,9 +1240,11 @@ mod tests {
 
     #[test]
     fn global_options_core_carries_limit_and_concurrency() {
-        let mut cfg = Config::default();
-        cfg.max_overall_speed = "2M".into();
-        cfg.max_concurrent = 5;
+        let cfg = Config {
+            max_overall_speed: "2M".into(),
+            max_concurrent: 5,
+            ..Config::default()
+        };
         let g = global_options_core(&cfg);
         assert_eq!(g["max-overall-download-limit"], "2M");
         assert_eq!(g["max-concurrent-downloads"], "5");
@@ -1245,8 +1252,10 @@ mod tests {
 
     #[test]
     fn global_options_core_normalizes_empty_limit_to_zero() {
-        let mut cfg = Config::default();
-        cfg.max_overall_speed = "   ".into();
+        let mut cfg = Config {
+            max_overall_speed: "   ".into(),
+            ..Config::default()
+        };
         assert_eq!(global_options_core(&cfg)["max-overall-download-limit"], "0");
         cfg.max_overall_speed = String::new();
         assert_eq!(global_options_core(&cfg)["max-overall-download-limit"], "0");
@@ -1254,13 +1263,15 @@ mod tests {
 
     #[test]
     fn global_options_extended_syncs_settings_to_live_daemon() {
-        let mut cfg = Config::default();
-        cfg.max_connections = 32;
-        cfg.timeout = 45;
-        cfg.retry_count = 2;
-        cfg.retry_wait = 4;
-        cfg.verify_tls = false;
-        cfg.proxy_url = " http://127.0.0.1:8080 ".into();
+        let mut cfg = Config {
+            max_connections: 32,
+            timeout: 45,
+            retry_count: 2,
+            retry_wait: 4,
+            verify_tls: false,
+            proxy_url: " http://127.0.0.1:8080 ".into(),
+            ..Config::default()
+        };
         let g = global_options_extended(&cfg);
         assert_eq!(g["max-connection-per-server"], "16"); // clamp aria2
         assert_eq!(g["split"], "32");
