@@ -429,9 +429,7 @@ pub(crate) fn available_bytes(blocks_available: u64, fragment_size: u64, block_s
 /// Cek ruang disk tersedia untuk direktori tujuan. Gagal cek → izinkan (jangan blokir).
 /// `pub(crate)`: dipakai jalur RPC (`aria2_rpc.rs`, B2.2) sebelum `addUri`.
 pub(crate) fn has_space(dir: &str, needed: u64) -> bool {
-    // 427
     match nix::sys::statvfs::statvfs(std::path::Path::new(dir)) {
-        // 428
         Ok(stat) => {
             let avail = available_bytes(
                 stat.blocks_available(),
@@ -441,7 +439,7 @@ pub(crate) fn has_space(dir: &str, needed: u64) -> bool {
             needed <= avail
         }
         Err(_) => true,
-    } // ← BARIS INI YANG HILANG (4 spasi, menutup `match`)
+    }
 }
 
 /// v2.9.3: `--max-connection-per-server` aria2 hanya menerima 1–16; nilai di
