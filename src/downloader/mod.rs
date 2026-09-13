@@ -668,7 +668,7 @@ pub fn is_supported_scheme(url: &str) -> bool {
 /// `.m3u8`/`.mpd` SENGAJA tidak ada di sini: manifest HLS/DASH harus lewat
 /// yt-dlp supaya segmennya di-merge benar (lihat `wants_quality_dialog`).
 ///
-/// v2.11.0: daftar DIPERLUAS ke 300+ jenis file — semua kategori umum
+/// v2.11.0: daftar DIPERLUAS ke 297 jenis file — semua kategori umum
 /// (video, audio, gambar, arsip, dokumen, installer, font, 3D, VM, dll).
 /// Test `extension_intercept_list_is_covered` memastikan extension JS tetap
 /// selaras dengan daftar ini.
@@ -983,68 +983,68 @@ pub(crate) const DIRECT_FILE_EXTENSIONS: &[&str] = &[
 ];
 
 /// Cache HashSet untuk lookup O(1) ekstensi — dibangun sekali, dipakai di
-/// `is_direct_file_url`. Menghemat CPU dibanding iterasi linear 300+ ekstensi
+/// `is_direct_file_url`. Menghemat CPU dibanding iterasi linear 297 ekstensi
 /// tiap URL (dulu O(n), kini O(1) setelah ekstrak ekstensi).
 static DIRECT_EXT_SET: LazyLock<std::collections::HashSet<&'static str>> =
     LazyLock::new(|| DIRECT_FILE_EXTENSIONS.iter().copied().collect());
+
+/// Bagian PATH dari sebuah URL — authority (`user:pass@host:port`) dibuang.
+///
+/// v2.11.1 (F2): ini inti perbaikan salah-klasifikasi host telanjang. Tanpa
+/// pembuangan authority, segmen terakhir `"https://x.com"` adalah `"x.com"`,
+/// dan karena `.com` ada di `DIRECT_FILE_EXTENSIONS` (executable DOS) sebuah
+/// homepage biasa dianggap file langsung → dikirim ke aria2, bukan ke resolver
+/// universal. URL yang hanya terdiri dari authority kini menghasilkan path
+/// kosong (→ bukan file langsung).
+///
+/// URL tanpa `"://"` dikembalikan apa adanya: input yang belum dinormalisasi
+/// (`"file.mp4"`, `"host/dir/file.zip"`) tetap diperlakukan sebagai path.
+/// Kontrak pemanggil: URL yang sampai ke `is_direct_file_url` sudah lolos
+/// `is_supported_scheme`, jadi selalu berskema http/https/ftp.
+pub(crate) fn url_path_part(url: &str) -> &str {
+    let Some(scheme_end) = url.find("://") else {
+        return url;
+    };
+    let after_authority = &url[scheme_end + 3..];
+    match after_authority.find('/') {
+        Some(i) => &after_authority[i..],
+        None => "",
+    }
+}
 
 /// URL file langsung (punya ekstensi file/media) → langsung ke aria2 tanpa
 /// lewat yt-dlp. HLS/DASH (m3u8/mpd) tetap ke yt-dlp agar di-merge benar.
 ///
 /// v2.11.0: dioptimalkan — ekstrak ekstensi file dari path URL lalu cek
-/// HashSet O(1), bukan scan linear 300+ `ends_with`. Juga handle compound
-/// `.tar.gz` via fallback suffix scan hanya bila lookup cepat gagal (jarang).
+/// HashSet O(1), bukan scan linear `ends_with`.
+///
+/// v2.11.1 (F2/F8): authority dibuang lebih dulu (`url_path_part`) sehingga
+/// host tidak pernah dibaca sebagai nama file, dan fallback full-scan
+/// `ends_with` DIHAPUS — cabang itu tidak terjangkau lagi: ujung string yang
+/// di-scan adalah ujung segmen file itu sendiri, jadi apa pun yang bisa
+/// cocok di sana sudah cocok lewat lookup HashSet di bawah.
 pub fn is_direct_file_url(url: &str) -> bool {
-    // Potong fragment & query
-    let path = url
-        .split('#')
-        .next()
-        .unwrap_or(url)
-        .split('?')
-        .next()
-        .unwrap_or(url);
-    let lower = path.to_ascii_lowercase();
+    // Potong fragment & query (bisa muncul di mana pun), lalu buang authority.
+    let no_fragment = url.split('#').next().unwrap_or(url);
+    let no_query = no_fragment.split('?').next().unwrap_or(no_fragment);
+    let lower = url_path_part(no_query).to_ascii_lowercase();
 
-    // Cepat: ambil nama file terakhir setelah '/'
+    // Nama file = segmen path terakhir. Tanpa titik → bukan file langsung.
     let file_part = lower.rsplit('/').next().unwrap_or(&lower);
-    // Jika tidak ada titik, bukan file langsung
-    if !file_part.contains('.') {
+    let Some(dot) = file_part.rfind('.') else {
         return false;
+    };
+
+    // Ekstensi setelah titik terakhir (".zip"), lalu compound dua level
+    // (".tar.gz") bila yang pertama tidak dikenal — dibatasi 2 level agar
+    // tetap O(1) dan hemat CPU.
+    if DIRECT_EXT_SET.contains(&file_part[dot..]) {
+        return true;
     }
-    // Ekstrak ekstensi sederhana (setelah titik terakhir)
-    if let Some(dot) = file_part.rfind('.') {
-        let ext = &file_part[dot..];
-        if DIRECT_EXT_SET.contains(ext) {
-            return true;
-        }
-        // Compound fallback: cek apakah path berakhir dengan ekstensi panjang
-        // seperti `.tar.gz` yang sudah ter-cover oleh `.gz` tapi juga untuk
-        // kasus `.appimage` etc — scan hanya bila fast path gagal.
-        // Batasi ke 2 level titik untuk hemat CPU.
-        if let Some(dot2) = file_part[..dot].rfind('.') {
-            let ext2 = &file_part[dot2..];
-            // ext2 seperti `.tar.gz` tidak ada di set, tapi `.gz` sudah dicek;
-            // untuk jaga-jaga cek suffix 2-level bila ada yang menambah `.tar.gz`
-            // eksplisit di masa depan.
-            if DIRECT_EXT_SET.contains(ext2) {
-                return true;
-            }
-        }
+    match file_part[..dot].rfind('.') {
+        Some(dot2) => DIRECT_EXT_SET.contains(&file_part[dot2..]),
+        None => false,
     }
-    // Fallback terakhir: scan suffix (untuk URL yang tidak punya '/' atau aneh)
-    // tapi hanya untuk ekstensi panjang ≥4 char agar tidak boros.
-    // Ini menjaga kompatibilitas dengan test lama yang mengandalkan ends_with.
-    if lower.len() > 4 {
-        // Hanya cek 30 ekstensi paling umum bila fast path gagal — hemat CPU.
-        // Untuk 100% kompatibilitas, tetap fallback ke full scan tapi ini
-        // jarang terjadi (hanya URL tanpa '/' atau tanpa titik di file_part).
-        for ext in DIRECT_FILE_EXTENSIONS.iter() {
-            if ext.len() >= 4 && lower.ends_with(ext) {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// Cari download Queued tertua dan jalankan jika ada slot kosong
@@ -1857,6 +1857,55 @@ mod tests {
         assert!(!is_direct_file_url("https://x.com/"));
     }
 
+    // ── v2.11.1 (F2): host telanjang bukan nama file ──
+
+    #[test]
+    fn url_path_part_drops_scheme_and_authority() {
+        assert_eq!(url_path_part("https://x.com/a/b.zip"), "/a/b.zip");
+        assert_eq!(url_path_part("https://x.com/"), "/");
+        // Authority saja → path kosong (inilah yang membuat host telanjang
+        // tidak lagi dibaca sebagai nama file).
+        assert_eq!(url_path_part("https://x.com"), "");
+        // userinfo + port ikut terbuang; query BUKAN urusan fungsi ini
+        // (dipotong pemanggil sebelum sampai ke sini).
+        assert_eq!(url_path_part("http://u:p@x.com:81/f.bin?y=1"), "/f.bin?y=1");
+        assert_eq!(url_path_part("http://[::1]:8080/d.iso"), "/d.iso");
+        // Tanpa "://" → apa adanya (input belum dinormalisasi).
+        assert_eq!(url_path_part("x.com/f.bin"), "x.com/f.bin");
+        assert_eq!(url_path_part("file.bin"), "file.bin");
+    }
+
+    #[test]
+    fn is_direct_file_url_rejects_bare_host() {
+        // F2: ".com" ada di daftar (executable DOS), sedangkan segmen terakhir
+        // URL tanpa path adalah HOST-nya — jadi semua ini dulu "true".
+        for url in [
+            "https://x.com",
+            "http://example.org",
+            "https://cdn.example.com",
+            "https://sub.domain.com",
+            "https://x.com:8080",
+            "https://user:pass@host.com",
+        ] {
+            assert!(!is_direct_file_url(url), "{url} = host, bukan file");
+        }
+        // Path file yang sesungguhnya tetap terdeteksi, termasuk saat ada
+        // userinfo/port di authority.
+        assert!(is_direct_file_url("https://cdn.example.com/a.zip"));
+        assert!(is_direct_file_url("https://user:pass@host.com:8080/a.zip"));
+        assert!(is_direct_file_url("https://x.com/game.com")); // .com SEBAGAI file
+    }
+
+    #[test]
+    fn is_direct_file_url_scheme_less_path_still_works() {
+        // Kontrak: URL yang sampai ke sini sudah lolos is_supported_scheme.
+        // Bentuk tanpa skema tetap diperlakukan sebagai path (bukan authority)
+        // supaya pemanggil internal/defensif tidak berubah perilaku.
+        assert!(is_direct_file_url("x.com/file.mp4"));
+        assert!(is_direct_file_url("file.mp4"));
+        assert!(!is_direct_file_url("x.com/watch"));
+    }
+
     // ── is_supported_scheme (v2.9.1: magnet wajib lolos gate add_download) ──
 
     #[test]
@@ -2278,6 +2327,26 @@ mod tests {
         out
     }
 
+    /// Ambil alternatif `(a|b|c)` dari deklarasi `const <decl> = /…/` di sumber
+    /// JS, dikembalikan sebagai `.a`, `.b`, `.c`.
+    ///
+    /// Pencarian di-anchor pada nama deklarasi supaya grup alternation lain di
+    /// file yang sama tidak ikut terbaca — `content.js` juga punya `streamRe`
+    /// yang hanya berisi `m3u8|mpd`.
+    fn js_regex_alt_items(src: &str, decl: &str) -> Vec<String> {
+        let anchor = format!("const {decl} =");
+        let start = src
+            .find(&anchor)
+            .unwrap_or_else(|| panic!("JS: deklarasi `{anchor}` tidak ditemukan"));
+        let body = &src[start..];
+        let open = body.find('(').expect("deklarasi regex tanpa '('");
+        let rest = &body[open + 1..];
+        // Item alternation tidak pernah berisi kurung bersarang, jadi ')'
+        // pertama pasti penutup grup itu.
+        let close = rest.find(')').expect("alternation regex tanpa ')'");
+        rest[..close].split('|').map(|s| format!(".{s}")).collect()
+    }
+
     #[test]
     fn extension_intercept_list_is_covered() {
         // Invarian yang sebenarnya penting: APA PUN yang di-intercept browser
@@ -2309,6 +2378,84 @@ mod tests {
             missing.is_empty(),
             "extension/background.js meng-intercept ekstensi yang tidak dikenal \
              is_direct_file_url (tambahkan ke DIRECT_FILE_EXTENSIONS): {missing:?}"
+        );
+    }
+
+    #[test]
+    fn extension_media_lists_are_identical() {
+        // v2.11.1 (F3): empat daftar "format media" di sisi extension dulu hanya
+        // dijaga komentar "selaras dengan sniffer & background" — dan klaim itu
+        // salah: `videoExts` di content.js cuma 59 entri (27 format audio hilang)
+        // sementara sniffer & background 86. Akibatnya tombol "Pindai" di popup
+        // tidak menawarkan link audio yang justru sudah tertangkap sniffer.
+        // Test ini mengubah komentar jadi invarian yang bisa gagal.
+        let sniffer = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/extension/sniffer.js"));
+        let content = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/extension/content.js"));
+        let background = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/extension/background.js"
+        ));
+
+        let media_re = js_regex_alt_items(sniffer, "MEDIA_RE");
+        let media_query = js_regex_alt_items(sniffer, "MEDIA_QUERY_RE");
+        let dom_scan = js_regex_alt_items(content, "videoExts");
+        let intercept = js_array_items(background, "videoExtensions");
+
+        // Jaring pengaman parser: bila bentuk file JS berubah sehingga ekstraksi
+        // diam-diam menghasilkan daftar pendek, test harus gagal di sini, bukan
+        // lolos palsu karena membandingkan dua daftar sama-sama kosong.
+        for (name, list) in [
+            ("sniffer.js MEDIA_RE", &media_re),
+            ("sniffer.js MEDIA_QUERY_RE", &media_query),
+            ("content.js videoExts", &dom_scan),
+            ("background.js videoExtensions", &intercept),
+        ] {
+            assert!(
+                list.len() >= 80,
+                "{name}: hanya {} entri terbaca — pola ekstraksi tidak cocok lagi \
+                 dengan bentuk file JS-nya",
+                list.len()
+            );
+        }
+
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v.dedup();
+            v
+        };
+        let acuan = sorted(media_re);
+        assert_eq!(sorted(media_query), acuan, "MEDIA_QUERY_RE ≠ MEDIA_RE");
+        assert_eq!(
+            sorted(dom_scan),
+            acuan,
+            "content.js videoExts ≠ sniffer.js MEDIA_RE"
+        );
+        assert_eq!(
+            sorted(intercept),
+            acuan,
+            "background.js videoExtensions ≠ sniffer.js MEDIA_RE"
+        );
+
+        // Semua format media yang di-intercept browser harus dikenal Rust sebagai
+        // file langsung, KECUALI manifest HLS/DASH yang sengaja tetap lewat
+        // yt-dlp agar segmennya di-merge benar.
+        let hls_only = [".m3u8", ".mpd"];
+        let unknown: Vec<&String> = acuan
+            .iter()
+            .filter(|e| !hls_only.contains(&e.as_str()))
+            .filter(|e| !DIRECT_FILE_EXTENSIONS.contains(&e.as_str()))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "format media di extension tidak dikenal is_direct_file_url \
+             (tambahkan ke DIRECT_FILE_EXTENSIONS): {unknown:?}"
+        );
+
+        assert_eq!(
+            acuan.len(),
+            86,
+            "jumlah format media berubah dari 86 — bila disengaja, perbarui \
+             angka ini beserta komentar/CHANGELOG terkait"
         );
     }
 

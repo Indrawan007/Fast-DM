@@ -5,7 +5,6 @@ use crate::gui::css;
 use crate::gui::download_row::DownloadRow;
 use crate::gui::youtube_dialog;
 
-use glib;
 use gtk4::gdk::{ContentFormats, DragAction};
 use gtk4::prelude::*;
 use gtk4::{

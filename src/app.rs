@@ -121,8 +121,9 @@ mod tests {
     ///
     /// Test instantiasi runtime di test env tidak aman (Runtime + Box::leak
     /// interaksi dengan test runner tidak deterministik), jadi kita hanya
-    /// verifikasi signature di sini. Smoke test untuk AppInit::try_new()
-    /// ada di integration test (lihat `tests/app_init.rs` jika ada).
+    /// verifikasi signature di sini. `AppInit` private sehingga tidak bisa
+    /// di-smoke-test dari `tests/`; bila kelak butuh uji runtime nyata,
+    /// export helper khusus test (bukan memanggil `try_new` langsung).
     #[test]
     fn app_init_signature_returns_result() {
         // Force compiler untuk verifikasi signature try_new() = Result

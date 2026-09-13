@@ -5,7 +5,12 @@ cd "$(dirname "$0")/.."
 
 VER=$(sed -n '/^\[package\]/,/^\[/{s/^version *= *"\(.*\)".*/\1/p;}' Cargo.toml | head -1)
 echo "==> Building fast-dm $VER"
-cargo build --release
+# --locked: pakai Cargo.lock apa adanya, sama seperti CI (ci.yml "Build release
+# binary") dan release.yml ("cargo test --locked"). Tanpa ini cargo boleh
+# memperbarui Cargo.lock diam-diam, sehingga .deb bisa dibangun dari resolusi
+# dependensi yang tidak pernah diuji CI -- dan perubahan Cargo.lock yang tak
+# ter-commit itu baru ketahuan setelah paket jadi.
+cargo build --release --locked
 
 PKG="build/fast-dm_${VER}_amd64"
 rm -rf "$PKG"

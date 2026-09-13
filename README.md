@@ -17,9 +17,35 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 🌐 **Proxy global** (HTTP/SOCKS5, kredensial di URL) — satu kolom di Pengaturan, berlaku untuk aria2 & yt-dlp
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 
+## Stabilitas v2.11.1
+
+Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.
+
+- **Homepage tidak lagi dianggap file** — URL tanpa path (`https://x.com`,
+  `https://cdn.example.com`, `https://sub.domain.com`, `https://x.com:8080`,
+  `https://user:pass@host.com`) dulu lolos sebagai "file langsung" karena
+  segmen terakhirnya adalah _host_, dan `.com` (executable DOS) memang ada di
+  daftar ekstensi. Halaman seperti itu kini benar-benar lewat resolver
+  universal (yt-dlp) lebih dulu. Ekstensi dibaca dari **path** saja: helper
+  `url_path_part` membuang `skema://user:pass@host:port`. File `.com` sungguhan
+  (`https://x.com/game.com`) tetap terdeteksi.
+- **Tombol "Pindai" menangkap semua format audio** — daftar media
+  `content.js` disamakan dengan `sniffer.js`/`background.js` (59 → 86; 27
+  format audio yang hilang ikut tertangkap), dan `href` berfragment
+  (`.../v.mp4#t=10`) kini juga terdeteksi.
+- **CI hijau** — 4 test extension yang gagal sejak v2.11.0 diperbaiki (mock
+  `chrome.downloads.onDeterminingFilename` belum ada): suite Node kini 8/8.
+- **Versi rilis dijaga test** — `tests/version_sync.rs` memastikan
+  `Cargo.toml`, `Cargo.lock`, dan `extension/manifest.json` selalu sama, jadi
+  bump versi yang lupa satu berkas gagal di `cargo test`, bukan diam-diam
+  terkirim. `packaging/build-deb.sh` kini memakai `--locked` seperti CI.
+- Kebersihan: 11 test di `youtube.rs` masuk ke `#[cfg(test)]` (tidak lagi ikut
+  terkompilasi ke build rilis), cabang fallback mati dihapus, komentar basi dan
+  typo diperbaiki.
+
 ## Stabilitas v2.11.0
 
-- **300+ jenis file** dikenali langsung → aria2 (video, audio, gambar, arsip, dokumen, installer, VM, torrent, font, 3D, DB) — dulu hanya ~50
+- **297 jenis file** dikenali langsung → aria2 (video, audio, gambar, arsip, dokumen, installer, VM, torrent, font, 3D, DB) — dulu hanya ~50
 - **Extension intercept** diperluas: 86 video + 213 file (total 299 inc. m3u8/mpd) → semua jenis file dari situs apapun ter-intercept
 - **Sniffer media** 15 → 86 format (m3u8/mpd/mp4/mkv/webm/flv/avi/mov/mp3/flac/ogg/opus/dll)
 - **RAM hemat**: disk cache 64M→32M + `--enable-mmap=true`
@@ -134,7 +160,7 @@ bash packaging/build-deb.sh
 - `src/native_host/` — Chrome Native Messaging wrapper
 - `src/gui/` — GTK4 window & dialog
 - `extension/` — Manifest V3 extension (background, content, sniffer, popup)
-- `tests/` — integration test (filesystem terisolasi via `std::env::temp_dir()` + override XDG)
+- `tests/` — integration test: `find_cookies.rs` (filesystem terisolasi via `std::env::temp_dir()` + override `XDG_CONFIG_HOME`, serial lewat `ENV_LOCK`), `version_sync.rs` (versi `Cargo.toml`/`Cargo.lock`/`manifest.json` harus sama; tanpa I/O runtime — berkas disematkan `include_str!`), `extension.test.cjs` (Node 22+, mock `chrome.*` lewat `vm`)
 
 Lihat [CHANGELOG.md](CHANGELOG.md) untuk history rilis.
 

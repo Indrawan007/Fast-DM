@@ -34,7 +34,7 @@ pub(crate) const CHROME_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/
 /// Jalur unduhan per-proses (`aria2c` sebagai subprocess).
 ///
 /// v2.9.0 (B2.2): file langsung (http/https/ftp) UTAMA kini lewat daemon RPC
-/// (`aria2_rpc.rs`); jalur ini tetap dipakai sebagai (a) FALBACK saat daemon
+/// (`aria2_rpc.rs`); jalur ini tetap dipakai sebagai (a) FALLBACK saat daemon
 /// RPC tak tersedia, dan (b) fallback resolver universal (yt-dlp gagal).
 pub async fn download(
     info: Arc<Mutex<DownloadInfo>>,
@@ -229,8 +229,13 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
 /// punya tiga bug nyata:
 /// 1. pause/cancel hanya dicek saat baris output baru tiba — aria2c yang stall
 ///    (tanpa output) membuat tombol user tidak berdampak sampai ada baris lagi;
-/// 2. `child.wait()` tanpa batas — child yang tidak merespons SIGTERM (pause) membekukan thread blocking selamanya;
-/// 3. thread khusus stderr yang bisa bocor saat panic.Sekarang: `ChildLines` (baca cancellation-safe), ticker 500ms untuk cek tatus walau child diam, wait PAUSA terbatas 30 dtk dengan eskalasi SIGKILL, dan `kill_on_drop` sebagai jaring pengaman bila future seluruhnya di-drop.
+/// 2. `child.wait()` tanpa batas — child yang tidak merespons SIGTERM (pause)
+///    membekukan thread blocking selamanya;
+/// 3. thread khusus stderr yang bisa bocor saat panic.
+///
+/// Sekarang: `ChildLines` (baca cancellation-safe), ticker 500ms untuk cek
+/// status walau child diam, wait pause terbatas 30 dtk dengan eskalasi SIGKILL,
+/// dan `kill_on_drop` sebagai jaring pengaman bila future seluruhnya di-drop.
 async fn run_aria2c(
     cmd: Vec<String>,
     info: Arc<Mutex<DownloadInfo>>,

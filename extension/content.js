@@ -758,9 +758,18 @@
       // mengumpulkannya (hingga 50 entri).
       readSniffedCandidates().forEach((u) => videos.add(u));
 
-      // v2.11.0: daftar DIPERLUAS — selaras dengan sniffer & background
+      // v2.11.1 (F3): daftar DISAMAKAN persis dengan `MEDIA_RE` di sniffer.js
+      // (86 format). Sebelumnya hanya 59 — 27 format audio hilang (.3ga .a52
+      // .aif .aifc .alac .amr .au .aup .aup3 .awb .cda .dts .m4b .m4r .mid
+      // .midi .mp1 .mp2 .mpc .mpp .ra .shn .tak .tta .wavpack .weba .wv),
+      // padahal komentar di atasnya sudah mengklaim "selaras dengan sniffer".
+      // Akibatnya tombol "Pindai" di popup tidak menawarkan link audio yang
+      // justru tertangkap sniffer. Suffix ikut disamakan `([?#].*)?$` agar href
+      // berfragment (`.../v.mp4#t=10`) juga terdeteksi.
+      // Dijaga test Rust `extension_media_lists_are_identical` — jangan ubah
+      // salah satu daftar tanpa mengubah yang lain.
       const videoExts =
-        /\.(mp4|mkv|webm|avi|mov|m4v|flv|wmv|3gp|3g2|ts|mts|m2ts|vob|mpg|mpeg|mpe|m2v|mp2v|f4v|asf|asx|rm|rmvb|divx|xvid|ogv|mxf|roq|nsv|amv|yuv|dv|hdv|qt|fli|flc|mod|tod|vro|dat|wmx|wvx|ogm|ogx|mp3|m4a|aac|ogg|opus|flac|wav|wma|aiff|ape|ac3|mka|m3u8|mpd)(\?|$)/i;
+        /\.(3g2|3ga|3gp|a52|aac|ac3|aif|aifc|aiff|alac|amr|amv|ape|asf|asx|au|aup|aup3|avi|awb|cda|dat|divx|dts|dv|f4v|flac|flc|fli|flv|hdv|m2ts|m2v|m3u8|m4a|m4b|m4r|m4v|mid|midi|mka|mkv|mod|mov|mp1|mp2|mp2v|mp3|mp4|mpc|mpd|mpe|mpeg|mpg|mpp|mts|mxf|nsv|ogg|ogm|ogv|ogx|opus|qt|ra|rm|rmvb|roq|shn|tak|tod|ts|tta|vob|vro|wav|wavpack|weba|webm|wma|wmv|wmx|wv|wvx|xvid|yuv)([?#].*)?$/i;
       document.querySelectorAll("a[href]").forEach((a) => {
         if (videoExts.test(a.href)) videos.add(a.href);
       });

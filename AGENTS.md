@@ -81,9 +81,13 @@ fast-dm --native  ──1 baris JSON──►  Unix socket (Config::ipc_socket_p
 - **Bug fix:** `+0.0.1` · **Fitur:** `+0.1.0` · **Breaking:** `+1.0.0`.
 - Satu sumber versi: `Cargo.toml` — `extension/manifest.json` WAJIB disamakan
   manual saat rilis; GUI membaca versi via `env!("CARGO_PKG_VERSION")`.
+  Sejak v2.11.1 ketiga sumber (plus entri `fast-dm` di `Cargo.lock`, yang ikut
+  menentukan lolos-tidaknya `--locked`) dijaga `tests/version_sync.rs`: bump
+  versi yang lupa satu berkas gagal di `cargo test`, bukan diam-diam terkirim.
 - `EXT_ID` = extension ID stabil (dipin lewat `key` manifest) — dipakai
   `allowed_origins`; JANGAN diganti sembarangan.
-- Rilis `.deb` HANYA via `packaging/build-deb.sh` (versi dibaca dari Cargo.toml).
+- Rilis `.deb` HANYA via `packaging/build-deb.sh` (versi dibaca dari Cargo.toml;
+  sejak v2.11.1 build-nya `--locked`, sama seperti CI dan `release.yml`).
   Tiada lagi `build.sh` (dihapus: postinst-nya memasang wildcard origin = lubang keamanan).
 - `src/native_host/setup.rs` satu-satunya yang menulis manifest NMH saat runtime
   (register extension ID unpacked) — perluas daftar browser di satu tempat saja.

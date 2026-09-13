@@ -139,6 +139,13 @@ function background() {
         onChanged: event,
       },
       cookies: { getAll: async () => [] },
+      // onDeterminingFilename wajib ada: background.js mendaftarkan listener
+      // di top level (baris ~664), jadi tanpa mock ini seluruh service script
+      // gagal dimuat dan SEMUA test badge error sebelum sempat berjalan.
+      // API ini Chrome-only — extension memang hanya menarget Chromium
+      // (manifest MV3 + `key`, setup-browser.sh: chrome/brave/edge).
+      downloads: { onCreated: event, onDeterminingFilename: event },
+
       downloads: { onCreated: event },
       contextMenus: { onClicked: event },
       action: {

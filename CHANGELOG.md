@@ -3,6 +3,105 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.11.1] - 2026-09-13
+
+Rilis perbaikan (bugfix `+0.0.1` sesuai AGENTS.md §5): tidak ada fitur baru dan
+tidak ada perubahan antarmuka. Isinya empat perbaikan (satu di antaranya
+membuat CI hijau lagi), tiga pembersihan, dan **dua penjaga baru berbasis test**
+supaya kelas bug yang sama — daftar yang melenceng diam-diam, versi yang lupa
+disinkronkan — tidak bisa terulang tanpa ketahuan.
+
+### Fixed
+
+- **CI hijau lagi: 4 test extension yang gagal di v2.11.0 (F15)** —
+  `node --test tests/extension.test.cjs` (dijalankan job `extension-tests` di
+  `.github/workflows/ci.yml`) gagal 4/8 pada checkout bersih karena mock
+  `chrome.downloads` di harness tidak menyediakan `onDeterminingFilename`,
+  padahal `background.js` mendaftarkan listener-nya di top level: seluruh
+  service script error saat dimuat (`TypeError: Cannot read properties of
+undefined (reading 'addListener')`), jadi keempat test badge gagal sebelum
+  sempat menguji apa pun. Mock dilengkapi — bukan `background.js` yang diubah,
+  karena API itu Chrome-only dan extension ini memang hanya menarget Chromium
+  (manifest MV3 + `key`, `setup-browser.sh` memasang ke chrome/brave/edge).
+  Hasil: **8/8 lulus** (sebelumnya 4/8).
+- **URL host telanjang tidak lagi dianggap file langsung (F2)** — `https://x.com`,
+  `http://example.org`, `https://cdn.example.com`, `https://sub.domain.com`,
+  `https://x.com:8080`, `https://user:pass@host.com` dulu lolos
+  `is_direct_file_url`: segmen terakhir URL tanpa path adalah _host_-nya, dan
+  `.com` (executable DOS) memang ada di daftar 297 ekstensi. Akibatnya halaman
+  biasa dikirim langsung ke aria2, bukan ke resolver universal (yt-dlp) yang
+  tepat untuk halaman. Sekarang authority (`user:pass@host:port`) dibuang lebih
+  dulu lewat helper baru `url_path_part`, sehingga URL tanpa path menghasilkan
+  path kosong. File sungguhan tetap terdeteksi — termasuk `.com` sebagai nama
+  file (`https://x.com/game.com`) dan path di balik userinfo/port
+  (`https://user:pass@host.com:8080/a.zip`).
+- **Cabang fallback mati dihapus (F8)** — loop `ends_with` di akhir
+  `is_direct_file_url` tidak terjangkau sejak v2.11.0: string yang di-scan
+  adalah `lower` yang ujungnya identik dengan ujung segmen file yang sudah
+  dicek lewat `HashSet`, jadi apa pun yang cocok di sana sudah cocok lebih dulu.
+  Komentarnya juga salah (menyebut "30 ekstensi paling umum" padahal yang
+  diiterasi 297). Dihapus — perilaku identik, jalur lebih pendek.
+- **Tombol "Pindai" kini menawarkan semua format audio (F3)** — `videoExts` di
+  `extension/content.js` hanya berisi 59 ekstensi padahal `MEDIA_RE`/
+  `MEDIA_QUERY_RE` di `sniffer.js` dan `videoExtensions` di `background.js`
+  sudah 86, sementara komentar di atasnya mengklaim "selaras dengan sniffer &
+  background". 27 format audio hilang: `.3ga .a52 .aif .aifc .alac .amr .au
+.aup .aup3 .awb .cda .dts .m4b .m4r .mid .midi .mp1 .mp2 .mpc .mpp .ra .shn
+.tak .tta .wavpack .weba .wv`. Akibatnya link audio yang sudah tertangkap
+  sniffer tidak muncul di daftar hasil pindai DOM. Daftar disamakan persis
+  (byte-identik) dengan `MEDIA_RE`, dan suffix-nya ikut disamakan menjadi
+  `([?#].*)?$` supaya `href` berfragment (`.../v.mp4#t=10`) juga terdeteksi —
+  sebelumnya hanya `?` dan akhir string yang diterima.
+
+### Changed
+
+- **Test tidak lagi ikut terkompilasi ke build rilis (F1)** — 11 `#[test]` di
+  `src/downloader/youtube.rs` (baris 1032–1152) berada di luar
+  `#[cfg(test)] mod tests`. Brace penutup modul test dipindah ke akhir file;
+  tidak ada perubahan isi (terverifikasi `git diff -w`), cakupan `cargo test`
+  sama.
+- Komentar basi & typo diperbaiki: `--auto-save-interval=20` → 5 (nilai nyata
+  sejak v2.11.0), assert `--seed-time=0` duplikat dihapus, README
+  "300+ jenis file" → 297, komentar `app.rs` tidak lagi menunjuk
+  `tests/app_init.rs` yang tidak ada, `use glib;` redundan dihapus, dan typo
+  `FALBACK`/`cek tatus`/`wait PAUSA` dibetulkan.
+- **`packaging/build-deb.sh` memakai `--locked` (F13)** — CI
+  (`cargo build --release --locked`) dan `release.yml` (`cargo test --locked`)
+  sudah memakai lockfile apa adanya, tetapi skrip pembuat `.deb` tidak, sehingga
+  paket bisa dibangun dari resolusi dependensi yang tak pernah diuji CI dan
+  `Cargo.lock` bisa berubah tanpa ter-commit. Kini ketiganya konsisten.
+
+### Tests
+
+- 3 fungsi test baru: `url_path_part_drops_scheme_and_authority` (7 assert),
+  `is_direct_file_url_rejects_bare_host` (9 assert),
+  `is_direct_file_url_scheme_less_path_still_works` (3 assert). Kelima fungsi
+  test `is_direct_file_url`/HLS-DASH lama (23 assert URL) tidak diubah satu pun
+  dan tetap hijau terhadap implementasi baru — diverifikasi dengan menjalankan
+  ulang seluruh tabel kasus terhadap algoritma hasil refactor.
+- Test `extension_media_lists_are_identical` (+ helper `js_regex_alt_items`)
+  membaca langsung `sniffer.js`, `content.js`, dan `background.js` lewat
+  `include_str!`, lalu memaksa keempat daftar media identik sebagai set,
+  memastikan semuanya dikenal `DIRECT_FILE_EXTENSIONS` (kecuali `.m3u8`/`.mpd`
+  yang sengaja lewat yt-dlp), dan mengunci jumlahnya di 86. Helper-nya
+  di-anchor pada nama deklarasi (`const videoExts =`) supaya `streamRe` di
+  content.js tidak ikut terbaca, dan punya jaring `len() >= 80` agar perubahan
+  bentuk file JS gagal keras, bukan lolos palsu dengan daftar kosong.
+- Suite Node `tests/extension.test.cjs`: 8/8 lulus (dari 4/8).
+- **`tests/version_sync.rs` (berkas baru, 2 test)** —
+  `all_version_sources_match` membandingkan versi `Cargo.toml`, `Cargo.lock`,
+  dan `extension/manifest.json` (AGENTS.md §5: manifest disinkronkan manual,
+  jadi paling gampang tertinggal) sekaligus memeriksa bentuknya
+  `MAJOR.MINOR.PATCH`; `version_parsers_reject_garbage` mengunci parser kecil
+  yang membacanya agar tidak lolos-palsu bila bentuk berkas berubah — termasuk
+  memastikan `version` milik dependensi di `[dependencies]`, `version` entri
+  paket lain di `Cargo.lock`, dan `"manifest_version"` di manifest tidak ikut
+  terbaca. Ketiga berkas disematkan lewat `include_str!`, jadi test tidak
+  menyentuh filesystem maupun lingkungan saat runtime dan aman berjalan paralel
+  (tidak perlu `EnvGuard` seperti `tests/find_cookies.rs`).
+- Jumlah test Rust: 246 → **252** fungsi (232 `#[test]` + 20 `#[tokio::test]`),
+  semuanya test murni tanpa I/O jaringan maupun proses anak.
+
 ## [2.11.0] - 2026-09-13
 
 ### Added
