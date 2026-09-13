@@ -1131,6 +1131,8 @@ mod tests {
         assert!(j.contains("--optimize-concurrent-downloads=true"));
         assert!(j.contains("--bt-enable-lpd=true"));
         assert!(j.contains("--bt-max-peers=100"));
+        // v2.10.5: seeding wajib nonaktif — magnet harus "selesai", bukan seeding.
+        assert!(j.contains("--seed-time=0"));
         assert!(j.contains("--max-overall-download-limit=5M"));
         assert!(j.contains("--check-certificate=false"));
         assert!(j.contains("--all-proxy=http://127.0.0.1:8118"));
