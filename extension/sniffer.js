@@ -53,11 +53,11 @@
 
   // ── v2.9.4 (B4c): parameter gate "dormant" ──
 
-  /// Jeda setelah event `load` sebelum halaman dianggap tanpa media.
+  // Jeda setelah event `load` sebelum halaman dianggap tanpa media.
   const IDLE_MS = 8000;
-  /// Tag yang sendiri sudah merupakan sinyal media (pemeriksaan nodeName murah).
+  // Tag yang sendiri sudah merupakan sinyal media (pemeriksaan nodeName murah).
   const MEDIA_TAGS = new Set(["VIDEO", "AUDIO", "SOURCE"]);
-  /// Selector untuk mencari sinyal media di dalam satu subtree yang baru added.
+  // Selector untuk mencari sinyal media di dalam satu subtree yang baru added.
   const MEDIA_SELECTOR = "video, audio, source";
 
   // ── persist: tulis kandidat ke DOM (jembatan ke ISOLATED world) ──
@@ -134,15 +134,15 @@
 
   // ── 3. Scan DOM ──
 
-  /// Kumpulkan URL media dari satu elemen media.
+  // Kumpulkan URL media dari satu elemen media.
   function collectFrom(el) {
     add(el.src);
     add(el.currentSrc);
   }
 
-  /// Pindai SATU root (Document atau subtree yang baru ditambahkan) — bukan
-  /// seluruh dokumen. B4b: biaya kini sebanding dengan ukuran konten baru,
-  /// bukan ukuran halaman.
+  // Pindai SATU root (Document atau subtree yang baru ditambahkan) — bukan
+  // seluruh dokumen. B4b: biaya kini sebanding dengan ukuran konten baru,
+  // bukan ukuran halaman.
   function scanRoot(root) {
     if (!root) return;
     // root sendiri bisa elemen media (mis. <video> yang baru disisipkan).
@@ -184,9 +184,9 @@
     scanTimer = setTimeout(flushScan, 300);
   }
 
-  /// Apakah satu node yang baru ditambahkan merupakan sinyal media?
-  /// Sengaja murah: diperiksa HANYA saat dormant, untuk memutuskan apakah
-  /// perlu bangun — bukan untuk mengumpulkan URL.
+  // Apakah satu node yang baru ditambahkan merupakan sinyal media?
+  // Sengaja murah: diperiksa HANYA saat dormant, untuk memutuskan apakah
+  // perlu bangun — bukan untuk mengumpulkan URL.
   function looksLikeMedia(node) {
     if (node.nodeType !== 1) return false;
     if (MEDIA_TAGS.has(node.nodeName)) return true;
@@ -249,8 +249,8 @@
     if (!dormant && pending.size > 0) scheduleScan();
   }
 
-  /// Pasang gate dormant: IDLE_MS setelah `load` (atau segera bila dokumen
-  /// sudah lengkap — script bisa dievaluasi pada halaman yang sudah jadi).
+  // Pasang gate dormant: IDLE_MS setelah `load` (atau segera bila dokumen
+  // sudah lengkap — script bisa dievaluasi pada halaman yang sudah jadi).
   function armIdleGate() {
     if (document.readyState === "complete") {
       setTimeout(considerSleep, IDLE_MS);
