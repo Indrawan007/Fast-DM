@@ -631,12 +631,10 @@ pub(crate) async fn run_ytdlp(
         };
 
         if let Some(m) = RE_YTDLP_DEST.captures(&line) {
-            let filename = std::path::Path::new(m.get(1).unwrap().as_str())
+            let _filename = std::path::Path::new(m.get(1).map(|m| m.as_str()).unwrap_or(""))
                 .file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
-            info.lock().await.filename = filename;
+                .unwrap_or("");
         }
 
         if RE_YTDLP_MERGE.is_match(&line) {

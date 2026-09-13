@@ -1421,11 +1421,14 @@ pub fn sanitize_filename(name: &str) -> String {
                 && ext.chars().all(|c| c.is_ascii_alphanumeric());
             let stem_len = 200usize.saturating_sub(ext.len() + 1);
             if ext_ok && stem_len >= 1 {
-                let mut end = stem_len;
-                while !cleaned.is_char_boundary(end) {
-                    end -= 1;
+                let end = stem_len.min(cleaned.len());
+                let mut pos = end;
+                while !cleaned.is_char_boundary(pos) && pos > 0 {
+                    pos -= 1;
                 }
-                return format!("{}.{}", &cleaned[..end], ext);
+                if pos > 0 {
+                    return format!("{}.{}", &cleaned[..pos], ext);
+                }
             }
         }
         // Fallback: potong di char boundary (raw byte slicing panics on
