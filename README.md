@@ -17,6 +17,17 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 🌐 **Proxy global** (HTTP/SOCKS5, kredensial di URL) — satu kolom di Pengaturan, berlaku untuk aria2 & yt-dlp
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 
+## Stabilitas v2.11.2
+
+- **Unduhan hidup lagi** — nilai `min-split-size` `512K` (jalur per-proses DAN
+  opsi per-URI daemon) berada di luar rentang sah aria2 (`1M`–`1024M`), sehingga
+  aria2c keluar dengan exit code 28 sebelum mengunduh satu byte pun dan
+  `aria2.addUri` fault di jalur daemon; semua unduhan http/ftp serta magnet mati
+  sejak v2.10.5. Kini keduanya memakai konstanta `MIN_SPLIT_SIZE = "1M"` (nilai
+  terkecil yang sah = split paling agresif yang diizinkan), dijaga test
+  `min_split_size_within_aria2_documented_range` agar tidak "dioptimalkan" ke
+  bawah rentang lagi.
+
 ## Stabilitas v2.11.1
 
 Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.

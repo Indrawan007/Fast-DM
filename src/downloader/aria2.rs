@@ -140,11 +140,10 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
             conn_per_server(config.max_connections)
         ),
         format!("--split={}", config.max_connections.max(1)),
-        // v2.10.5 (perf): 1M dulu membuat file kecil (beberapa MB) baru ter-split
-        // setelah 1 MB — ramp-up koneksi lambat, bandwidth awal terbuang.
-        // 512K memungkinkan split lebih awal tanpa fragmentasi berlebih.
-        "--min-split-size=512K".into(),
-        "--piece-length=1M".into(),
+        // v2.11.2 (F16): nilai datang dari konstanta yang sama dengan jalur
+        // daemon RPC — lihat `MIN_SPLIT_SIZE` untuk alasan 512K tidak pernah sah.
+        format!("--min-split-size={MIN_SPLIT_SIZE}"),
+        "--piece-length=1M".into(), // default terdokumentasi aria2
         // v2.11.0 (perf): mmap mengurangi copy RAM user→kernel, optimize-concurrent
         // menghindari thrash disk saat banyak unduhan, LPD mempercepat peer discovery.
         "--enable-mmap=true".into(),
@@ -468,6 +467,21 @@ pub(crate) fn has_space(dir: &str, needed: u64) -> bool {
 pub(crate) fn conn_per_server(max_connections: u8) -> u8 {
     max_connections.clamp(1, 16)
 }
+
+/// Nilai `min-split-size` untuk jalur per-proses (`--min-split-size`) DAN opsi
+/// per-URI daemon RPC (`aria2_rpc::adduri_options`) — satu konstanta supaya
+/// keduanya tidak bisa berbeda lagi, sama seperti `conn_per_server`.
+///
+/// v2.11.2 (F16): dulu "512K" — DI BAWAH rentang sah aria2. Manual
+/// `--min-split-size` (dan `UnitNumberOptionHandler(PREF_MIN_SPLIT_SIZE, "20M",
+/// 1_m, 1_g, 'k')` di sumber aria2) menetapkan Possible Values 1M–1024M, jadi
+/// aria2c yang menerima nilai itu langsung keluar dengan exit code 28
+/// ("min-split-size must be between 1048576 and 1073741824") sebelum satu byte
+/// pun diunduh. Efeknya semua unduhan http/ftp mati — persis kelas regresi
+/// `-x` 17–32 di v2.9.3 yang melahirkan `conn_per_server`. `1M` adalah nilai
+/// terkecil yang sah, artinya split paling agresif yang aria2 izinkan: intent
+/// perf v2.10.5 (split lebih dini untuk file kecil) tercapai sejauh legal.
+pub(crate) const MIN_SPLIT_SIZE: &str = "1M";
 
 /// Limit total user → batas per-proses aria2c. v2.3.0 (M3): pembaginya
 /// adalah jumlah unduhan HIDUP (aktif+antri) saat proses ini start — dihitung
@@ -1108,6 +1122,29 @@ mod tests {
         // 0 tidak lolos validasi Settings, tapi config.json hasil edit manual
         // bisa berisi 0 — jangan sampai jadi "--max-connection-per-server=0".
         assert_eq!(conn_per_server(0), 1);
+    }
+
+    // ── MIN_SPLIT_SIZE (F16, v2.11.2) ──
+
+    #[test]
+    fn min_split_size_within_aria2_documented_range() {
+        // aria2 menolak `min-split-size` di luar 1M–1024M (manual
+        // `--min-split-size`; sumber: UnitNumberOptionHandler(
+        // PREF_MIN_SPLIT_SIZE, "20M", 1_m, 1_g, 'k')). Nilai lama "512K"
+        // membuat aria2c exit 28 sebelum satu byte pun diunduh — di jalur
+        // per-proses MAUPUN opsi addUri daemon, karena keduanya memakai
+        // konstanta ini. Test ini pagar supaya tidak ada yang "mengoptimalkan"
+        // nilainya ke bawah rentang lagi.
+        let bytes = parse_aria2_size(MIN_SPLIT_SIZE);
+        assert!(
+            (1_048_576..=1_073_741_824).contains(&bytes),
+            "MIN_SPLIT_SIZE={MIN_SPLIT_SIZE} = {bytes} byte, di luar rentang \
+             sah aria2 1M–1024M"
+        );
+        // Nilai lama yang bug: terbaca 524288, memang di bawah batas bawah —
+        // jadi kegagalan dulu adalah nilai yang salah, bukan salah parser.
+        assert!(parse_aria2_size("512K") < 1_048_576);
+        assert!(parse_aria2_size("1024M") == 1_073_741_824);
     }
 
     // ── resolve_speed_limit (M3) ──

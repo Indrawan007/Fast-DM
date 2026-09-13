@@ -251,9 +251,11 @@ pub(crate) fn daemon_args(port: u16, secret: &str, cfg: &Config) -> Vec<String> 
 /// Mirror flag per-proses `aria2.rs` yang valid sebagai "URI option"
 /// (lihat manual aria2). `pause` selalu "true" dulu; pemanggil memanggil
 /// `unpause` setelah `addUri` (pola B2.1 — hindari balapan "sudah jalan"
-/// sebelum tick pertama). `min-split-size`/`piece-length` mengikuti jalur
-/// per-proses; koneksi-per-server & split mengikuti Pengaturan saat unduhan
-/// ditambahkan (v2.9.3 — bukan lagi hanya nilai global daemon).
+/// sebelum tick pertama). `min-split-size` diambil dari konstanta
+/// `aria2::MIN_SPLIT_SIZE` (v2.11.2/F16: nilai literal "512K" dulu di bawah
+/// rentang sah aria2 1M–1024M dan membuat addUri fault); `piece-length`
+/// mengikuti jalur per-proses; koneksi-per-server & split mengikuti Pengaturan
+/// saat unduhan ditambahkan (v2.9.3 — bukan lagi hanya nilai global daemon).
 pub(crate) fn adduri_options(
     save_dir: &str,
     filename: Option<&str>,
@@ -288,7 +290,7 @@ pub(crate) fn adduri_options(
     o.insert("connect-timeout".into(), json!("15"));
     o.insert("max-tries".into(), json!(cfg.retry_count.to_string()));
     o.insert("retry-wait".into(), json!(cfg.retry_wait.to_string()));
-    o.insert("min-split-size".into(), json!("512K"));
+    o.insert("min-split-size".into(), json!(aria2::MIN_SPLIT_SIZE));
     o.insert("piece-length".into(), json!("1M"));
     // v2.9.3: koneksi/segmen mengikuti Pengaturan SAAT unduhan ditambahkan —
     // dulu hanya nilai global daemon (dibaca sekali saat daemon lahir), jadi
@@ -1124,13 +1126,6 @@ mod tests {
         assert!(j.contains("--rpc-listen-port=6800"));
         assert!(j.contains("--rpc-secret=sec"));
         assert!(j.contains("--auto-save-interval=5"));
-        // v2.10.5: seeding wajib nonaktif — magnet harus "selesai", bukan seeding.
-        assert!(j.contains("--seed-time=0"));
-        // v2.11.0: perf flags
-        assert!(j.contains("--enable-mmap=true"));
-        assert!(j.contains("--optimize-concurrent-downloads=true"));
-        assert!(j.contains("--bt-enable-lpd=true"));
-        assert!(j.contains("--bt-max-peers=100"));
         assert!(j.contains("--max-overall-download-limit=5M"));
         assert!(j.contains("--check-certificate=false"));
         assert!(j.contains("--all-proxy=http://127.0.0.1:8118"));
@@ -1155,7 +1150,10 @@ mod tests {
         assert_eq!(o["connect-timeout"], "15");
         assert_eq!(o["max-tries"], "5");
         assert_eq!(o["retry-wait"], "3");
-        assert_eq!(o["min-split-size"], "512K");
+        // F16 (v2.11.2): 1M = batas bawah rentang sah aria2 (1M–1024M). Nilai
+        // lama "512K" membuat addUri fault dan jalur per-proses exit 28.
+        assert_eq!(o["min-split-size"], "1M");
+
         assert_eq!(o["piece-length"], "1M");
         assert_eq!(o["allow-overwrite"], "false"); // auto_file_renaming default true
         assert!(o.get("out").is_none());

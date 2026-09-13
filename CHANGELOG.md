@@ -3,6 +3,37 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.11.2] - 2026-09-13
+
+### Fixed
+
+- **Semua unduhan http/ftp & magnet tidak lagi mati saat mulai: `min-split-size`
+  di luar rentang sah aria2 (F16)** — kedua jalur meneruskan `512K`: jalur
+  per-proses (`--min-split-size=512K` di `aria2.rs`) dan opsi per-URI daemon
+  (`min-split-size: "512K"` di `adduri_options`). Manual aria2 menetapkan
+  Possible Values `--min-split-size` = `1M`–`1024M (default 20M)`, dan sumber
+  aria2 memang `UnitNumberOptionHandler(PREF_MIN_SPLIT_SIZE, "20M", 1_m, 1_g,
+'k')`. Akibatnya aria2c menolak seluruh baris perintah: exit code 28
+  "min-split-size must be between 1048576 and 1073741824" sebelum satu byte pun
+  diunduh; di jalur daemon `aria2.addUri` mengembalikan fault, engine jatuh ke
+  jalur per-proses (`RpcOutcome::Fallback`) yang mati dengan gejala sama —
+  persis yang terlihat di UI: file kecil (gambar, dsb.) stuck 0% disertai dump
+  usage aria2. Magnet (RPC-only, tanpa fallback) gagal total. Nilai `512K`
+  masuk di v2.10.5 sebagai "tuning perf" dan tidak pernah legal — kelas regresi
+  yang sama dengan `-x` 17–32 di v2.9.3 yang melahirkan `conn_per_server`.
+  Kini kedua jalur memakai satu konstanta `aria2::MIN_SPLIT_SIZE = "1M"` —
+  nilai terkecil yang sah, artinya split paling agresif yang aria2 izinkan,
+  sehingga intent perf v2.10.5 (split dini untuk file kecil) tetap tercapai
+  sejauh legal.
+
+### Tests
+
+- Test baru `min_split_size_within_aria2_documented_range` (`aria2.rs`):
+  assert konstanta berada di 1048576–1073741824 memakai parser `parse_aria2_size`
+  yang sudah ada (tanpa parser duplikat), plus membuktikan nilai lama "512K"
+  memang terbaca di bawah batas bawah. Test `adduri_options` kini mengunci
+  `"1M"`, bukan `"512K"`. Jumlah test Rust: 252 → **253**.
+
 ## [2.11.1] - 2026-09-13
 
 Rilis perbaikan (bugfix `+0.0.1` sesuai AGENTS.md §5): tidak ada fitur baru dan

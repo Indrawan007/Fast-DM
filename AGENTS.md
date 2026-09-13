@@ -62,6 +62,13 @@ fast-dm --native  ──1 baris JSON──►  Unix socket (Config::ipc_socket_p
 - Input eksternal (URL, header, nama file, cookie) WAJIB disanitasi — pola
   sudah ada di `sanitize_filename`, strip `\r\n` header, cap ukuran pesan 1 MB.
 - Jangan menulis file sensitif (cookie, URL bertoken) ke path publik `/tmp`.
+- Nilai opsi aria2 (argumen CLI jalur per-proses MAUPUN opsi RPC daemon) WAJIB
+  dalam rentang yang didokumentasikan manual aria2 — satu nilai ilegal membuat
+  aria2c menolak seluruh baris perintah (exit 28) atau `addUri` fault. Nilai
+  turunan dari Pengaturan di-clamp (`conn_per_server` 1–16); nilai hardcode
+  dijadikan konstanta yang dipakai kedua jalur dan dijaga test rentang
+  (`MIN_SPLIT_SIZE` — regresi v2.11.2/F16 dan v2.9.3 `-x` 17–32 lahir dari
+  kelas kelalaian yang sama).
 
 ## 4. Tes & Verifikasi
 
