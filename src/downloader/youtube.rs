@@ -507,6 +507,12 @@ pub async fn download(
         "--merge-output-format".into(),
         merge_output_format(quality.as_deref()).into(),
         "--embed-metadata".into(),
+        // v2.11.0 (perf): chunk 10M + buffer 16K meningkatkan throughput HTTP
+        // untuk file besar tanpa membebani RAM (buffer kecil, chunk besar).
+        "--http-chunk-size".into(),
+        "10M".into(),
+        "--buffer-size".into(),
+        "16K".into(),
     ]);
 
     cmd.extend(cookie_args(&url));

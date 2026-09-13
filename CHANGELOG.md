@@ -3,6 +3,29 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.11.0] - 2026-09-13
+
+### Added
+
+- **Semua jenis file yang dapat di-download kini dikenali** — `DIRECT_FILE_EXTENSIONS` diperluas dari ~50 → **297 unik**:
+  - Video: mp4, mkv, webm, avi, mov, m4v, flv, wmv, 3gp, 3g2, ts, mts, m2ts, vob, mpg, mpeg, f4v, asf, rm, rmvb, divx, xvid, ogv, mxf, roq, nsv, amv, yuv, dv, hdv, qt, fli, flc, mod, tod, vro, dat, wmx, wvx, ogm, ogx
+  - Audio: mp3, m4a, aac, ogg, opus, flac, wav, wma, aiff, ape, ac3, dts, tta, wv, mka, mp2, au, ra, amr, m4b, m4r, mpc, shn, tak, alac, mid, midi, weba, wavpack
+  - Gambar: jpg, png, gif, webp, bmp, svg, ico, tiff, psd, ai, eps, raw, cr2, nef, orf, sr2, arw, dng, heif, heic, avif, jxl, jxr, jp2, xcf, kra, afphoto, dwg, dxf
+  - Arsip: zip, rar, 7z, tar, gz, bz2, xz, txz, lz, lzma, lzo, z, cab, arj, lzh, lha, jar, war, ear, xpi, crx, lz4, zst, tgz, tlz, ace, alz, s7z
+  - Dokumen: pdf, doc, docx, xls, xlsx, ppt, pptx, odt, ods, epub, mobi, azw, fb2, djvu, srt, sub, ass, vtt, log, nfo, cue
+  - Installer/VM: exe, msi, dmg, deb, rpm, apk, appimage, run, bin, msu, appx, flatpak, snap, pkg, ipa, msix, xapk, iso, img, ova, vdi, vmdk, qcow2, vhd, vhdx, wim, esd
+  - Torrent: torrent, nzb, metalink, meta4; Font: ttf, otf, woff, woff2, eot; 3D: stl, obj, fbx, blend, glb, 3mf, stp, step; DB: sqlite, db, sql, bak, bson
+  - Kecuali m3u8/mpd yang sengaja tetap lewat yt-dlp untuk merge HLS/DASH
+- **Extension browser selaras**: `videoExtensions` 12→86, `fileExtensions` 22→213 (total 299 termasuk m3u8/mpd), test `extension_intercept_list_is_covered` tetap hijau
+- **Sniffer diperluas**: `MEDIA_RE` dari 15 → 86 format video/audio, plus fix bug `add()` yang return early karena baris `return !!href...` nyasar
+
+### Performance
+
+- **RAM**: `disk_cache_size` default 64M→**32M**, `--enable-mmap=true` (kurangi copy user→kernel), `--bt-save-metadata=true`
+- **CPU**: `--optimize-concurrent-downloads=true`, `--piece-length` 512K→**1M** (metadata lebih ringan), `--auto-save-interval` 20→**5** detik (persist lebih sering tapi tetap ringan)
+- **Speed**: `--bt-enable-lpd=true`, `--bt-max-peers=100` (dari default 55), `--bt-request-peer-speed-limit=0`, `--max-concurrent` 3→**5**, yt-dlp `--http-chunk-size 10M --buffer-size 16K`, `--concurrent-fragments` tetap mengikuti koneksi per server (1–16)
+- `is_direct_file_url` O(n) → O(1) via `HashSet` lookup
+
 ## [2.10.5] - 2026-09-12
 
 ### Fixed

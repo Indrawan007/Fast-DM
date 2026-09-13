@@ -758,8 +758,9 @@
       // mengumpulkannya (hingga 50 entri).
       readSniffedCandidates().forEach((u) => videos.add(u));
 
-      // Video links
-      const videoExts = /\.(mp4|mkv|webm|avi|mov|flv|wmv|m4v|3gp|ts)(\?|$)/i;
+      // v2.11.0: daftar DIPERLUAS — selaras dengan sniffer & background
+      const videoExts =
+        /\.(mp4|mkv|webm|avi|mov|m4v|flv|wmv|3gp|3g2|ts|mts|m2ts|vob|mpg|mpeg|mpe|m2v|mp2v|f4v|asf|asx|rm|rmvb|divx|xvid|ogv|mxf|roq|nsv|amv|yuv|dv|hdv|qt|fli|flc|mod|tod|vro|dat|wmx|wvx|ogm|ogx|mp3|m4a|aac|ogg|opus|flac|wav|wma|aiff|ape|ac3|mka|m3u8|mpd)(\?|$)/i;
       document.querySelectorAll("a[href]").forEach((a) => {
         if (videoExts.test(a.href)) videos.add(a.href);
       });

@@ -106,6 +106,10 @@ pub async fn download(
         config.retry_count.to_string(),
         "--merge-output-format".into(),
         merge_output_format(quality.as_deref()).into(),
+        "--http-chunk-size".into(),
+        "10M".into(),
+        "--buffer-size".into(),
+        "16K".into(),
     ]);
 
     // Cookies (dari cookies.txt / browser) + Referer & header kustom extension
