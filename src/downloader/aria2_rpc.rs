@@ -203,7 +203,7 @@ pub(crate) fn daemon_args(port: u16, secret: &str, cfg: &Config) -> Vec<String> 
         format!("--rpc-listen-port={}", port),
         format!("--rpc-secret={}", secret),
         format!("--dir={}", cfg.download_dir),
-        "--auto-save-interval=20".into(),
+        "--auto-save-interval=5".into(),
         format!("--max-concurrent-downloads={}", cfg.max_concurrent.max(1)),
         format!(
             "--max-connection-per-server={}",
@@ -219,6 +219,15 @@ pub(crate) fn daemon_args(port: u16, secret: &str, cfg: &Config) -> Vec<String> 
         // tak kunjung selesai. --seed-time=0 memaksa selesai begitu unduhan
         // selesai (tetap bisa upload saat masih mengunduh).
         "--seed-time=0".into(),
+        // v2.11.0 (perf): mmap + optimize concurrent + LPD + peer tuning
+        "--enable-mmap=true".into(),
+        "--optimize-concurrent-downloads=true".into(),
+        "--bt-enable-lpd=true".into(),
+        "--bt-max-peers=100".into(),
+        "--bt-request-peer-speed-limit=0".into(),
+        "--bt-save-metadata=true".into(),
+        "--bt-hash-check-seed=true".into(),
+        "--bt-seed-unverified=true".into(),
         // lanjutkan dari control file lintas sesi app; cek hash utk yang lengkap
         "--continue=true".into(),
     ];
@@ -280,7 +289,7 @@ pub(crate) fn adduri_options(
     o.insert("max-tries".into(), json!(cfg.retry_count.to_string()));
     o.insert("retry-wait".into(), json!(cfg.retry_wait.to_string()));
     o.insert("min-split-size".into(), json!("512K"));
-    o.insert("piece-length".into(), json!("512K"));
+    o.insert("piece-length".into(), json!("1M"));
     // v2.9.3: koneksi/segmen mengikuti Pengaturan SAAT unduhan ditambahkan —
     // dulu hanya nilai global daemon (dibaca sekali saat daemon lahir), jadi
     // perubahan "Koneksi per server" tidak berlaku sampai app di-restart.
@@ -1114,9 +1123,14 @@ mod tests {
         assert!(a[0] == "--enable-rpc" && a[1] == "--rpc-listen-all=false");
         assert!(j.contains("--rpc-listen-port=6800"));
         assert!(j.contains("--rpc-secret=sec"));
-        assert!(j.contains("--auto-save-interval=20"));
+        assert!(j.contains("--auto-save-interval=5"));
         // v2.10.5: seeding wajib nonaktif — magnet harus "selesai", bukan seeding.
         assert!(j.contains("--seed-time=0"));
+        // v2.11.0: perf flags
+        assert!(j.contains("--enable-mmap=true"));
+        assert!(j.contains("--optimize-concurrent-downloads=true"));
+        assert!(j.contains("--bt-enable-lpd=true"));
+        assert!(j.contains("--bt-max-peers=100"));
         assert!(j.contains("--max-overall-download-limit=5M"));
         assert!(j.contains("--check-certificate=false"));
         assert!(j.contains("--all-proxy=http://127.0.0.1:8118"));
@@ -1142,7 +1156,7 @@ mod tests {
         assert_eq!(o["max-tries"], "5");
         assert_eq!(o["retry-wait"], "3");
         assert_eq!(o["min-split-size"], "512K");
-        assert_eq!(o["piece-length"], "512K");
+        assert_eq!(o["piece-length"], "1M");
         assert_eq!(o["allow-overwrite"], "false"); // auto_file_renaming default true
         assert!(o.get("out").is_none());
         assert!(o.get("cookie").is_none());

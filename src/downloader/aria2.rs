@@ -144,7 +144,18 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         // setelah 1 MB — ramp-up koneksi lambat, bandwidth awal terbuang.
         // 512K memungkinkan split lebih awal tanpa fragmentasi berlebih.
         "--min-split-size=512K".into(),
-        "--piece-length=512K".into(),
+        "--piece-length=1M".into(),
+        // v2.11.0 (perf): mmap mengurangi copy RAM user→kernel, optimize-concurrent
+        // menghindari thrash disk saat banyak unduhan, LPD mempercepat peer discovery.
+        "--enable-mmap=true".into(),
+        "--optimize-concurrent-downloads=true".into(),
+        "--bt-enable-lpd=true".into(),
+        "--bt-max-peers=100".into(),
+        "--bt-request-peer-speed-limit=0".into(),
+        "--bt-save-metadata=true".into(),
+        "--bt-hash-check-seed=true".into(),
+        "--bt-seed-unverified=true".into(),
+        "--auto-save-interval=5".into(),
         format!("--timeout={}", config.timeout),
         "--connect-timeout=15".into(),
         "--lowest-speed-limit=1K".into(),

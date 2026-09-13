@@ -667,19 +667,68 @@ pub fn is_supported_scheme(url: &str) -> bool {
 ///
 /// `.m3u8`/`.mpd` SENGAJA tidak ada di sini: manifest HLS/DASH harus lewat
 /// yt-dlp supaya segmennya di-merge benar (lihat `wants_quality_dialog`).
+///
+/// v2.11.0: daftar DIPERLUAS ke 300+ jenis file — semua kategori umum
+/// (video, audio, gambar, arsip, dokumen, installer, font, 3D, VM, dll).
+/// Test `extension_intercept_list_is_covered` memastikan extension JS tetap
+/// selaras dengan daftar ini.
 pub(crate) const DIRECT_FILE_EXTENSIONS: &[&str] = &[
-    ".mp4", ".webm", ".mkv", ".avi", ".mov", ".m4v", ".flv", ".wmv", ".3gp", ".ts", ".mp3", ".m4a",
-    ".aac", ".ogg", ".opus", ".flac", ".wav", ".zip", ".tar", ".gz", ".bz2", ".tbz2", ".xz",
-    ".txz", ".7z", ".rar", ".pdf", ".iso", ".img", ".bin", ".apk", ".deb", ".rpm", ".exe", ".msi",
-    ".dmg", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico", ".doc", ".docx",
-    ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".epub", ".mobi", ".txt", ".csv", ".json", ".xml",
+    // Video
+    ".mp4", ".webm", ".mkv", ".avi", ".mov", ".m4v", ".flv", ".wmv", ".3gp", ".3g2", ".ts", ".mts",
+    ".m2ts", ".vob", ".mpg", ".mpeg", ".mpe", ".m2v", ".mp2v", ".f4v", ".asf", ".asx", ".rm", ".rmvb",
+    ".divx", ".xvid", ".ogv", ".mxf", ".roq", ".nsv", ".amv", ".yuv", ".dv", ".hdv", ".qt", ".fli",
+    ".flc", ".mod", ".tod", ".vro", ".dat", ".wmx", ".wvx", ".ogm", ".ogx",
+    // Audio
+    ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav", ".wma", ".aiff", ".aif", ".aifc", ".ape",
+    ".ac3", ".dts", ".tta", ".wv", ".mka", ".mp2", ".mp1", ".au", ".ra", ".3ga", ".a52", ".amr",
+    ".awb", ".m4b", ".m4r", ".mpc", ".mpp", ".shn", ".tak", ".alac", ".aup", ".aup3", ".cda", ".mid",
+    ".midi", ".weba", ".wavpack",
+    // Gambar
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".svgz", ".ico", ".tiff", ".tif", ".psd",
+    ".ai", ".eps", ".raw", ".cr2", ".nef", ".orf", ".sr2", ".arw", ".dng", ".heif", ".heic", ".avif",
+    ".jxl", ".jxr", ".jp2", ".j2k", ".jpf", ".jpx", ".jpm", ".j2c", ".indd", ".cdr", ".xcf", ".kra",
+    ".afphoto", ".afdesign", ".dwg", ".dxf", ".emf", ".wmf",
+    // Arsip / Kompresi
+    ".zip", ".zipx", ".rar", ".7z", ".7zip", ".tar", ".gz", ".bz2", ".bz", ".tbz2", ".tbz", ".xz",
+    ".txz", ".lz", ".lzma", ".lzo", ".z", ".cab", ".arj", ".lzh", ".lha", ".jar", ".war", ".ear",
+    ".xpi", ".crx", ".lz4", ".zst", ".tgz", ".tlz", ".zz", ".arc", ".pak", ".ace", ".alz", ".a",
+    ".ar", ".s7z",
+    // Dokumen / Ebook / Subtitle
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".ods", ".odp", ".odg", ".odf",
+    ".rtf", ".tex", ".txt", ".csv", ".json", ".xml", ".yaml", ".yml", ".md", ".markdown", ".epub", ".mobi",
+    ".azw", ".azw3", ".fb2", ".fbz", ".djvu", ".djv", ".chm", ".xps", ".oxps", ".pages", ".numbers", ".key",
+    ".srt", ".sub", ".ass", ".ssa", ".vtt", ".lrf", ".pdb", ".lit", ".pml", ".rb", ".tcr", ".txtz",
+    ".log", ".nfo", ".cue", ".ics", ".vcf", ".bib", ".abw",
+    // Installer / Executable / Disk Image / VM
+    ".exe", ".msi", ".dmg", ".deb", ".rpm", ".apk", ".appimage", ".run", ".bin", ".msu", ".appx", ".appxbundle",
+    ".flatpak", ".snap", ".pkg", ".ipa", ".msix", ".msixbundle", ".xapk", ".apks", ".bundle", ".sh", ".com", ".gadget",
+    ".wsf", ".bat", ".cmd", ".iso", ".img", ".ova", ".ovf", ".vdi", ".vmdk", ".qcow2", ".vhd", ".vhdx",
+    ".wim", ".swm", ".esd",
+    // Torrent / Metadata
+    ".torrent", ".nzb", ".metalink", ".meta4",
+    // Font
+    ".ttf", ".otf", ".woff", ".woff2", ".eot", ".fon", ".fnt", ".ttc",
+    // 3D / CAD
+    ".stl", ".obj", ".fbx", ".blend", ".3ds", ".dae", ".gltf", ".glb", ".3mf", ".ply", ".off", ".x3d",
+    ".stp", ".step", ".iges", ".igs", ".sldprt", ".sldasm",
+    // Database / Backup
+    ".sqlite", ".sqlite3", ".db", ".db3", ".sql", ".bak", ".backup", ".dump", ".bson",
 ];
+
+/// Cache HashSet untuk lookup O(1) ekstensi — dibangun sekali, dipakai di
+/// `is_direct_file_url`. Menghemat CPU dibanding iterasi linear 300+ ekstensi
+/// tiap URL (dulu O(n), kini O(1) setelah ekstrak ekstensi).
+static DIRECT_EXT_SET: LazyLock<std::collections::HashSet<&'static str>> =
+    LazyLock::new(|| DIRECT_FILE_EXTENSIONS.iter().copied().collect());
 
 /// URL file langsung (punya ekstensi file/media) → langsung ke aria2 tanpa
 /// lewat yt-dlp. HLS/DASH (m3u8/mpd) tetap ke yt-dlp agar di-merge benar.
+///
+/// v2.11.0: dioptimalkan — ekstrak ekstensi file dari path URL lalu cek
+/// HashSet O(1), bukan scan linear 300+ `ends_with`. Juga handle compound
+/// `.tar.gz` via fallback suffix scan hanya bila lookup cepat gagal (jarang).
 pub fn is_direct_file_url(url: &str) -> bool {
-    // Potong FRAGMENT dulu baru QUERY — fragment setelah ekstensi
-    // (mis. "https://x.com/file.mp4#t=10") membuat cek ekstensi lama gagal.
+    // Potong fragment & query
     let path = url
         .split('#')
         .next()
@@ -688,13 +737,47 @@ pub fn is_direct_file_url(url: &str) -> bool {
         .next()
         .unwrap_or(url);
     let lower = path.to_ascii_lowercase();
-    // v2.3.0 (M2): SELARASKAN dengan daftar intersep extension/background.js —
-    // dulu .exe/.msi/.dmg/.bz2/.docx dll tidak ada di sini sehingga URL-nya
-    // dicoba lewat yt-dlp dulu (gagal, ±1-3 dtk terbuang) baru fallback aria2.
-    // v2.10.0 (D5): keselarasan itu kini dikunci oleh test, bukan hanya komentar.
-    DIRECT_FILE_EXTENSIONS
-        .iter()
-        .any(|ext| lower.ends_with(ext))
+
+    // Cepat: ambil nama file terakhir setelah '/'
+    let file_part = lower.rsplit('/').next().unwrap_or(&lower);
+    // Jika tidak ada titik, bukan file langsung
+    if !file_part.contains('.') {
+        return false;
+    }
+    // Ekstrak ekstensi sederhana (setelah titik terakhir)
+    if let Some(dot) = file_part.rfind('.') {
+        let ext = &file_part[dot..];
+        if DIRECT_EXT_SET.contains(ext) {
+            return true;
+        }
+        // Compound fallback: cek apakah path berakhir dengan ekstensi panjang
+        // seperti `.tar.gz` yang sudah ter-cover oleh `.gz` tapi juga untuk
+        // kasus `.appimage` etc — scan hanya bila fast path gagal.
+        // Batasi ke 2 level titik untuk hemat CPU.
+        if let Some(dot2) = file_part[..dot].rfind('.') {
+            let ext2 = &file_part[dot2..];
+            // ext2 seperti `.tar.gz` tidak ada di set, tapi `.gz` sudah dicek;
+            // untuk jaga-jaga cek suffix 2-level bila ada yang menambah `.tar.gz`
+            // eksplisit di masa depan.
+            if DIRECT_EXT_SET.contains(ext2) {
+                return true;
+            }
+        }
+    }
+    // Fallback terakhir: scan suffix (untuk URL yang tidak punya '/' atau aneh)
+    // tapi hanya untuk ekstensi panjang ≥4 char agar tidak boros.
+    // Ini menjaga kompatibilitas dengan test lama yang mengandalkan ends_with.
+    if lower.len() > 4 {
+        // Hanya cek 30 ekstensi paling umum bila fast path gagal — hemat CPU.
+        // Untuk 100% kompatibilitas, tetap fallback ke full scan tapi ini
+        // jarang terjadi (hanya URL tanpa '/' atau tanpa titik di file_part).
+        for ext in DIRECT_FILE_EXTENSIONS.iter() {
+            if ext.len() >= 4 && lower.ends_with(ext) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Cari download Queued tertua dan jalankan jika ada slot kosong

@@ -35,11 +35,14 @@
 (() => {
   "use strict";
 
+  // v2.11.0: MEDIA_RE DIPERLUAS ke 80+ format video/audio (selaras dengan
+  // videoExtensions di background.js + DIRECT_FILE_EXTENSIONS di Rust).
+  // Mencakup semua container umum agar sniffer menangkap lebih banyak.
   const MEDIA_RE =
-    /\.(m3u8|mpd|mp4|webm|mkv|m4v|mov|flv|wmv|mp3|m4a|aac|ogg|opus|flac)([?#].*)?$/i;
+    /\.(3g2|3ga|3gp|a52|aac|ac3|aif|aifc|aiff|alac|amr|amv|ape|asf|asx|au|aup|aup3|avi|awb|cda|dat|divx|dts|dv|f4v|flac|flc|fli|flv|hdv|m2ts|m2v|m3u8|m4a|m4b|m4r|m4v|mid|midi|mka|mkv|mod|mov|mp1|mp2|mp2v|mp3|mp4|mpc|mpd|mpe|mpeg|mpg|mpp|mts|mxf|nsv|ogg|ogm|ogv|ogx|opus|qt|ra|rm|rmvb|roq|shn|tak|tod|ts|tta|vob|vro|wav|wavpack|weba|webm|wma|wmv|wmx|wv|wvx|xvid|yuv)([?#].*)?$/i;
 
   const MEDIA_QUERY_RE =
-    /[?&][^&#]*=[^&#]*\.(m3u8|mpd|mp4|webm|mkv|m4v|mov|flv|wmv|mp3|m4a|aac|ogg|opus|flac)(?:[&#]|$)/i;
+    /[?&][^&#]*=[^&#]*\.(3g2|3ga|3gp|a52|aac|ac3|aif|aifc|aiff|alac|amr|amv|ape|asf|asx|au|aup|aup3|avi|awb|cda|dat|divx|dts|dv|f4v|flac|flc|fli|flv|hdv|m2ts|m2v|m3u8|m4a|m4b|m4r|m4v|mid|midi|mka|mkv|mod|mov|mp1|mp2|mp2v|mp3|mp4|mpc|mpd|mpe|mpeg|mpg|mpp|mts|mxf|nsv|ogg|ogm|ogv|ogx|opus|qt|ra|rm|rmvb|roq|shn|tak|tod|ts|tta|vob|vro|wav|wavpack|weba|webm|wma|wmv|wmx|wv|wvx|xvid|yuv)(?:[&#]|$)/i;
 
   function isMediaUrl(clean) {
     return MEDIA_RE.test(clean) || MEDIA_QUERY_RE.test(clean);
@@ -83,22 +86,17 @@
   function add(url) {
     try {
       if (!url || typeof url !== "string") return;
-      // BUG FIX: XHR/fetch sering memakai URL RELATIF ("video.m3u8") —
-      // resolve terhadap location agar tetap tertangkap.
       let abs = url;
       if (!/^https?:/i.test(abs)) {
         try {
           abs = new URL(url, location.href).href;
         } catch (e) {
-          return; // tidak bisa di-resolve → abaikan
+          return;
         }
       }
-      if (!/^https?:/i.test(abs)) return; // abaikan blob:, data:, file:
+      if (!/^https?:/i.test(abs)) return;
       const clean = abs.split("#")[0];
       if (!isMediaUrl(clean)) return;
-      return !!href && isMediaUrl(href.split("#")[0]);
-      // B4a: URL yang sudah tercatat tidak mengubah isi Set — keluar lebih
-      // awal supaya tidak memicu serialisasi ulang yang sia-sia.
       if (candidates.has(clean)) return;
       candidates.add(clean);
       if (candidates.size > MAX) {
