@@ -17,6 +17,26 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 🌐 **Proxy global** (HTTP/SOCKS5, kredensial di URL) — satu kolom di Pengaturan, berlaku untuk aria2 & yt-dlp
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 
+## Perubahan v3.0.0
+
+**Release breaking (semver major): fitur download torrent & magnet link dihapus.**
+
+- Skema `magnet:` kini ditolak dengan pesan jelas — "Skema URL tidak didukung
+  — http, https, atau ftp." — di gate engine maupun IPC extension (sama
+  seperti `blob:`/`data:` dan skema non-download lain).
+- Deteksi `magnet:`, flag `--bt-*`/`--seed-time`, dan tampilan seeders/peers
+  dihapus dari jalur daemon RPC. **Daemon RPC tetap dipakai** untuk unduhan
+  http/https/ftp (limit kecepatan global live & pause/resume native).
+- File metafile (`.torrent`, `.nzb`, `.metalink`, `.meta4`) tetap di daftar
+  297 ekstensi file langsung dan tetap di-intercept extension, tetapi kini
+  **diunduh sebagai file biasa** — kedua jalur aria2 memakai
+  `--follow-torrent=false` / opsi `follow-torrent: "false"` sehingga aria2
+  tidak lagi mengikuti metadata-nya (default aria2 sebelumnya malah mengunduh
+  konten yang dideskripsikan torrent-nya).
+- Clipboard monitor tidak lagi memicu untuk `magnet:`. Input magnet yang
+  ditempel tetap lolos normalisasi apa adanya agar penolakan engine memakai
+  pesan skema yang jelas (bukan URL `https://magnet:…` sampah).
+
 ## Stabilitas v2.11.2
 
 - **Unduhan hidup lagi** — nilai `min-split-size` `512K` (jalur per-proses DAN
@@ -166,7 +186,7 @@ bash packaging/build-deb.sh
 
 - `src/lib.rs` — library crate (semua module publik)
 - `src/main.rs` — binary entry point (CLI dispatch: GUI / NMH)
-- `src/downloader/` — `aria2` (jalur per-proses + pipeline resolve), `aria2_rpc` (daemon RPC: magnet & http/ftp), `youtube`, `universal` (resolver), `mod` (engine)
+- `src/downloader/` — `aria2` (jalur per-proses + pipeline resolve), `aria2_rpc` (daemon RPC http/ftp: limit global live, pause/resume native; v3.0.0: jalur magnet dihapus), `youtube`, `universal` (resolver), `mod` (engine)
 - `src/ipc/` — Unix socket server untuk browser → GUI
 - `src/native_host/` — Chrome Native Messaging wrapper
 - `src/gui/` — GTK4 window & dialog

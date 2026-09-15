@@ -19,15 +19,15 @@ fast-dm --native  ──1 baris JSON──►  Unix socket (Config::ipc_socket_p
    │  (spawn GUI bila mati)          peer-cred uid, 0600)  ►  DownloadEngine (tokio)
                                         │ spawn_supervised: pilih backend per URL
                                         ▼
-                          aria2c daemon RPC (magnet + http/ftp: limit global live,
+                          aria2c daemon RPC (http/ftp: limit global live,
                             pause/resume native; fallback per-proses bila daemon
-                            tak tersedia — B2.1/B2.2)
+                            tak tersedia — B2.1/B2.2; v3.0.0: magnet dihapus)
                           aria2c per-proses (fallback daemon & resolver universal;
                             stdout di-parse regex)
                           yt-dlp (subprocess universal resolver, fallback: aria2c)
 ```
 
-- **Bukan** JSON-RPC penuh: unduhan http/ftp & magnet = **daemon aria2c
+- **Bukan** JSON-RPC penuh: unduhan http/ftp = **daemon aria2c
   `--enable-rpc`** (satu per sesi, `aria2_rpc.rs`); unduhan YouTube & fallback
   universal = proses `yt-dlp`/`aria2c` sendiri (kontrol via sinyal SIGTERM ke
   process group → resume-friendly + parsing stdout, throttle UI 5 fps).

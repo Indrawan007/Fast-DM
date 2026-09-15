@@ -298,13 +298,12 @@ impl DownloadEngine {
         // v2.3.0 (M11): tolak cepat skema non-download (blob:, data:, javascript:,
         // file:, dll.) — dulu lolos dan baru gagal lambat di CLI dengan error
         // yang tidak jelas.
-        // v2.9.1: `magnet:` DI-IZINKAN (didukung daemon aria2 RPC sejak B2.1;
-        // gate http/https/ftp lama keliru menolaknya). Magnet tanpa `://`
-        // tidak bisa diparse Url — ditangani is_magnet() lebih dulu.
+        // v3.0.0: `magnet:` ikut ditolak — fitur torrent/magnet dihapus;
+        // pesan tetap eksplisit agar tidak bingung saat menempel link lama.
         if !is_supported_scheme(url) {
             info.status = DownloadStatus::Error;
             info.error_msg =
-                "Skema URL tidak didukung — http, https, ftp, atau magnet.".to_string();
+                "Skema URL tidak didukung — http, https, atau ftp.".to_string();
 
             let _ = self.event_tx.send(DownloadEvent::Error(info.clone()));
             downloads.insert(id.clone(), Arc::new(Mutex::new(info)));
@@ -586,21 +585,19 @@ fn spawn_supervised(
         if is_yt {
             // YouTube: yt-dlp dengan dialog kualitas (behavior lama)
             youtube::download(info.clone(), tx.clone(), &config).await;
-        } else if aria2_rpc::is_magnet(&url) || is_direct_file_url(&url) {
-            // v2.7.0 (B2.1): magnet/torrent → daemon RPC aria2.
-            // v2.9.0 (B2.2): http/https/ftp file langsung juga ke daemon RPC —
+        } else if is_direct_file_url(&url) {
+            // v2.9.0 (B2.2): http/https/ftp file langsung → daemon RPC aria2 —
             // limit total ditegakkan GLOBAL & LIVE oleh daemon (changeGlobalOption,
             // daemon membagi ulang ke semua unduhan aktif), pause/resume native.
             // Karena itu limit MENTAH yang dipakai, BUKAN hasil pembagian
             // per-proses M3 (juga anti double-division).
-            let is_mag = aria2_rpc::is_magnet(&url);
             let mut cfg = config.clone();
             cfg.max_overall_speed = original_config.max_overall_speed.clone();
             let outcome = aria2_rpc::download(info.clone(), tx.clone(), &cfg).await;
             // B2.2: daemon tak tersedia / addUri ditolak SEBELUM unduhan jalan
-            // → http/ftp jatuh ke jalur per-proses lama (nol regresi). Magnet
-            // RPC-only — tidak pernah Fallback.
-            if matches!(outcome, aria2_rpc::RpcOutcome::Fallback) && !is_mag {
+            // → http/ftp jatuh ke jalur per-proses lama (nol regresi).
+            // (v3.0.0: magnet dihapus — tidak ada lagi jalur RPC-only.)
+            if matches!(outcome, aria2_rpc::RpcOutcome::Fallback) {
                 let aborted = {
                     let i = info.lock().await;
                     matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused)
@@ -645,15 +642,10 @@ fn spawn_supervised(
     });
 }
 
-/// Skema yang engine tahu cara mengunduhnya: http/https/ftp (aria2) dan
-/// `magnet:` (daemon RPC aria2, B2.1). `magnet:?xt=…` tidak punya `//`
-/// sehingga `url::Url` tetap bisa memparse-nya, tapi cek string awalan
-/// dipakai sebagai jalur cepat yang tahan terhadap variasi penulisan.
-/// Yang ditolak: `blob:`, `data:`, `javascript:`, `file:`, `about:`, dll.
+/// Skema yang engine tahu cara mengunduhnya: http/https/ftp (aria2/yt-dlp).
+/// v3.0.0: `magnet:` dihapus — kini ikut ditolak seperti skema tak dikenal
+/// lain (`blob:`, `data:`, `javascript:`, `file:`, `about:`, dst).
 pub fn is_supported_scheme(url: &str) -> bool {
-    if aria2_rpc::is_magnet(url) {
-        return true;
-    }
     Url::parse(url)
         .map(|u| matches!(u.scheme(), "http" | "https" | "ftp"))
         .unwrap_or(false)
@@ -1906,17 +1898,13 @@ mod tests {
         assert!(!is_direct_file_url("x.com/watch"));
     }
 
-    // ── is_supported_scheme (v2.9.1: magnet wajib lolos gate add_download) ──
+    // ── is_supported_scheme ──
 
     #[test]
-    fn supported_scheme_accepts_http_ftp_magnet() {
+    fn supported_scheme_accepts_http_ftp() {
         assert!(is_supported_scheme("https://example.com/file.zip"));
         assert!(is_supported_scheme("http://example.com/a"));
         assert!(is_supported_scheme("ftp://server/pub/file.iso"));
-        assert!(is_supported_scheme(
-            "magnet:?xt=urn:btih:aaaabbbbccccdddd&dn=ubuntu"
-        ));
-        assert!(is_supported_scheme("  MAGNET:?xt=urn:btih:deadbeef")); // trim + case-insensitive
     }
 
     #[test]
@@ -1928,6 +1916,16 @@ mod tests {
         assert!(!is_supported_scheme("javascript:alert(1)"));
         assert!(!is_supported_scheme("file:///home/user/a.zip"));
         assert!(!is_supported_scheme("not a url at all"));
+    }
+
+    #[test]
+    fn supported_scheme_rejects_magnet_since_v3() {
+        // v3.0.0: fitur torrent/magnet dihapus — magnet kini ditolak di gate
+        // yang sama seperti skema non-download lain, dengan pesan jelas.
+        assert!(!is_supported_scheme(
+            "magnet:?xt=urn:btih:aaaabbbbccccdddd&dn=ubuntu"
+        ));
+        assert!(!is_supported_scheme("  MAGNET:?xt=urn:btih:deadbeef")); // trim + case-insensitive
     }
 
     // ── is_valid_speed_limit ──
