@@ -659,7 +659,6 @@ pub(crate) async fn shutdown_daemon(gids: &[String], cfg: &Config) -> Result<(),
 
     Err(shutdown_error.unwrap_or_else(|| "daemon masih hidup setelah shutdown".into()))
 }
-
 /// Jalur unduh http/https/ftp via daemon RPC (pipeline resolve `aria2.rs`
 /// sebelum `addUri`). v3.0.0: magnet/torrent dihapus dari jalur ini.
 pub async fn download(
@@ -689,7 +688,8 @@ pub async fn download(
     // v2.10.5 (perf): resolve & penyiapan daemon dulu SERIAL — unduhan pertama
     // membayar HEAD/GET resolver LALU spawn+probe daemon (±6 dtk worst case)
     // berturut-turut. Keduanya independen → jalankan PARALEL (tokio::join!).
-    let (resolve_res, daemon_res) = tokio::join!(aria2::resolve_filename(&info, cfg), ensure_daemon(cfg));
+    let (resolve_res, daemon_res) =
+        tokio::join!(aria2::resolve_filename(&info, cfg), ensure_daemon(cfg));
 
     if let Err(msg) = resolve_res {
         fail(&info, &tx, msg).await;
@@ -1011,6 +1011,7 @@ mod tests {
         let until = u64::MAX.saturating_add(DAEMON_RETRY_MS);
         assert_eq!(until, u64::MAX);
     }
+
     #[test]
     fn only_added_gid_needs_initial_unpause() {
         // Regresi v2.9.2: GID saved yang gagal dipakai lalu diganti addUri
@@ -1106,7 +1107,13 @@ mod tests {
         // .torrent akan membuat aria2 mengunduh KONTEN torrent tersebut
         // (default --follow-torrent=true) — file kecil .torrent-nya sendiri
         // tidak pernah disimpan. Opsi harus selalu "false" apa pun konfigurasi.
-        let o = adduri_options("/dl", Some("a.torrent"), None, &HashMap::new(), &Config::default());
+        let o = adduri_options(
+            "/dl",
+            Some("a.torrent"),
+            None,
+            &HashMap::new(),
+            &Config::default(),
+        );
         assert_eq!(o["follow-torrent"], "false");
     }
 

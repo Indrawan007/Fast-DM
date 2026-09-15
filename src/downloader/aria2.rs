@@ -152,6 +152,10 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         // FILE BIASA; tanpa flag ini default aria2 (--follow-torrent=true)
         // malah mengunduh konten yang dideskripsikan torrent-nya.
         "--follow-torrent=false".into(),
+        // v3.0.0: dipertahankan — control file disimpan tiap 5 dtk (default
+        // 60) agar kemajuan terakhir tetap bisa di-resume bila proses mati.
+        // Flag ini dulu satu blok dengan --bt-* tapi berlaku untuk SEMUA
+        // unduhan, jadi tetap wajib ada.
         "--auto-save-interval=5".into(),
         format!("--timeout={}", config.timeout),
         "--connect-timeout=15".into(),
