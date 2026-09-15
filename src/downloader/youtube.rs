@@ -12,8 +12,19 @@ static RE_YTDLP_PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RE_YTDLP_PROGRESS2: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[download\]\s+(\d+\.?\d*)%").unwrap());
-static RE_YTDLP_DEST: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[download\]\s+Destination:\s+(.+)").unwrap());
+static RE_YTDLP_DEST: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\[download\]\s+Destination:\s+["']?([^"'\r\n]+)["']?"#).unwrap()
+});
+static RE_YTDLP_MERGER_OUT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\[Merger\]\s+Merging formats into\s+["']?([^"'\r\n]+)["']?"#).unwrap()
+});
+static RE_YTDLP_EXTRACT_AUDIO: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\[ExtractAudio\]\s+Destination:\s+["']?([^"'\r\n]+)["']?"#).unwrap()
+});
+static RE_YTDLP_ALREADY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\[download\]\s+["']?([^"'\r\n]+?)["']?\s+has already been downloaded"#).unwrap()
+});
+
 static RE_YTDLP_MERGE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[Merger\]|\[ffmpeg\]|Merging").unwrap());
 static RE_SPEED_PARSE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([\d.]+)\s*(\S+)").unwrap());
@@ -504,15 +515,25 @@ pub async fn download(
         "15".into(),
         "--retries".into(),
         config.retry_count.to_string(),
+        "--fragment-retries".into(),
+        "10".into(),
+        "--retry-sleep".into(),
+        "fragment:exp=1:1:5".into(),
+        "--file-access-retries".into(),
+        "3".into(),
+        "--extractor-retries".into(),
+        "3".into(),
+        "--throttled-rate".into(),
+        "100K".into(),
         "--merge-output-format".into(),
         merge_output_format(quality.as_deref()).into(),
         "--embed-metadata".into(),
-        // v2.11.0 (perf): chunk 10M + buffer 16K meningkatkan throughput HTTP
-        // untuk file besar tanpa membebani RAM (buffer kecil, chunk besar).
+        // v2.11.0 (perf): chunk 10M + buffer 64K meningkatkan throughput HTTP
+        // untuk file besar tanpa membebani RAM serta mengurangi overhead syscall.
         "--http-chunk-size".into(),
         "10M".into(),
         "--buffer-size".into(),
-        "16K".into(),
+        "64K".into(),
     ]);
 
     cmd.extend(cookie_args(&url));
@@ -630,11 +651,46 @@ pub(crate) async fn run_ytdlp(
             }
         };
 
+        if let Some(m) = RE_YTDLP_MERGER_OUT.captures(&line) {
+            let mut i = info.lock().await;
+            if let Some(name) = extract_dest_filename(m.get(1).map(|s| s.as_str()).unwrap_or("")) {
+                i.filename = name;
+            }
+            i.progress = 99.0;
+            // M10: info merge → status_detail (bukan error_msg merah)
+            i.status_detail = "Menggabungkan video + audio…".into();
+            let _ = tx.send(DownloadEvent::Progress(i.clone()));
+            continue;
+        }
+
+        if let Some(m) = RE_YTDLP_EXTRACT_AUDIO.captures(&line) {
+            let mut i = info.lock().await;
+            if let Some(name) = extract_dest_filename(m.get(1).map(|s| s.as_str()).unwrap_or("")) {
+                i.filename = name;
+                let _ = tx.send(DownloadEvent::Progress(i.clone()));
+            }
+            continue;
+        }
+
+        if let Some(m) = RE_YTDLP_ALREADY.captures(&line) {
+            let mut i = info.lock().await;
+            if let Some(name) = extract_dest_filename(m.get(1).map(|s| s.as_str()).unwrap_or("")) {
+                i.filename = name;
+                let _ = tx.send(DownloadEvent::Progress(i.clone()));
+            }
+            continue;
+        }
+
         if let Some(m) = RE_YTDLP_DEST.captures(&line) {
-            let _filename = std::path::Path::new(m.get(1).map(|m| m.as_str()).unwrap_or(""))
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            if let Some(name) = extract_dest_filename(m.get(1).map(|s| s.as_str()).unwrap_or("")) {
+                let mut i = info.lock().await;
+                if super::aria2::is_generic_filename(&i.filename)
+                    || i.filename.starts_with("download_")
+                {
+                    i.filename = name;
+                    let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                }
+            }
         }
 
         if RE_YTDLP_MERGE.is_match(&line) {
@@ -747,6 +803,17 @@ fn parse_eta_hms(s: &str) -> u64 {
         1 => nums[0],
         _ => 0,
     }
+}
+
+pub(crate) fn extract_dest_filename(raw: &str) -> Option<String> {
+    let raw = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+    let p = std::path::Path::new(raw);
+    let name = p.file_name()?.to_str()?;
+    let sanitized = super::sanitize_filename(name);
+    if sanitized.is_empty() || !sanitized.contains('.') {
+        return None;
+    }
+    Some(sanitized)
 }
 
 fn parse_speed(s: &str) -> u64 {
@@ -1086,6 +1153,56 @@ mod tests {
         assert!(args.contains(&"mp3".to_string()));
         assert!(args.contains(&"--audio-quality".to_string()));
         assert!(args.contains(&"0".to_string())); // best quality
+    }
+
+    #[test]
+    fn extract_dest_filename_handles_various_formats() {
+        assert_eq!(
+            extract_dest_filename("/home/user/Downloads/My Cool Video.mp4"),
+            Some("My Cool Video.mp4".to_string())
+        );
+        assert_eq!(
+            extract_dest_filename("\"/downloads/Movie 2026.mkv\""),
+            Some("Movie 2026.mkv".to_string())
+        );
+        assert_eq!(
+            extract_dest_filename("'Audio File.mp3'"),
+            Some("Audio File.mp3".to_string())
+        );
+        assert_eq!(extract_dest_filename("no_extension"), None);
+    }
+
+    #[test]
+    fn ytdlp_destination_and_merger_regex_matches() {
+        let line1 = "[download] Destination: /home/user/Downloads/Video Title [dQw4w9WgXcQ].mp4";
+        let m1 = RE_YTDLP_DEST.captures(line1).unwrap();
+        assert_eq!(
+            extract_dest_filename(&m1[1]),
+            Some("Video Title [dQw4w9WgXcQ].mp4".to_string())
+        );
+
+        let line2 =
+            "[Merger] Merging formats into \"/home/user/Downloads/Video Title [dQw4w9WgXcQ].mkv\"";
+        let m2 = RE_YTDLP_MERGER_OUT.captures(line2).unwrap();
+        assert_eq!(
+            extract_dest_filename(&m2[1]),
+            Some("Video Title [dQw4w9WgXcQ].mkv".to_string())
+        );
+
+        let line3 = "[ExtractAudio] Destination: /tmp/Music Song.mp3";
+        let m3 = RE_YTDLP_EXTRACT_AUDIO.captures(line3).unwrap();
+        assert_eq!(
+            extract_dest_filename(&m3[1]),
+            Some("Music Song.mp3".to_string())
+        );
+
+        let line4 =
+            "[download] /home/user/Downloads/Existing Video.mp4 has already been downloaded";
+        let m4 = RE_YTDLP_ALREADY.captures(line4).unwrap();
+        assert_eq!(
+            extract_dest_filename(&m4[1]),
+            Some("Existing Video.mp4".to_string())
+        );
     }
 
     #[test]

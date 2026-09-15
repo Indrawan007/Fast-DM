@@ -1437,9 +1437,44 @@ pub fn sanitize_filename(name: &str) -> String {
     }
 }
 
-/// Extract filename from URL
+pub(crate) fn is_script_extension(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        ".php", ".asp", ".aspx", ".jsp", ".do", ".action", ".cgi", ".pl", ".html", ".htm",
+    ]
+    .iter()
+    .any(|ext| lower.ends_with(ext))
+}
+
+/// Extract filename from URL (path & query parameters fallback)
 pub fn extract_filename_from_url(url: &str) -> String {
     if let Ok(parsed) = Url::parse(url) {
+        // 1. Cek query parameters yang sering membawa nama file asli dari CDN/storage
+        //    (mis. ?filename=video.mp4, ?file=video.mp4, ?response-content-disposition=attachment;filename=...)
+        for (k, v) in parsed.query_pairs() {
+            let k_lower = k.to_ascii_lowercase();
+            if matches!(
+                k_lower.as_str(),
+                "filename" | "file" | "name" | "title" | "fn"
+            ) {
+                let cleaned = sanitize_filename(&v);
+                if !cleaned.is_empty() && cleaned.contains('.') && !is_script_extension(&cleaned) {
+                    return cleaned;
+                }
+            } else if k_lower == "response-content-disposition" || k_lower == "rscd" {
+                if let Some(name) = aria2::parse_content_disposition(&v) {
+                    let cleaned = sanitize_filename(&name);
+                    if !cleaned.is_empty()
+                        && cleaned.contains('.')
+                        && !is_script_extension(&cleaned)
+                    {
+                        return cleaned;
+                    }
+                }
+            }
+        }
+
+        // 2. Cek path URL
         let path = parsed.path();
         let decoded = urlencoding::decode(path).unwrap_or_default();
         let basename = Path::new(decoded.as_ref())
@@ -1448,7 +1483,7 @@ pub fn extract_filename_from_url(url: &str) -> String {
             .unwrap_or("");
 
         let cleaned = sanitize_filename(basename);
-        if !cleaned.is_empty() && cleaned.contains('.') {
+        if !cleaned.is_empty() && cleaned.contains('.') && !is_script_extension(&cleaned) {
             return cleaned;
         }
     }
@@ -2026,8 +2061,27 @@ mod tests {
     }
 
     #[test]
+    fn extract_filename_with_query_params() {
+        // Query param `filename`/`file` yang membawa nama asli
+        assert_eq!(
+            extract_filename_from_url("https://example.com/download.php?file=Anime_Episode_10.mp4"),
+            "Anime_Episode_10.mp4"
+        );
+        assert_eq!(
+            extract_filename_from_url(
+                "https://cdn.test/get?filename=My%20Movie%202026.mkv&token=xyz"
+            ),
+            "My Movie 2026.mkv"
+        );
+        assert_eq!(
+            extract_filename_from_url("https://storage.googleapis.com/bucket/blob?response-content-disposition=attachment%3B%20filename%3D%22Document.pdf%22"),
+            "Document.pdf"
+        );
+    }
+
+    #[test]
     fn extract_filename_with_query() {
-        // Query di URL harus diabaikan
+        // Query di URL harus diabaikan jika path sudah punya nama file non-script
         assert_eq!(
             extract_filename_from_url("https://example.com/file.zip?token=abc&expire=123"),
             "file.zip"

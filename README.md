@@ -17,6 +17,20 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 🌐 **Proxy global** (HTTP/SOCKS5, kredensial di URL) — satu kolom di Pengaturan, berlaku untuk aria2 & yt-dlp
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 
+## Perubahan v3.1.0
+
+- ⚡ **Optimasi Throughput Kecepatan Jaringan** — penambahan opsi buffer socket
+  `--socket-recv-buffer-size=1M`, `--http-accept-gzip=true`, dan
+  `--content-disposition-default-utf8=true` pada aria2c untuk menghilangkan
+  _TCP window bottleneck_ pada koneksi berkecepatan tinggi.
+- 🎬 **Anti-Throttle & Resiliensi yt-dlp** — buffer diperbesar ke 64K, deteksi
+  dan auto-restart stream YouTube lambat (`--throttled-rate 100K`), serta retry
+  fragmen streaming paralel dengan backoff cepat.
+- 🏷️ **Resolusi Nama File Universal** — nama file video dari query parameters
+  (`?file=...`, `?filename=...`, `?response-content-disposition=...`) dan header
+  `Content-Disposition` non-standar (URL-encoded / quote wrapping) diekstrak
+  secara akurat; nama output nyata dari yt-dlp disinkronkan langsung ke UI.
+
 ## Perubahan v3.0.0
 
 **Release breaking (semver major): fitur download torrent & magnet link dihapus.**

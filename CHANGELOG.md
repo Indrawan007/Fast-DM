@@ -3,6 +3,34 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.1.0] - 2026-09-15
+
+### Added
+
+- **Akselerasi Throughput Socket TCP 1 MiB:** `--socket-recv-buffer-size=1M`,
+  `--http-accept-gzip=true`, dan `--content-disposition-default-utf8=true`
+  pada kedua jalur aria2 (subprocess dan daemon RPC) untuk memaksimalkan
+  kecepatan unduh pada koneksi latensi/bandwidth tinggi.
+- **Optimasi Buffer Stream & Anti-Throttle yt-dlp:** Buffer dinaikkan ke 64K,
+  `--throttled-rate 100K` untuk otomatis me-restart stream video yang dibatasi
+  oleh server YouTube, serta resiliensi retry fragmen HLS/DASH paralel
+  (`--fragment-retries 10`, `--retry-sleep fragment:exp=1:1:5`).
+
+### Fixed
+
+- **Resolusi Nama File Universal:**
+  - URL dengan parameter query (`?file=...`, `?filename=...`,
+    `?response-content-disposition=...`, `?name=...`) kini diekstrak dengan
+    benar alih-alih menghasilkan nama file generik atau nama file skrip web
+    (`.php`, `.aspx`, `.jsp`).
+  - Parsing header `Content-Disposition` kini mendukung RFC 5987 ber-quote
+    (`filename*="utf-8''..."`), single-quote (`filename='...'`), serta
+    men-decode URL-encoded characters pada string bertanda kutip.
+  - Nama file tujuan akhir dari output yt-dlp (`[download] Destination: ...`,
+    `[Merger] Merging formats into ...`, `[ExtractAudio] Destination: ...`,
+    dan `... has already been downloaded`) kini otomatis di-update ke GUI dan
+    riwayat sesi sehingga nama video asli selalu sinkron dengan berkas di disk.
+
 ## [3.0.0] - 2026-09-15
 
 ### Removed

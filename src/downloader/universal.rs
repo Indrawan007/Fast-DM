@@ -104,12 +104,22 @@ pub async fn download(
         "15".into(),
         "--retries".into(),
         config.retry_count.to_string(),
+        "--fragment-retries".into(),
+        "10".into(),
+        "--retry-sleep".into(),
+        "fragment:exp=1:1:5".into(),
+        "--file-access-retries".into(),
+        "3".into(),
+        "--extractor-retries".into(),
+        "3".into(),
+        "--throttled-rate".into(),
+        "100K".into(),
         "--merge-output-format".into(),
         merge_output_format(quality.as_deref()).into(),
         "--http-chunk-size".into(),
         "10M".into(),
         "--buffer-size".into(),
-        "16K".into(),
+        "64K".into(),
     ]);
 
     // Cookies (dari cookies.txt / browser) + Referer & header kustom extension

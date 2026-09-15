@@ -465,11 +465,20 @@ async function sendDownload(
   if (!filename) {
     try {
       const urlObj = new URL(url);
-      const path = decodeURIComponent(urlObj.pathname);
-      const parts = path.split("/").filter(Boolean);
-      if (parts.length > 0) {
-        const last = parts[parts.length - 1];
-        if (last.includes(".")) filename = last;
+      for (const key of ["filename", "file", "name", "title", "fn"]) {
+        const val = urlObj.searchParams.get(key);
+        if (val && val.includes(".")) {
+          filename = decodeURIComponent(val);
+          break;
+        }
+      }
+      if (!filename) {
+        const path = decodeURIComponent(urlObj.pathname);
+        const parts = path.split("/").filter(Boolean);
+        if (parts.length > 0) {
+          const last = parts[parts.length - 1];
+          if (last.includes(".")) filename = last;
+        }
       }
     } catch (e) {
       /* ignore */
@@ -781,12 +790,22 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.pageUrl) headers["Referer"] = info.pageUrl;
 
   try {
-    const path = new URL(url).pathname;
-    const decoded = decodeURIComponent(path);
-    const parts = decoded.split("/").filter(Boolean);
-    if (parts.length > 0) {
-      const last = parts[parts.length - 1];
-      if (last && last.includes(".")) filename = last;
+    const urlObj = new URL(url);
+    for (const key of ["filename", "file", "name", "title", "fn"]) {
+      const val = urlObj.searchParams.get(key);
+      if (val && val.includes(".")) {
+        filename = decodeURIComponent(val);
+        break;
+      }
+    }
+    if (!filename) {
+      const path = urlObj.pathname;
+      const decoded = decodeURIComponent(path);
+      const parts = decoded.split("/").filter(Boolean);
+      if (parts.length > 0) {
+        const last = parts[parts.length - 1];
+        if (last && last.includes(".")) filename = last;
+      }
     }
   } catch (e) {
     /* ignore */

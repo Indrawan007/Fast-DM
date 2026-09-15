@@ -22,12 +22,14 @@ static RE_M: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)m").unwrap());
 static RE_S: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)s").unwrap());
 static RE_CONTENT_RANGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"/(\d+)").unwrap());
 static RE_CD_RFC5987: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"filename\*\s*=\s*(?:[Uu][Tt][Ff]-8)?'[^']*'(.+?)(?:\s*;|$)").unwrap()
+    Regex::new(r#"filename\*\s*=\s*["']?(?:[Uu][Tt][Ff]-8|iso-8859-\d+|[a-zA-Z0-9_-]+)?'[^']*'(.+?)(?:["']?\s*(?:;|$))"#).unwrap()
 });
 static RE_CD_QUOTED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"filename\s*=\s*"([^"]+)""#).unwrap());
+static RE_CD_SINGLE_QUOTED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"filename\s*=\s*'([^']+)'"#).unwrap());
 static RE_CD_UNQUOTED: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"filename\s*=\s*([^\s;]+)").unwrap());
+    LazyLock::new(|| Regex::new(r#"filename\s*=\s*([^\s;]+)"#).unwrap());
 
 pub(crate) const CHROME_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -148,6 +150,10 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         // menghindari thrash disk saat banyak unduhan.
         "--enable-mmap=true".into(),
         "--optimize-concurrent-downloads=true".into(),
+        // Optimasi socket receive buffer & HTTP transfer
+        "--socket-recv-buffer-size=1M".into(),
+        "--content-disposition-default-utf8=true".into(),
+        "--http-accept-gzip=true".into(),
         // v3.0.0: fitur torrent/magnet dihapus — file .torrent diunduh sebagai
         // FILE BIASA; tanpa flag ini default aria2 (--follow-torrent=true)
         // malah mengunduh konten yang dideskripsikan torrent-nya.
@@ -800,8 +806,25 @@ pub(crate) fn is_generic_filename(name: &str) -> bool {
     let lower = name.to_lowercase();
     let stem = lower.split('.').next().unwrap_or("");
     let generic = [
-        "download", "index", "file", "get", "fetch", "stream", "media", "content", "data",
-        "output", "video", "audio", "default", "main",
+        "download",
+        "index",
+        "file",
+        "get",
+        "fetch",
+        "stream",
+        "media",
+        "content",
+        "data",
+        "output",
+        "video",
+        "audio",
+        "default",
+        "main",
+        "play",
+        "player",
+        "view",
+        "watch",
+        "videoplayback",
     ];
     if generic.contains(&stem) {
         return true;
@@ -846,27 +869,56 @@ fn content_type_to_ext(ct: &str) -> Option<&'static str> {
     }
 }
 
-fn parse_content_disposition(cd: &str) -> Option<String> {
-    // filename*=UTF-8''encoded_name (RFC 5987)
+pub(crate) fn parse_content_disposition(cd: &str) -> Option<String> {
+    let cd = cd.trim();
+
+    // 1. filename*=UTF-8''encoded_name (RFC 5987 / RFC 6266)
     if let Some(m) = RE_CD_RFC5987.captures(cd) {
-        let decoded = urlencoding::decode(&m[1]).unwrap_or_default();
+        let raw = m[1].trim().trim_matches(|c| c == '"' || c == '\'');
+        let decoded = urlencoding::decode(raw).unwrap_or_default();
         let name = decoded.trim().to_string();
         if !name.is_empty() {
             return Some(name);
         }
     }
 
-    // filename="quoted name"
+    // 2. filename="quoted name"
     if let Some(m) = RE_CD_QUOTED.captures(cd) {
-        let name = m[1].trim().to_string();
+        let raw = m[1].trim();
+        let stripped = raw
+            .strip_prefix("UTF-8''")
+            .or_else(|| raw.strip_prefix("utf-8''"))
+            .unwrap_or(raw);
+        let decoded = urlencoding::decode(stripped).unwrap_or_default();
+        let name = decoded.trim().to_string();
         if !name.is_empty() {
             return Some(name);
         }
     }
 
-    // filename=unquoted
+    // 3. filename='single quoted name'
+    if let Some(m) = RE_CD_SINGLE_QUOTED.captures(cd) {
+        let raw = m[1].trim();
+        let stripped = raw
+            .strip_prefix("UTF-8''")
+            .or_else(|| raw.strip_prefix("utf-8''"))
+            .unwrap_or(raw);
+        let decoded = urlencoding::decode(stripped).unwrap_or_default();
+        let name = decoded.trim().to_string();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+
+    // 4. filename=unquoted
     if let Some(m) = RE_CD_UNQUOTED.captures(cd) {
-        let name = m[1].trim().trim_matches('"').to_string();
+        let raw = m[1].trim().trim_matches(|c| c == '"' || c == '\'');
+        let stripped = raw
+            .strip_prefix("UTF-8''")
+            .or_else(|| raw.strip_prefix("utf-8''"))
+            .unwrap_or(raw);
+        let decoded = urlencoding::decode(stripped).unwrap_or_default();
+        let name = decoded.trim().to_string();
         if !name.is_empty() {
             return Some(name);
         }
@@ -1309,6 +1361,28 @@ mod tests {
         assert_eq!(
             parse_content_disposition(cd),
             Some("my video.mp4".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_content_disposition_quoted_utf8_and_urlencoded() {
+        // Server yang membungkus RFC 5987 dalam quote / URL-encode di dalam quote
+        let cd = "attachment; filename*=\"UTF-8''video%20title.mp4\"";
+        assert_eq!(
+            parse_content_disposition(cd),
+            Some("video title.mp4".to_string())
+        );
+
+        let cd2 = "attachment; filename=\"my%20cool%20movie.mkv\"";
+        assert_eq!(
+            parse_content_disposition(cd2),
+            Some("my cool movie.mkv".to_string())
+        );
+
+        let cd3 = "inline; filename='single_quote.mp4'";
+        assert_eq!(
+            parse_content_disposition(cd3),
+            Some("single_quote.mp4".to_string())
         );
     }
 

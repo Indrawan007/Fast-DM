@@ -208,6 +208,9 @@ pub(crate) fn daemon_args(port: u16, secret: &str, cfg: &Config) -> Vec<String> 
         // v2.11.0 (perf): mmap + optimize concurrent
         "--enable-mmap=true".into(),
         "--optimize-concurrent-downloads=true".into(),
+        "--socket-recv-buffer-size=1M".into(),
+        "--content-disposition-default-utf8=true".into(),
+        "--http-accept-gzip=true".into(),
         // v3.0.0: fitur torrent/magnet dihapus — .torrent menjadi file biasa
         // (per-URI `follow-torrent=false` di adduri_options; default daemon
         // --follow-torrent=true tidak pernah ikut untuk addUri milik kita).
@@ -279,6 +282,10 @@ pub(crate) fn adduri_options(
     o.insert("retry-wait".into(), json!(cfg.retry_wait.to_string()));
     o.insert("min-split-size".into(), json!(aria2::MIN_SPLIT_SIZE));
     o.insert("piece-length".into(), json!("1M"));
+    o.insert("socket-recv-buffer-size".into(), json!("1M"));
+    o.insert("content-disposition-default-utf8".into(), json!("true"));
+    o.insert("http-accept-gzip".into(), json!("true"));
+
     // v2.9.3: koneksi/segmen mengikuti Pengaturan SAAT unduhan ditambahkan —
     // dulu hanya nilai global daemon (dibaca sekali saat daemon lahir), jadi
     // perubahan "Koneksi per server" tidak berlaku sampai app di-restart.
@@ -1066,6 +1073,9 @@ mod tests {
         assert!(j.contains("--rpc-listen-port=6800"));
         assert!(j.contains("--rpc-secret=sec"));
         assert!(j.contains("--auto-save-interval=5"));
+        assert!(j.contains("--socket-recv-buffer-size=1M"));
+        assert!(j.contains("--content-disposition-default-utf8=true"));
+        assert!(j.contains("--http-accept-gzip=true"));
         assert!(j.contains("--max-overall-download-limit=5M"));
         assert!(j.contains("--check-certificate=false"));
         assert!(j.contains("--all-proxy=http://127.0.0.1:8118"));
@@ -1093,8 +1103,11 @@ mod tests {
         // F16 (v2.11.2): 1M = batas bawah rentang sah aria2 (1M–1024M). Nilai
         // lama "512K" membuat addUri fault dan jalur per-proses exit 28.
         assert_eq!(o["min-split-size"], "1M");
-
         assert_eq!(o["piece-length"], "1M");
+        assert_eq!(o["socket-recv-buffer-size"], "1M");
+        assert_eq!(o["content-disposition-default-utf8"], "true");
+        assert_eq!(o["http-accept-gzip"], "true");
+
         assert_eq!(o["allow-overwrite"], "false"); // auto_file_renaming default true
         assert!(o.get("out").is_none());
         assert!(o.get("cookie").is_none());
