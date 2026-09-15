@@ -1372,7 +1372,10 @@ pub(crate) fn should_minimize_on_close(minimize: bool, active: usize) -> bool {
 pub(crate) fn normalize_url_input(raw: &str) -> String {
     let url = raw.trim().to_string();
     let lower = url.to_ascii_lowercase();
-    // v2.7.0 (B2): magnet bukan URL web — jangan di-prefix https://
+    // v3.0.0: magnet/torrent dihapus — tapi `magnet:` SENGAJA tetap lolos
+    // tanpa prefix agar engine menolaknya dengan pesan "skema tidak didukung"
+    // yang jelas, bukan menjadi URL `https://magnet:?xt=…` sampah yang gagal
+    // resolve dengan pesan membingungkan.
     if lower.starts_with("magnet:") {
         return url;
     }
@@ -1388,7 +1391,8 @@ pub(crate) fn normalize_url_input(raw: &str) -> String {
 /// Ekstensi dicek terhadap PATH saja — host selalu mengandung titik, sehingga
 /// cek ke string utuh membuat kondisi "tanpa ekstensi" hampir tak terpenuhi.
 pub(crate) fn wants_quality_dialog(url: &str) -> bool {
-    // v2.7.0 (B2): magnet tidak punya "kualitas" → tanpa dialog
+    // magnet/torrent ditolak engine sejak v3.0.0 — guard defensif ini tetap
+    // ada agar URL semacam itu tidak membuka dialog kualitas sebelum ditolak.
     if url.to_ascii_lowercase().starts_with("magnet:") {
         return false;
     }
@@ -1413,9 +1417,11 @@ fn is_clipboard_url(text: &str) -> bool {
         return false;
     }
     let lower = text.to_ascii_lowercase();
-    // v2.10.5: ftp & magnet juga URL unduhan — clipboard monitor dulu hanya
-    // mengenali http(s) sehingga link ftp/magnet tidak pernah muncul.
-    ["http://", "https://", "ftp://", "magnet:"]
+    // v2.10.5: ftp juga URL unduhan — clipboard monitor dulu hanya mengenali
+    // http(s) sehingga link ftp tidak pernah muncul.
+    // v3.0.0: "magnet:" dihapus — skema itu kini ditolak engine, jadi tidak
+    // boleh lagi memicu notifikasi clipboard.
+    ["http://", "https://", "ftp://"]
         .iter()
         .any(|s| lower.starts_with(s))
 }
@@ -1575,9 +1581,10 @@ mod tests {
     fn clipboard_only_accepts_bounded_web_urls() {
         assert!(is_clipboard_url("https://example.com"));
         assert!(is_clipboard_url("http://example.com"));
-        // v2.10.5: ftp & magnet kini ikut dikenali (case-insensitive).
+        // v2.10.5: ftp ikut dikenali (case-insensitive).
         assert!(is_clipboard_url("ftp://host/pub/file.iso"));
-        assert!(is_clipboard_url("magnet:?xt=urn:btih:abcdef"));
+        // v3.0.0: magnet tidak lagi dikenali — fitur torrent/magnet dihapus.
+        assert!(!is_clipboard_url("magnet:?xt=urn:btih:abcdef"));
         assert!(is_clipboard_url("HTTP://Example.COM/a.zip"));
 
         assert!(!is_clipboard_url(""));
@@ -1594,6 +1601,9 @@ mod tests {
 
     #[test]
     fn normalize_url_passes_magnet_through() {
+        // v3.0.0: magnet SENGAJA lolos normalisasi apa adanya (bukan dijadikan
+        // https://magnet:… sampah) — engine menolaknya dengan pesan skema
+        // yang jelas; lihat supported_scheme_rejects_magnet_since_v3.
         assert_eq!(
             normalize_url_input("  magnet:?xt=urn:btih:ab12 "),
             "magnet:?xt=urn:btih:ab12"
@@ -1642,6 +1652,8 @@ mod tests {
 
     #[test]
     fn wants_quality_skips_magnet() {
+        // magnet ditolak engine sejak v3.0.0 — guard ini memastikan URL
+        // semacam itu pun tidak membuka dialog kualitas lebih dulu.
         assert!(!wants_quality_dialog("magnet:?xt=urn:btih:deadbeef"));
     }
 

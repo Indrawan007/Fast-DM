@@ -145,8 +145,6 @@ function background() {
       // API ini Chrome-only — extension memang hanya menarget Chromium
       // (manifest MV3 + `key`, setup-browser.sh: chrome/brave/edge).
       downloads: { onCreated: event, onDeterminingFilename: event },
-
-      downloads: { onCreated: event },
       contextMenus: { onClicked: event },
       action: {
         setBadgeText: ({ text }) => badges.push(text),

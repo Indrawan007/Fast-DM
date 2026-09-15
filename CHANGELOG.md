@@ -3,6 +3,51 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.0.0] - 2026-09-15
+
+### Removed
+
+- **Fitur download torrent & magnet link dihapus sepenuhnya (breaking).**
+  Skema `magnet:` kini ditolak di gate skema yang sama dengan `blob:`/`data:`
+  dan skema non-download lain — baik di `is_supported_scheme` (engine, jalur
+  GUI) maupun di server IPC (jalur extension), dengan pesan jelas
+  "Skema URL tidak didukung — http, https, atau ftp." Helper `is_magnet()`,
+  flag `--bt-*` + `--seed-time=0` (kedua jalur aria2 sekaligus), dan tampilan
+  seeders/peers di status (`Patch.seeders/peers`, `numSeeders`/`numPeers` di
+  `STATUS_KEYS` tellStatus) dihapus dari `aria2_rpc.rs`. Daemon RPC aria2
+  **dipertahankan** untuk unduhan http/https/ftp (limit kecepatan global
+  live via `changeGlobalOption` + pause/resume native per-GID) — yang dibuang
+  hanya jalur magnetnya.
+
+### Fixed
+
+- **File `.torrent` kini diunduh sebagai FILE BIASA.** `.torrent`/`.nzb`/
+  `.metalink`/`.meta4` tetap di daftar 297 ekstensi file langsung (dan tetap
+  di-intercept extension), tetapi kedua jalur aria2 kini memakai
+  `--follow-torrent=false` (per-proses) / opsi per-URI `follow-torrent: "false"`
+  (daemon `addUri` — menimpa default daemon yatim dari versi lama). Default
+  aria2 `--follow-torrent=true` sebelumnya malah mengunduh KONTEN yang
+  dideskripsikan torrent-nya, bukan menyimpan file kecil `.torrent`-nya.
+
+### Changed
+
+- Clipboard monitor GUI tidak lagi memicu untuk teks `magnet:`. Input magnet
+  yang ditempel tetap lolos normalisasi apa adanya (bukan dijadikan
+  `https://magnet:…` sampah) supaya ditolak engine dengan pesan skema jelas;
+  guard dialog kualitas tetap defensif men-skip-nya.
+
+### Tests
+
+- Baru: `supported_scheme_rejects_magnet_since_v3` (engine gate),
+  `adduri_options_never_follows_torrent_metadata` (opsi per-URI).
+- Diubah: `supported_scheme_accepts_http_ftp_magnet` → tanpa magnet; test
+  clipboard memindahkan magnet ke kelompok ditolak;
+  `patch_from_status_maps_aria2_fields` tanpa field seeders/peers;
+  fixture `build_request_prefixes_token` memakai URL http.
+- Dihapus: `is_magnet_detects_scheme_only`.
+- Unit test extension JS (`tests/extension.test.cjs`): mock duplikat kunci
+  `downloads:` diperbaiki (suite kembali 8/8).
+
 ## [2.11.2] - 2026-09-13
 
 ### Fixed

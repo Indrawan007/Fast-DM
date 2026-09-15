@@ -145,16 +145,13 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         format!("--min-split-size={MIN_SPLIT_SIZE}"),
         "--piece-length=1M".into(), // default terdokumentasi aria2
         // v2.11.0 (perf): mmap mengurangi copy RAM user→kernel, optimize-concurrent
-        // menghindari thrash disk saat banyak unduhan, LPD mempercepat peer discovery.
+        // menghindari thrash disk saat banyak unduhan.
         "--enable-mmap=true".into(),
         "--optimize-concurrent-downloads=true".into(),
-        "--bt-enable-lpd=true".into(),
-        "--bt-max-peers=100".into(),
-        "--bt-request-peer-speed-limit=0".into(),
-        "--bt-save-metadata=true".into(),
-        "--bt-hash-check-seed=true".into(),
-        "--bt-seed-unverified=true".into(),
-        "--auto-save-interval=5".into(),
+        // v3.0.0: fitur torrent/magnet dihapus — file .torrent diunduh sebagai
+        // FILE BIASA; tanpa flag ini default aria2 (--follow-torrent=true)
+        // malah mengunduh konten yang dideskripsikan torrent-nya.
+        "--follow-torrent=false".into(),
         format!("--timeout={}", config.timeout),
         "--connect-timeout=15".into(),
         "--lowest-speed-limit=1K".into(),

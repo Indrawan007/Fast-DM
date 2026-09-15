@@ -1,12 +1,10 @@
-//! v2.7.0 (B2.1): klien JSON-RPC aria2 — daemon bersama + magnet/torrent.
-//! v2.9.0 (B2.2): http/https/ftp juga bermigrasi ke daemon (migrasi penuh).
+//! v2.9.0 (B2.2): klien JSON-RPC aria2 — daemon bersama untuk http/https/ftp.
+//! (v3.0.0: dukungan magnet/torrent dihapus.)
 //!
 //! Mengapa daemon: jalur proses-per-unduh (`aria2.rs`) tidak bisa mengubah
-//! limit setelah proses lahir, dan tidak dapat magnet sama sekali. Melalui
-//! `aria2.addUri`/`changeGlobalOption`:
+//! limit setelah proses lahir. Melalui `aria2.addUri`/`changeGlobalOption`:
 //! - limit total di-tegakkan LIVE oleh daemon (satu budget global untuk semua
 //!   unduhan aktif — bukan pembagian statis per-proses ala M3);
-//! - `magnet:?xt=urn:btih:…` bisa diunduh;
 //! - pause/resume = forcePause/unpause (state & file parsial utuh di daemon);
 //! - koneksi/DNS di-reuse antar-unduhan satu daemon.
 //!
@@ -21,7 +19,7 @@
 //! (`cookie`/`header`) — daemon global tidak menyentuh domain lain. Bila
 //! daemon tak tersedia (mis. `rpc_port` bentrok) atau `addUri` ditolak
 //! SEBELUM unduhan berjalan, `download` return `RpcOutcome::Fallback` dan
-//! pemanggil boleh jatuh ke jalur per-proses lama. Magnet tetap RPC-only.
+//! pemanggil boleh jatuh ke jalur per-proses lama.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,11 +35,6 @@ use crate::config::Config;
 
 static RPC_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Deteksi awal magnet (trim + case-insensitive). Hanya awalan `magnet:`.
-pub fn is_magnet(url: &str) -> bool {
-    url.trim_start().to_ascii_lowercase().starts_with("magnet:")
-}
-
 /// Hasil `download` — keputusan Fallback ada di TANGAN pemanggil
 /// (`spawn_supervised`), karena hanya dia yang tahu jalur per-proses tersedia.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,8 +43,7 @@ pub enum RpcOutcome {
     /// dikirim, atau user pause/cancel. Pemanggil tidak perlu aksi lain.
     Done,
     /// Daemon tak tersedia ATAU `addUri` ditolak, SEMUA sebelum unduhan
-    /// berjalan — pemanggil boleh fallback ke jalur per-proses (http/ftp
-    /// saja; magnet tidak pernah menghasilkan variant ini).
+    /// berjalan — pemanggil boleh fallback ke jalur per-proses.
     Fallback,
 }
 
@@ -213,21 +205,12 @@ pub(crate) fn daemon_args(port: u16, secret: &str, cfg: &Config) -> Vec<String> 
         format!("--file-allocation={}", cfg.file_allocation),
         format!("--user-agent={}", aria2::CHROME_UA),
         "--summary-interval=0".into(),
-        // v2.10.5 (perf): nonaktifkan seeding magnet. Default aria2 adalah
-        // --seed-ratio=1.0, sehingga task magnet tetap berstatus "active"
-        // (seeding) SELAMANYA setelah file lengkap — UI tampak "MENGUNDUH"
-        // tak kunjung selesai. --seed-time=0 memaksa selesai begitu unduhan
-        // selesai (tetap bisa upload saat masih mengunduh).
-        "--seed-time=0".into(),
-        // v2.11.0 (perf): mmap + optimize concurrent + LPD + peer tuning
+        // v2.11.0 (perf): mmap + optimize concurrent
         "--enable-mmap=true".into(),
         "--optimize-concurrent-downloads=true".into(),
-        "--bt-enable-lpd=true".into(),
-        "--bt-max-peers=100".into(),
-        "--bt-request-peer-speed-limit=0".into(),
-        "--bt-save-metadata=true".into(),
-        "--bt-hash-check-seed=true".into(),
-        "--bt-seed-unverified=true".into(),
+        // v3.0.0: fitur torrent/magnet dihapus — .torrent menjadi file biasa
+        // (per-URI `follow-torrent=false` di adduri_options; default daemon
+        // --follow-torrent=true tidak pernah ikut untuk addUri milik kita).
         // lanjutkan dari control file lintas sesi app; cek hash utk yang lengkap
         "--continue=true".into(),
     ];
@@ -267,7 +250,11 @@ pub(crate) fn adduri_options(
     o.insert("dir".into(), json!(save_dir));
     o.insert("pause".into(), json!("true"));
     o.insert("continue".into(), json!("true"));
-    // `out` hanya bermakna untuk http/ftp — magnet: nama dari metadata torrent.
+    // v3.0.0: fitur torrent/magnet dihapus — file .torrent diunduh sebagai
+    // FILE BIASA; tanpa ini default aria2 (--follow-torrent=true) malah
+    // mengikuti metadata torrent-nya. Daemon yatim dari versi lama yang mungkin
+    // membawa opsi berbeda pun tunduk pada opsi per-URI ini.
+    o.insert("follow-torrent".into(), json!("false"));
     if let Some(f) = filename.filter(|f| !f.is_empty()) {
         o.insert("out".into(), json!(f));
     }
@@ -450,7 +437,9 @@ async fn ensure_daemon(cfg: &Config) -> Result<Rpc, String> {
         #[cfg(unix)]
         cmd.process_group(0);
         let child = cmd.spawn().map_err(|e| {
-            format!("aria2c gagal dijalankan: {e} (pasang aria2 untuk unduh magnet)")
+            // v3.0.0: pesan digeneriskan — daemon kini hanya melayani
+            // http/https/ftp (dulu menyebut magnet).
+            format!("aria2c gagal dijalankan: {e} (pastikan aria2 terpasang)")
         })?;
         *guard = Some(child);
     }
@@ -478,8 +467,6 @@ pub(crate) struct Patch {
     pub total: u64,
     pub completed: u64,
     pub speed: u64,
-    pub seeders: u64,
-    pub peers: u64,
     pub first_file: Option<String>,
     pub error: Option<String>,
 }
@@ -531,8 +518,6 @@ pub(crate) fn patch_from_status(v: &Value) -> Patch {
         total: field_u64(v, "totalLength"),
         completed: field_u64(v, "completedLength"),
         speed: field_u64(v, "downloadSpeed"),
-        seeders: field_u64(v, "numSeeders"),
-        peers: field_u64(v, "numPeers"),
         first_file,
         error,
     }
@@ -544,8 +529,6 @@ const STATUS_KEYS: &[&str] = &[
     "completedLength",
     "downloadSpeed",
     "files",
-    "numSeeders",
-    "numPeers",
     "errorCode",
     "errorMessage",
 ];
@@ -676,7 +659,6 @@ pub(crate) async fn shutdown_daemon(gids: &[String], cfg: &Config) -> Result<(),
 
     Err(shutdown_error.unwrap_or_else(|| "daemon masih hidup setelah shutdown".into()))
 }
-
 /// Jalur unduh via daemon RPC — v2.7.0 (B2.1) magnet; v2.9.0 (B2.2)
 /// http/https/ftp juga (dengan pipeline resolve `aria2.rs` sebelum `addUri`).
 pub async fn download(
@@ -697,7 +679,6 @@ pub async fn download(
         let i = info.lock().await;
         (i.url.clone(), i.save_dir.clone())
     };
-    let is_mag = is_magnet(&url);
 
     // B2.2: http/https/ftp — resolve filename + tolak halaman HTML +
     // pre-check disk (identik dengan pipeline per-proses; tanpa ini "file
@@ -707,55 +688,43 @@ pub async fn download(
     // v2.10.5 (perf): resolve & penyiapan daemon dulu SERIAL — unduhan pertama
     // membayar HEAD/GET resolver LALU spawn+probe daemon (±6 dtk worst case)
     // berturut-turut. Keduanya independen → jalankan PARALEL (tokio::join!).
-    let resolve_fut = async {
-        if is_mag {
-            Ok(())
-        } else {
-            aria2::resolve_filename(&info, cfg).await
-        }
-    };
-    let (resolve_res, daemon_res) = tokio::join!(resolve_fut, ensure_daemon(cfg));
+    let (resolve_res, daemon_res) =
+        tokio::join!(aria2::resolve_filename(&info, cfg), ensure_daemon(cfg));
 
     if let Err(msg) = resolve_res {
         fail(&info, &tx, msg).await;
         return RpcOutcome::Done;
     }
 
-    if !is_mag {
-        let (size, dir) = {
-            let i = info.lock().await;
-            (i.total_size, i.save_dir.clone())
-        };
-        if size > 0 && !aria2::has_space(&dir, size) {
-            fail(
-                &info,
-                &tx,
-                format!(
-                    "Ruang disk tidak cukup — butuh {}",
-                    super::types::format_size(size)
-                ),
-            )
-            .await;
+    let (size, dir) = {
+        let i = info.lock().await;
+        (i.total_size, i.save_dir.clone())
+    };
+    if size > 0 && !aria2::has_space(&dir, size) {
+        fail(
+            &info,
+            &tx,
+            format!(
+                "Ruang disk tidak cukup — butuh {}",
+                super::types::format_size(size)
+            ),
+        )
+        .await;
+        return RpcOutcome::Done;
+    }
+    // User bisa pause/cancel selama resolve (±10 dtk) — hormati.
+    {
+        let i = info.lock().await;
+        if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
             return RpcOutcome::Done;
-        }
-        // User bisa pause/cancel selama resolve (±10 dtk) — hormati.
-        {
-            let i = info.lock().await;
-            if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-                return RpcOutcome::Done;
-            }
         }
     }
 
     let rpc = match daemon_res {
         Ok(r) => r,
         Err(e) => {
-            if is_mag {
-                fail(&info, &tx, format!("Aria2 RPC: {e}")).await;
-                return RpcOutcome::Done;
-            }
-            // B2.2: http/ftp — biarkan pemanggil coba jalur per-proses lama.
-            tracing::warn!("B2.2: daemon RPC tak tersedia — fallback per-proses: {e}");
+            // Biarkan pemanggil coba jalur per-proses lama.
+            tracing::warn!("daemon RPC tak tersedia — fallback per-proses: {e}");
             return RpcOutcome::Fallback;
         }
     };
@@ -777,15 +746,11 @@ pub async fn download(
     }
 
     // B2.2: opsi per-URI — cookie per-domain + header (mis. Referer) +
-    // timeout/retry mengikuti Pengaturan. `out` hanya untuk http/ftp.
+    // timeout/retry mengikuti Pengaturan.
     let (out, cookie, headers) = {
         let i = info.lock().await;
         (
-            if is_mag {
-                None
-            } else {
-                Some(i.filename.clone())
-            },
+            Some(i.filename.clone()),
             aria2::cookie_header_for(&url),
             i.headers.clone(),
         )
@@ -828,21 +793,13 @@ pub async fn download(
                     .unwrap_or_default()
                     .to_string(),
                 Err(e) => {
-                    if is_mag {
-                        fail(&info, &tx, format!("addUri: {e}")).await;
-                        return RpcOutcome::Done;
-                    }
-                    tracing::warn!("B2.2: addUri ditolak daemon — fallback per-proses: {e}");
+                    tracing::warn!("addUri ditolak daemon — fallback per-proses: {e}");
                     return RpcOutcome::Fallback;
                 }
             }
         }
     };
     if gid.is_empty() {
-        if is_mag {
-            fail(&info, &tx, "addUri: gid kosong dari aria2".into()).await;
-            return RpcOutcome::Done;
-        }
         return RpcOutcome::Fallback;
     }
     if gid_origin.needs_initial_unpause() {
@@ -852,11 +809,7 @@ pub async fn download(
         if let Err(e) = rpc.call("unpause", vec![json!(gid.as_str())]).await {
             let _ = forget(&rpc, &gid).await;
             info.lock().await.rpc_gid = None;
-            if is_mag {
-                fail(&info, &tx, format!("unpause: {e}")).await;
-                return RpcOutcome::Done;
-            }
-            tracing::warn!("B2.2: unpause GID baru gagal — fallback per-proses: {e}");
+            tracing::warn!("unpause GID baru gagal — fallback per-proses: {e}");
             return RpcOutcome::Fallback;
         }
     }
@@ -1016,12 +969,6 @@ pub async fn download(
                 } else {
                     0.0
                 };
-                // seeders/peers hanya bermakna untuk torrent — http/ftp biarkan
-                // kosong (tellStatus tidak punya field koneksi aktif).
-                if is_mag {
-                    i.status_detail = format!("seeders: {} · peers: {}", p.seeders, p.peers);
-                    i.connections = p.peers.min(255) as u8;
-                }
                 let _ = tx.send(DownloadEvent::Progress(i.clone()));
             }
         }
@@ -1064,13 +1011,6 @@ mod tests {
         let until = u64::MAX.saturating_add(DAEMON_RETRY_MS);
         assert_eq!(until, u64::MAX);
     }
-    #[test]
-    fn is_magnet_detects_scheme_only() {
-        assert!(is_magnet("magnet:?xt=urn:btih:0123abcd"));
-        assert!(is_magnet("  MAGNET:?xt=urn:btih:0123"));
-        assert!(!is_magnet("https://site/magnet:1"));
-        assert!(!is_magnet("http"));
-    }
 
     #[test]
     fn only_added_gid_needs_initial_unpause() {
@@ -1082,12 +1022,12 @@ mod tests {
 
     #[test]
     fn build_request_prefixes_token() {
-        let mut p = vec![json!(["magnet:?x"])];
+        let mut p = vec![json!(["https://x.com/f.zip"])];
         let r = build_request("addUri", &mut p, "s3cr3t");
         assert_eq!(r["jsonrpc"], "2.0");
         assert_eq!(r["method"], "aria2.addUri");
         assert_eq!(r["params"][0], "token:s3cr3t");
-        assert_eq!(r["params"][1], json!(["magnet:?x"]));
+        assert_eq!(r["params"][1], json!(["https://x.com/f.zip"]));
     }
 
     #[test]
@@ -1159,6 +1099,22 @@ mod tests {
         assert!(o.get("out").is_none());
         assert!(o.get("cookie").is_none());
         assert!(o.get("header").is_none());
+    }
+
+    #[test]
+    fn adduri_options_never_follows_torrent_metadata() {
+        // v3.0.0: fitur torrent/magnet dihapus. Tanpa opsi ini, URL berakhiran
+        // .torrent akan membuat aria2 mengunduh KONTEN torrent tersebut
+        // (default --follow-torrent=true) — file kecil .torrent-nya sendiri
+        // tidak pernah disimpan. Opsi harus selalu "false" apa pun konfigurasi.
+        let o = adduri_options(
+            "/dl",
+            Some("a.torrent"),
+            None,
+            &HashMap::new(),
+            &Config::default(),
+        );
+        assert_eq!(o["follow-torrent"], "false");
     }
 
     #[test]
@@ -1333,14 +1289,11 @@ mod tests {
             "totalLength": "1000",
             "completedLength": "250",
             "downloadSpeed": "500",
-            "numSeeders": "2",
-            "numPeers": "7",
             "files": [{"path": "/home/u/Downloads/ubuntu.iso"}]
         });
         let p = patch_from_status(&st);
         assert_eq!(p.status, "active");
         assert_eq!((p.total, p.completed, p.speed), (1000, 250, 500));
-        assert_eq!((p.seeders, p.peers), (2, 7));
         assert_eq!(p.first_file.as_deref(), Some("ubuntu.iso"));
         assert!(p.error.is_none());
 

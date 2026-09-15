@@ -338,7 +338,9 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
             // untuk `blob:`/`data:`/`file:` yang tidak akan pernah terunduh.
             // Guard di dalam engine tetap dipertahankan (dipakai jalur GUI).
             if !crate::downloader::is_supported_scheme(&url) {
-                const REJECTED: &str = "Skema URL tidak didukung — http, https, ftp, atau magnet.";
+                // v3.0.0: magnet dihapus — pesan diselaraskan dengan pesan
+                // engine di downloader/mod.rs.
+                const REJECTED: &str = "Skema URL tidak didukung — http, https, atau ftp.";
                 return IpcResponse {
                     success: false,
                     id: None,
