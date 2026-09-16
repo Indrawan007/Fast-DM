@@ -78,7 +78,7 @@ pub async fn download(
             return Outcome::Failed;
         }
         i.status = DownloadStatus::Error;
-        i.error_msg = "yt-dlp tidak terinstall — jalankan: sudo apt install yt-dlp".to_string();
+        // Perintah install mengikuti distro user — lihat `crate::pkg`.
         i.speed = 0;
         let _ = tx.send(DownloadEvent::Error(i.clone()));
         return Outcome::MissingTool;

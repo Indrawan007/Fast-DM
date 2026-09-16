@@ -150,7 +150,9 @@ fn desktop_to_browser(desktop: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn cookie_args(url: &str) -> Vec<String> {
-    // B7: cookies per-domain dari extension (fresh < 2 jam) → pakai file itu.
+    // B7: cookies per-domain dari extension (fresh < COOKIE_FRESH_SECS = 24 jam,
+    // disamakan dengan TTL yang ditulis ipc::write_cookies_txt — lihat catatan
+    // di konstanta itu) → pakai file itu.
     // Pencarian naik ke domain induk (sub.example.com → example.com) karena
     // extension menyimpan cookies memakai host halaman, sedangkan file video
     // kadang ada di subdomain CDN yang berbeda.
@@ -591,7 +593,8 @@ pub(crate) async fn run_ytdlp(
         Ok(c) => c,
         Err(e) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
-                "yt-dlp tidak terinstall — jalankan: sudo apt install yt-dlp".to_string()
+                // Perintah install mengikuti distro user — lihat `crate::pkg`.
+                crate::pkg::missing_tool_msg("yt-dlp", "yt-dlp")
             } else {
                 format!("yt-dlp: {}", e)
             };

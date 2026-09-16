@@ -16,6 +16,25 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 🔒 **IPC lokal aman** — socket di `XDG_RUNTIME_DIR` (0700) + verifikasi UID peer + allow-list header dari extension; cookies & file token tidak pernah ditulis ke `/tmp` publik; extension ID baru yang diizinkan memanggil native host diumumkan lewat notifikasi desktop
 - 🌐 **Proxy global** (HTTP/SOCKS5, kredensial di URL) — satu kolom di Pengaturan, berlaku untuk aria2 & yt-dlp
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
+- 🐧 **Multi-distro** — paket `.deb` (Debian/Ubuntu) **dan** `.pkg.tar.zst` (Arch/Manjaro/EndeavourOS); pesan "tool tidak terinstall" otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro
+
+## Perubahan v3.2.0
+
+- 🐧 **Dukungan Arch Linux & turunannya** — `packaging/PKGBUILD` +
+  `packaging/build-arch.sh` menghasilkan `fast-dm-<versi>-1-x86_64.pkg.tar.zst`
+  dengan layout instalasi yang sama persis dengan `.deb`
+  (`/opt/fast-dm` + symlink `/usr/bin/fast-dm` + wrapper `fast-dm-native`),
+  sehingga `resolve_native_path()` dan `setup-browser.sh` tidak perlu tahu
+  distro apa yang dipakai. Dependensi dipetakan dari paket Debian
+  (`libgtk-4-1` → `gtk4`, `libnotify-bin` → `libnotify`).
+- 🧪 **CI punya job Arch** — build, `cargo fmt --check`, `cargo test --locked`,
+  test extension, dan `makepkg` sungguhan di container `archlinux`; rilis juga
+  meng-upload paket Arch beserta checksum-nya.
+- 💬 **Pesan "tool tidak terinstall" mengikuti distro** — modul baru `src/pkg.rs`
+  mendeteksi package manager dari `/etc/os-release` (fallback: keberadaan
+  binary) dan menghasilkan `sudo pacman -S aria2` / `sudo apt install aria2` /
+  `sudo dnf install aria2` / `sudo zypper install aria2` / `xbps-install` /
+  `apk add`. Sebelumnya semua distro disuruh menjalankan `sudo apt install`.
 
 ## Perubahan v3.1.0
 
@@ -155,16 +174,28 @@ Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.
 
 ### Release Files
 
-- `fast-dm_<versi>_amd64.deb` — aplikasi Linux
+- `fast-dm_<versi>_amd64.deb` — aplikasi Linux (Debian/Ubuntu & turunan)
+- `fast-dm-<versi>-1-x86_64.pkg.tar.zst` — aplikasi Linux (Arch & turunan)
+
 - `fast-dm-extension-v<versi>.zip` — browser extension
 
 ## Instalasi
 
-### Linux App
+### Debian / Ubuntu / Mint
 
 ```bash
 sudo apt install ./fast-dm_*_amd64.deb
 ```
+
+### Arch Linux / Manjaro / EndeavourOS
+
+```bash
+sudo pacman -U fast-dm-*-x86_64.pkg.tar.zst
+```
+
+Dependensi (`gtk4`, `aria2`, `yt-dlp`, `ffmpeg`, `xdg-utils`) ikut terpasang
+otomatis. Opsional: `libnotify` untuk notifikasi desktop, `xclip` /
+`wl-clipboard` untuk monitor clipboard.
 
 ### Browser Extension
 
@@ -183,6 +214,9 @@ Catatan: ID extension akan otomatis ter-register di native messaging manifest sa
 # Dependensi sistem (Ubuntu/Debian)
 sudo apt install build-essential libgtk-4-dev aria2 yt-dlp ffmpeg xdg-utils
 
+# Dependensi sistem (Arch Linux & turunan)
+sudo pacman -S --needed base-devel rust gtk4 aria2 yt-dlp ffmpeg xdg-utils
+
 # Build release
 cargo build --release
 
@@ -192,9 +226,16 @@ cargo test
 # Regression test extension (Node.js 22+, tanpa npm install)
 node --test tests/extension.test.cjs
 
-# Buat .deb
+# Buat .deb (Debian/Ubuntu)
 bash packaging/build-deb.sh
+
+# Buat .pkg.tar.zst (Arch — jalankan di Arch/container archlinux)
+bash packaging/build-arch.sh
 ```
+
+> `packaging/build-arch.sh` memakai `makepkg`, jadi hanya jalan di Arch Linux
+> (atau container `archlinux`), dan tidak boleh dijalankan sebagai root.
+> CI menjalankannya di job `arch` dengan user `builder`.
 
 ### Struktur Kode
 
@@ -203,8 +244,10 @@ bash packaging/build-deb.sh
 - `src/downloader/` — `aria2` (jalur per-proses + pipeline resolve), `aria2_rpc` (daemon RPC http/ftp: limit global live, pause/resume native; v3.0.0: jalur magnet dihapus), `youtube`, `universal` (resolver), `mod` (engine)
 - `src/ipc/` — Unix socket server untuk browser → GUI
 - `src/native_host/` — Chrome Native Messaging wrapper
+- `src/pkg.rs` — deteksi package manager distro (pacman/apt/dnf/zypper/xbps/apk) untuk pesan "tool tidak terinstall"
 - `src/gui/` — GTK4 window & dialog
 - `extension/` — Manifest V3 extension (background, content, sniffer, popup)
+- `packaging/` — `build-deb.sh` + `control` (Debian), `PKGBUILD` + `build-arch.sh` (Arch), `fast-dm.desktop` (dipakai keduanya)
 - `tests/` — integration test: `find_cookies.rs` (filesystem terisolasi via `std::env::temp_dir()` + override `XDG_CONFIG_HOME`, serial lewat `ENV_LOCK`), `version_sync.rs` (versi `Cargo.toml`/`Cargo.lock`/`manifest.json` harus sama; tanpa I/O runtime — berkas disematkan `include_str!`), `extension.test.cjs` (Node 22+, mock `chrome.*` lewat `vm`)
 
 Lihat [CHANGELOG.md](CHANGELOG.md) untuk history rilis.

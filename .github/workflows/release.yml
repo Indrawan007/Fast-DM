@@ -68,3 +68,56 @@ jobs:
             build/*.zip \
             build/SHA256SUMS \
             --generate-notes
+
+  # Paket Arch dibangun di container Arch (makepkg tidak ada di ubuntu-latest)
+  # lalu di-upload ke release yang baru saja dibuat job di atas.
+  arch-release:
+    name: Build and publish Arch package
+    runs-on: ubuntu-latest
+    needs: release
+    container:
+      image: archlinux:latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Install system dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            base-devel \
+            rust \
+            gtk4 \
+            aria2 \
+            yt-dlp \
+            ffmpeg \
+            xdg-utils \
+            nodejs \
+            git \
+            sudo \
+            github-cli
+
+      - uses: actions/checkout@v4
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Test browser extension
+        run: node --test tests/extension.test.cjs
+
+      - name: Build Arch package
+        run: |
+          useradd -m builder
+          chown -R builder:builder .
+          su builder -c "bash packaging/build-arch.sh"
+
+      - name: Generate checksums
+        run: sha256sum build/*.pkg.tar.zst > build/SHA256SUMS-arch
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            build/*.pkg.tar.zst \
+            build/SHA256SUMS-arch

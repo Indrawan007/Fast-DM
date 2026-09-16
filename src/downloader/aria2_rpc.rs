@@ -407,7 +407,7 @@ async fn ensure_daemon(cfg: &Config) -> Result<Rpc, String> {
         let port = cfg.rpc_port;
         return Err(format!(
             "daemon aria2 RPC tidak tersedia — dicoba lagi otomatis dalam ≤{secs} dtk \
-             (port {port} mungkin dipakai daemon asing; ubah rpc_port di Pengaturan)"
+             (port {port} mungkin dipakai daemon asing; ubah rpc_port di config.json)"
         ));
     }
 

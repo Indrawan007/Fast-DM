@@ -4,8 +4,8 @@
 //! - Library (`fast_dm`): module yang bisa di-test & di-import
 //! - Binary (`fast-dm`): entry point CLI/GUI/NMH
 //!
-//! Modul publik di sini (`config`, `downloader`, `gui`, `ipc`, `native_host`)
-//! dipakai oleh integration test. Modul private tetap private.
+//! Modul publik di sini (`config`, `downloader`, `gui`, `ipc`, `native_host`,
+//! `pkg`) dipakai oleh integration test. Modul private tetap private.
 //!
 //! Lihat `main.rs` untuk entry point.
 
@@ -15,6 +15,7 @@ pub mod downloader;
 pub mod gui;
 pub mod ipc;
 pub mod native_host;
+pub mod pkg;
 
 // Re-export Config karena dipakai integration test
 pub use config::Config;

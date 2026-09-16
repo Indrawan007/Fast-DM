@@ -3,6 +3,69 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.2.0] - 2026-09-16
+
+### Added
+
+- **Dukungan Arch Linux & turunannya** (Manjaro, EndeavourOS, Garuda, CachyOS,
+  Archarm) — `packaging/PKGBUILD` + `packaging/build-arch.sh` menghasilkan
+  `fast-dm-<versi>-<pkgrel>-x86_64.pkg.tar.zst`.
+  - Layout instalasi **sama persis** dengan paket `.deb`
+    (`/opt/fast-dm/fast-dm` + wrapper `fast-dm-native` + symlink
+    `/usr/bin/fast-dm` + `.desktop` + icon hicolor + lisensi di
+    `/usr/share/licenses/fast-dm/`), jadi `native_host::resolve_native_path()`
+    dan `setup-browser.sh` tidak perlu membedakan distro.
+  - Dependensi dipetakan dari `packaging/control`: `libgtk-4-1` → `gtk4`,
+    `libnotify-bin` → `libnotify`; `aria2`, `yt-dlp`, `ffmpeg`, `xdg-utils`
+    namanya sama. `xclip`/`wl-clipboard`/`libnotify` masuk `optdepends`.
+  - `build()`/`check()` memakai `cargo --locked` dengan `--target-dir` bersama,
+    dan `check()` juga menjalankan `node --test tests/extension.test.cjs` bila
+    Node tersedia. Tidak ada file `.install`: cache icon ditangani hook alpm
+    sistem Arch, dan manifest Native Messaging tetap ditulis aplikasi sendiri.
+- **CI job `arch`** (`.github/workflows/ci.yml`) — container `archlinux:latest`
+  menjalankan `cargo fmt --check`, `cargo test --locked`, test extension, smoke
+  test binary, lalu `makepkg` lewat `packaging/build-arch.sh` sebagai user
+  `builder` (makepkg menolak root), memverifikasi isi paket, dan meng-upload
+  artefak. Sebelumnya seluruh pipeline hanya berjalan di `ubuntu-latest`,
+  sehingga asumsi Debian tidak pernah teruji.
+- **Rilis ikut menerbitkan paket Arch** (`.github/workflows/release.yml`, job
+  `arch-release`, `needs: release`) beserta `SHA256SUMS-arch`.
+- **Modul `src/pkg.rs`** — deteksi package manager (`pacman`, `apt`, `dnf`,
+  `zypper`, `xbps`, `apk`) dari `/etc/os-release` (`ID` **dan** `ID_LIKE`,
+  supaya Manjaro/EndeavourOS/Mint terdeteksi lewat induknya), dengan fallback ke
+  keberadaan binary. Inti keputusannya fungsi murni + 14 unit test; tidak ada
+  crate baru.
+
+### Changed
+
+- **Pesan "tool tidak terinstall" mengikuti distro user** — `aria2.rs`,
+  `youtube.rs`, dan `universal.rs` kini memanggil
+  `pkg::missing_tool_msg(binary, pkg)`. Contoh keluaran:
+  `aria2c tidak terinstall — jalankan: sudo pacman -S aria2` di Arch,
+  `sudo apt install aria2` di Debian. Distro yang tidak dikenali mendapat pesan
+  generik yang tetap menyebut nama paketnya, bukan perintah yang salah.
+- **README** — bagian Instalasi dipisah per keluarga distro, daftar artefak
+  rilis bertambah `.pkg.tar.zst`, dependensi build Arch ditambahkan, dan
+  `src/pkg.rs` + `packaging/` masuk daftar struktur kode.
+
+### Fixed
+
+- **Pesan penolakan skema tidak lagi menawarkan magnet** — `add_download` masih
+  menulis "Skema URL tidak didukung — http, https, ftp, atau magnet." padahal
+  magnet ditolak sejak v3.0.0, sementara jalur IPC extension dan README sudah
+  memakai bentuk yang benar ("…http, https, atau ftp."). User yang menempel
+  link magnet di GUI diberi tahu magnet didukung. Kedua pemanggil kini memakai
+  satu konstanta `downloader::UNSUPPORTED_SCHEME_MSG`, dijaga test
+  `unsupported_scheme_message_lists_only_supported_schemes` dan
+  `ipc_reuses_engine_rejection_message`.
+- **Pesan gerbang daemon RPC menunjuk tempat yang benar** — "ubah `rpc_port` di
+  Pengaturan" diganti menjadi "di `config.json`": dialog Pengaturan memang tidak
+  punya kolom `rpc_port`, dan pesan `Rpc::wait_ready` sudah lama memakai
+  `config.json`.
+- **Komentar basi** — `youtube::cookie_args` menyebut cookie "fresh < 2 jam"
+  padahal ambangnya `COOKIE_FRESH_SECS` = 24 jam (disamakan dengan TTL yang
+  ditulis `ipc::write_cookies_txt` sejak v2.9.3).
+
 ## [3.1.0] - 2026-09-15
 
 ### Added

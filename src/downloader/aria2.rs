@@ -261,7 +261,9 @@ async fn run_aria2c(
         Ok(c) => c,
         Err(e) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
-                "aria2c tidak terinstall — jalankan: sudo apt install aria2".to_string()
+                // Perintah install mengikuti distro user (pacman/apt/dnf/…) —
+                // lihat `crate::pkg`; dulu hardcoded `sudo apt install`.
+                crate::pkg::missing_tool_msg("aria2c", "aria2")
             } else {
                 format!("aria2c: {}", e)
             };

@@ -144,7 +144,77 @@ jobs:
           if-no-files-found: error
 
   # ────────────────────────────────────────────────────────────────
-  # Job 4: CI status badge untuk README
+  # Job 4: Arch Linux — validasi distro non-Debian + paket pacman
+  #
+  # Semua job lain jalan di ubuntu-latest, jadi tanpa job ini pesan
+  # "sudo apt install …" dan asumsi nama paket Debian tidak pernah
+  # teruji. Di sini kode dibangun & dites di atas Arch sungguhan dan
+  # packaging/PKGBUILD benar-benar dijalankan lewat makepkg.
+  # ────────────────────────────────────────────────────────────────
+  arch:
+    name: Arch Linux (build, test, .pkg.tar.zst)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      # Container Arch kosong: toolchain + dependensi runtime dipasang dulu,
+      # SEBELUM checkout (actions/checkout butuh git & node di dalam container).
+      - name: Install system dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            base-devel \
+            rust \
+            gtk4 \
+            aria2 \
+            yt-dlp \
+            ffmpeg \
+            xdg-utils \
+            libnotify \
+            nodejs \
+            git \
+            sudo
+
+      - uses: actions/checkout@v4
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run all tests (unit + integration)
+        run: cargo test --locked --no-fail-fast
+
+      - name: Test browser extension
+        run: node --test tests/extension.test.cjs
+
+      - name: Smoke test binary
+        run: |
+          cargo build --release --locked
+          ./target/release/fast-dm --version
+          ./target/release/fast-dm --help
+
+      # makepkg menolak dijalankan sebagai root, sedangkan container CI
+      # berjalan sebagai root — jadi build paket dilakukan user biasa.
+      - name: Build .pkg.tar.zst via makepkg
+        run: |
+          useradd -m builder
+          chown -R builder:builder .
+          su builder -c "bash packaging/build-arch.sh"
+
+      - name: Verify package contents
+        run: |
+          ls -l build/*.pkg.tar.zst
+          tar -tf build/*.pkg.tar.zst | grep -E \
+            'opt/fast-dm/fast-dm$|opt/fast-dm/fast-dm-native$|usr/bin/fast-dm$|applications/fast-dm\.desktop$|128x128/apps/io\.github\.fastdm\.FastDownloadManager\.png$'
+
+      - name: Upload Arch package
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-dm-arch-x86_64
+          path: build/*.pkg.tar.zst
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────────
+  # Job 5: CI status badge untuk README
   # ────────────────────────────────────────────────────────────────
   # (GitHub otomatis generate badge via shields.io URL pattern:
   #  https://github.com/${{ github.repository }}/actions/workflows/ci.yml/badge.svg)

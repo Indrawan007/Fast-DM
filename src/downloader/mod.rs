@@ -303,8 +303,7 @@ impl DownloadEngine {
 
         if !is_supported_scheme(url) {
             info.status = DownloadStatus::Error;
-            info.error_msg =
-                "Skema URL tidak didukung — http, https, ftp, atau magnet.".to_string();
+            info.error_msg = UNSUPPORTED_SCHEME_MSG.to_string();
 
             let _ = self.event_tx.send(DownloadEvent::Error(info.clone()));
             downloads.insert(id.clone(), Arc::new(Mutex::new(info)));
@@ -652,6 +651,18 @@ pub fn is_supported_scheme(url: &str) -> bool {
         .map(|u| matches!(u.scheme(), "http" | "https" | "ftp"))
         .unwrap_or(false)
 }
+
+/// Pesan penolakan skema non-download — **satu sumber** untuk engine
+/// (`add_download`) maupun IPC extension (`ipc::handle_message`).
+///
+/// Dulu kedua pemanggil menyalin string-nya sendiri-sendiri dan "diselaraskan"
+/// hanya lewat komentar. Akibatnya saat v3.0.0 menghapus dukungan
+/// magnet/torrent, sisi IPC (dan README) diperbarui sementara sisi engine tetap
+/// menulis "…http, https, ftp, atau magnet." — user yang menempel magnet di GUI
+/// diberi tahu magnet didukung. Konstanta bersama ini menutup kemungkinan itu;
+/// dijaga test `unsupported_scheme_message_lists_only_supported_schemes` dan
+/// `ipc_reuses_engine_rejection_message`.
+pub const UNSUPPORTED_SCHEME_MSG: &str = "Skema URL tidak didukung — http, https, atau ftp.";
 
 /// v2.10.0 (D5): daftar ekstensi "file langsung" diangkat ke level modul
 /// supaya bisa dibandingkan dengan daftar intersep `extension/background.js`
@@ -1963,6 +1974,41 @@ mod tests {
             "magnet:?xt=urn:btih:aaaabbbbccccdddd&dn=ubuntu"
         ));
         assert!(!is_supported_scheme("  MAGNET:?xt=urn:btih:deadbeef")); // trim + case-insensitive
+    }
+
+    #[test]
+    fn unsupported_scheme_message_lists_only_supported_schemes() {
+        // v3.0.0 menghapus magnet/torrent — pesan penolakan tidak boleh lagi
+        // menawarkan magnet, dan harus menyebut skema yang benar-benar diterima
+        // `is_supported_scheme`. Sebelumnya sisi engine masih menulis "…atau
+        // magnet." sementara IPC/README sudah benar.
+        assert!(
+            !UNSUPPORTED_SCHEME_MSG.contains("magnet"),
+            "magnet ditolak sejak v3.0.0 — jangan tawarkan di pesan: {}",
+            UNSUPPORTED_SCHEME_MSG
+        );
+        for scheme in ["http", "https", "ftp"] {
+            assert!(
+                UNSUPPORTED_SCHEME_MSG.contains(scheme),
+                "skema yang didukung harus disebut di pesan: {scheme}"
+            );
+        }
+    }
+
+    #[test]
+    fn ipc_reuses_engine_rejection_message() {
+        // IPC dulu menyalin string penolakan sendiri dan "diselaraskan" hanya
+        // lewat komentar — persis pola yang membuat kedua pesan melenceng.
+        // Test ini mengunci keduanya ke satu konstanta.
+        let ipc_src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/ipc/mod.rs"));
+        assert!(
+            ipc_src.contains("crate::downloader::UNSUPPORTED_SCHEME_MSG"),
+            "ipc/mod.rs harus memakai konstanta engine, bukan salinan sendiri"
+        );
+        assert!(
+            !ipc_src.contains("const REJECTED"),
+            "ipc/mod.rs kembali menyalin pesan penolakan sendiri"
+        );
     }
 
     // ── is_valid_speed_limit ──
