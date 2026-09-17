@@ -428,10 +428,13 @@ impl Config {
         })
     }
 
-    /// Tulis file privat secara atomik dengan mode 0600 sejak file dibuat.
-    /// Temp file unik + `create_new` mencegah dua proses menimpa temp bersama
-    /// dan mencegah jendela singkat `proxy_url`/URL token terbaca sebelum chmod.
-    pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    /// Tulis file secara atomik dengan mode yang ditentukan sejak file dibuat.
+    /// Temp file unik + `create_new` mencegah dua proses menimpa temp bersama.
+    pub(crate) fn write_atomic_with_mode(
+        path: &Path,
+        bytes: &[u8],
+        mode: u32,
+    ) -> std::io::Result<()> {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent)?;
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("state");
@@ -442,7 +445,7 @@ impl Config {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            options.mode(mode);
         }
 
         let result = (|| {
@@ -457,6 +460,12 @@ impl Config {
             let _ = fs::remove_file(&temp);
         }
         result
+    }
+
+    /// Tulis file privat secara atomik dengan mode 0600 sejak file dibuat.
+    /// Ini mencegah jendela singkat `proxy_url`/URL token terbaca sebelum chmod.
+    pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        Self::write_atomic_with_mode(path, bytes, 0o600)
     }
 
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -632,6 +641,17 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+
+        let manifest = dir.join("manifest.json");
+        Config::write_atomic_with_mode(&manifest, b"{}", 0o644).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&manifest).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
         }
         assert!(
             fs::read_dir(&dir)
