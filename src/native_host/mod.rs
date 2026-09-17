@@ -222,7 +222,7 @@ fn forward_to_gui(
         "cookies": msg.cookies,
         "domain": msg.domain,
     }))
-    .unwrap();
+    .map_err(|e| format!("serialize GUI request: {e}"))?;
 
     stream
         .write_all(json.as_bytes())
@@ -235,19 +235,22 @@ fn forward_to_gui(
     let mut line = String::new();
     reader.read_line(&mut line).map_err(|e| e.to_string())?;
 
-    if line.is_empty() {
-        return Ok(NativeResponse {
-            success: true,
-            message: None,
-            error: None,
-        });
+    parse_gui_response(&line)
+}
+
+/// Parse response IPC secara fail-closed. GUI yang menutup koneksi tanpa
+/// response atau mengirim JSON tanpa boolean `success` tidak boleh dianggap
+/// sebagai download yang berhasil.
+fn parse_gui_response(line: &str) -> Result<NativeResponse, String> {
+    if line.trim().is_empty() {
+        return Err("GUI menutup koneksi tanpa response".into());
     }
 
-    let resp: serde_json::Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+    let resp: serde_json::Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
     let success = resp
         .get("success")
         .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+        .ok_or_else(|| "Response GUI tidak memiliki field success yang valid".to_string())?;
 
     Ok(NativeResponse {
         success,
@@ -258,4 +261,28 @@ fn forward_to_gui(
             .get("error")
             .and_then(|v| v.as_str().map(|s| s.to_string())),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_gui_response;
+
+    #[test]
+    fn gui_response_requires_explicit_success_boolean() {
+        assert!(parse_gui_response("{}").is_err());
+        assert!(parse_gui_response(r#"{"success":1}"#).is_err());
+        assert!(parse_gui_response("").is_err());
+        assert!(parse_gui_response("   \n").is_err());
+    }
+
+    #[test]
+    fn gui_response_preserves_success_and_rejection() {
+        let ok = parse_gui_response(r#"{"success":true,"message":"queued"}"#).unwrap();
+        assert!(ok.success);
+        assert_eq!(ok.message.as_deref(), Some("queued"));
+
+        let rejected = parse_gui_response(r#"{"success":false,"error":"denied"}"#).unwrap();
+        assert!(!rejected.success);
+        assert_eq!(rejected.error.as_deref(), Some("denied"));
+    }
 }
