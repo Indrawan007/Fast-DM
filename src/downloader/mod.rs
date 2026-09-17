@@ -490,6 +490,8 @@ impl DownloadEngine {
                     let target = (i.pid.take(), i.rpc_gid.take());
                     i.status = DownloadStatus::Cancelled;
                     i.resume_pending = false;
+                    i.retry_after = None;
+                    i.auto_retry_count = 0;
                     i.status_detail.clear();
 
                     i.speed = 0;
@@ -525,6 +527,8 @@ impl DownloadEngine {
                     let target = (i.pid.take(), i.rpc_gid.take());
                     i.status = DownloadStatus::Cancelled;
                     i.resume_pending = false;
+                    i.retry_after = None;
+                    i.auto_retry_count = 0;
                     i.status_detail.clear();
                     i.speed = 0;
                     Some(target)
@@ -640,11 +644,25 @@ fn spawn_supervised(
             }
         }
 
+        // Gagal sekali tidak langsung menjadi Error terminal: supervisor memberi
+        // dua kesempatan retry dengan backoff eksponensial kecil. Retry internal
+        // aria2/yt-dlp tetap berjalan sendiri; ini menangani kegagalan di luar
+        // backend, seperti resolver/network/daemon yang pulih sesaat kemudian.
+        let _ = {
+            let mut i = info.lock().await;
+            if !shutting_down.load(Ordering::SeqCst) {
+                i.schedule_auto_retry(original_config.retry_wait)
+            } else {
+                None
+            }
+        };
+
         // Slot baru dilepas setelah seluruh cleanup backend selesai. Resume
         // yang diminta saat pause kini aman dipromosikan sebagai worker baru.
-        {
+        let retry_deadline = {
             let map = downloads.write().await;
             let mut i = info.lock().await;
+            let deadline = i.retry_after;
             i.finish_worker(!shutting_down.load(Ordering::SeqCst));
             if map
                 .get(&i.id)
@@ -652,9 +670,52 @@ fn spawn_supervised(
             {
                 let _ = tx.send(DownloadEvent::Progress(i.clone()));
             }
-        }
+            deadline
+        };
         dirty.store(true, Ordering::SeqCst);
-        promote_next(downloads, tx, shared_config, dirty, shutting_down).await;
+
+        if let Some(deadline) = retry_deadline {
+            // Retry yang sedang backoff tidak boleh menahan slot kosong:
+            // promosikan antrean lain sekarang, lalu cek ulang item ini saat
+            // deadline tercapai.
+            promote_next(
+                downloads.clone(),
+                tx.clone(),
+                shared_config.clone(),
+                dirty.clone(),
+                shutting_down.clone(),
+            )
+            .await;
+            let delay = deadline.saturating_duration_since(std::time::Instant::now());
+            tokio::time::sleep(delay).await;
+            let map = downloads.write().await;
+            let mut ready = false;
+            if !shutting_down.load(Ordering::SeqCst)
+                && map.values().any(|current| Arc::ptr_eq(current, &info))
+            {
+                let mut i = info.lock().await;
+                if i.status == DownloadStatus::Error
+                    && i.resume_pending
+                    && i.retry_after == Some(deadline)
+                {
+                    i.retry_after = None;
+                    i.resume_pending = false;
+                    i.status = DownloadStatus::Queued;
+                    i.status_detail.clear();
+                    let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                    ready = true;
+                }
+            }
+            drop(map);
+            if ready {
+                dirty.store(true, Ordering::SeqCst);
+            }
+            // Always promote after the delay: user actions may have cancelled
+            // the retry, but another queued item can still use the freed slot.
+            promote_next(downloads, tx, shared_config, dirty, shutting_down).await;
+        } else {
+            promote_next(downloads, tx, shared_config, dirty, shutting_down).await;
+        }
     });
 }
 

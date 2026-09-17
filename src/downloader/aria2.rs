@@ -587,15 +587,20 @@ fn parse_aria2_size(s: &str) -> u64 {
 /// Cache satu client berdasarkan setelan jaringan. Clone Client berbagi pool;
 /// perubahan proxy/TLS mengganti cache, bukan menggunakan setelan startup lama.
 fn resolve_client(config: &Config) -> Result<reqwest::Client, String> {
-    type CachedClient = Option<(bool, String, reqwest::Client)>;
+    // Cache failure juga, bukan hanya client sukses. Tanpa ini setiap download
+    // mengulang builder yang pasti gagal (mis. proxy invalid), menambah latency
+    // dan spam log tanpa mengubah hasil.
+    type CachedClient = Option<(bool, String, Result<reqwest::Client, String>)>;
     static CACHE: std::sync::Mutex<CachedClient> = std::sync::Mutex::new(None);
     let proxy = config.proxy_url.trim();
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((verify_tls, cached_proxy, client)) = cache.as_ref() {
+    if let Some((verify_tls, cached_proxy, result)) = cache.as_ref() {
         if *verify_tls == config.verify_tls && cached_proxy == proxy {
-            return Ok(client.clone());
+            return result.clone();
         }
     }
+
+    let key = (config.verify_tls, proxy.to_string());
     let mut builder = reqwest::Client::builder()
         .user_agent(CHROME_UA)
         .danger_accept_invalid_certs(!config.verify_tls)
@@ -604,19 +609,28 @@ fn resolve_client(config: &Config) -> Result<reqwest::Client, String> {
         .no_proxy();
     if !proxy.is_empty() {
         if !crate::config::is_valid_proxy_url(proxy) {
-            return Err("Proxy resolver tidak valid — periksa Pengaturan".into());
+            let error = "Proxy resolver tidak valid — periksa Pengaturan".to_string();
+            *cache = Some((key.0, key.1, Err(error.clone())));
+            return Err(error);
         }
         // Jangan sertakan error reqwest/URL proxy: bisa memuat kredensial.
-        builder = builder.proxy(
-            reqwest::Proxy::all(proxy)
-                .map_err(|_| "Proxy resolver tidak valid — periksa Pengaturan".to_string())?,
-        );
+        let proxy_result = reqwest::Proxy::all(proxy)
+            .map_err(|_| "Proxy resolver tidak valid — periksa Pengaturan".to_string());
+        let proxy = match proxy_result {
+            Ok(proxy) => proxy,
+            Err(error) => {
+                *cache = Some((key.0, key.1, Err(error.clone())));
+                return Err(error);
+            }
+        };
+        builder = builder.proxy(proxy);
     }
-    let client = builder
+
+    let result = builder
         .build()
-        .map_err(|_| "Gagal membuat HTTP client resolver".to_string())?;
-    *cache = Some((config.verify_tls, proxy.to_string(), client.clone()));
-    Ok(client)
+        .map_err(|_| "Gagal membuat HTTP client resolver".to_string());
+    *cache = Some((key.0, key.1, result.clone()));
+    result
 }
 
 /// Resolve filename + ukuran + tolak HTML/non-2xx.
@@ -1137,6 +1151,8 @@ mod tests {
             ..Config::default()
         };
         let error = resolve_client(&cfg).unwrap_err();
+        let cached_error = resolve_client(&cfg).unwrap_err();
+        assert_eq!(cached_error, error, "builder failure is cached for the same key");
         assert!(!error.contains("secret"));
         assert!(!error.contains("user"));
         assert!(error.contains("Proxy"));

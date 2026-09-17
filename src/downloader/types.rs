@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+/// Jumlah retry supervisor di luar retry internal aria2/yt-dlp.
+/// Nilai kecil membatasi pengulangan URL yang memang invalid, tetapi tetap
+/// menyelamatkan kegagalan transient (network, resolver, atau daemon restart).
+pub(crate) const MAX_AUTO_RETRIES: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -69,6 +75,12 @@ pub struct DownloadInfo {
     pub(crate) worker_active: bool,
     #[serde(skip)]
     pub(crate) resume_pending: bool,
+    /// Retry otomatis menunggu sampai waktu ini. Runtime-only agar deadline
+    /// dari sesi lama tidak pernah dipulihkan sebagai Instant yang invalid.
+    #[serde(skip)]
+    pub(crate) retry_after: Option<Instant>,
+    #[serde(skip)]
+    pub(crate) auto_retry_count: u8,
 }
 
 impl DownloadInfo {
@@ -102,6 +114,8 @@ impl DownloadInfo {
             rpc_gid: None,
             worker_active: false,
             resume_pending: false,
+            retry_after: None,
+            auto_retry_count: 0,
             created: chrono::Utc::now().timestamp_millis(),
         }
     }
@@ -136,6 +150,13 @@ impl DownloadInfo {
         ) {
             return false;
         }
+        // Error yang dimulai dari tombol Retry adalah percobaan manual baru;
+        // jangan biarkan budget retry otomatis dari kegagalan sebelumnya ikut
+        // membatasi sesi manual ini.
+        if self.status == DownloadStatus::Error {
+            self.auto_retry_count = 0;
+        }
+        self.retry_after = None;
         self.resume_pending = false;
         self.speed = 0;
         self.eta = 0;
@@ -152,6 +173,30 @@ impl DownloadInfo {
         slot_available
     }
 
+    /// Jadwalkan retry supervisor di luar retry internal backend.
+    /// `resume_pending` sengaja dipakai supaya UI dapat membatalkan retry
+    /// tertunda melalui tombol Jeda, sementara `retry_after` membedakannya
+    /// dari resume biasa yang hanya menunggu cleanup worker lama.
+    pub(crate) fn schedule_auto_retry(&mut self, retry_wait: u8) -> Option<Duration> {
+        if self.status != DownloadStatus::Error
+            || self.resume_pending
+            || self.auto_retry_count >= MAX_AUTO_RETRIES
+        {
+            return None;
+        }
+
+        self.auto_retry_count = self.auto_retry_count.saturating_add(1);
+        let multiplier = 1u64 << u32::from(self.auto_retry_count - 1);
+        let seconds = u64::from(retry_wait.max(1))
+            .saturating_mul(multiplier)
+            .min(60);
+        let delay = Duration::from_secs(seconds);
+        self.retry_after = Some(Instant::now() + delay);
+        self.resume_pending = true;
+        self.status_detail = format!("Coba lagi otomatis dalam {seconds} detik…");
+        Some(delay)
+    }
+
     /// Pause manual juga membatalkan retry tertunda pada worker berstatus Error.
     /// Error biasa (tanpa retry) dan hasil terminal tidak diubah menjadi Paused.
     pub(crate) fn request_pause(&mut self) -> bool {
@@ -165,6 +210,11 @@ impl DownloadInfo {
         if !pausable {
             return false;
         }
+        let cancel_auto_retry = self.retry_after.is_some();
+        self.retry_after = None;
+        if cancel_auto_retry {
+            self.auto_retry_count = 0;
+        }
         self.resume_pending = false;
         self.status_detail.clear();
         self.status = DownloadStatus::Paused;
@@ -176,14 +226,21 @@ impl DownloadInfo {
     /// Hanya supervisor pemilik yang boleh melepas slot, setelah backend return.
     pub(crate) fn finish_worker(&mut self, restart_allowed: bool) {
         self.worker_active = false;
+        let auto_retry_pending = self.retry_after.is_some();
         if self.resume_pending
+            && !auto_retry_pending
             && matches!(self.status, DownloadStatus::Paused | DownloadStatus::Error)
             && restart_allowed
         {
             self.status = DownloadStatus::Queued;
             self.status_detail.clear();
         }
-        self.resume_pending = false;
+        // Retry otomatis tetap Error selama masa backoff. Retry task akan
+        // mengubahnya menjadi Queued setelah deadline, atau request_pause /
+        // request_start akan membatalkannya lebih dulu.
+        if !auto_retry_pending {
+            self.resume_pending = false;
+        }
     }
 
     pub fn total_size_fmt(&self) -> String {
@@ -278,6 +335,47 @@ mod tests {
             assert!(!terminal.request_start(true));
             assert_eq!(terminal.status, status);
         }
+    }
+
+    #[test]
+    fn automatic_retry_uses_backoff_budget_and_can_be_cancelled() {
+        let mut info = lifecycle_info();
+        info.status = DownloadStatus::Error;
+
+        let first = info.schedule_auto_retry(3).expect("first retry");
+        assert_eq!(first, Duration::from_secs(3));
+        assert!(info.resume_pending);
+        assert!(info.retry_after.is_some());
+        info.finish_worker(true);
+        assert_eq!(info.status, DownloadStatus::Error);
+        assert!(info.resume_pending, "backoff must survive worker cleanup");
+
+        assert!(info.request_pause(), "pause cancels pending auto-retry");
+        assert_eq!(info.status, DownloadStatus::Paused);
+        assert!(!info.resume_pending);
+        assert!(info.retry_after.is_none());
+        assert_eq!(info.auto_retry_count, 0);
+
+        info.status = DownloadStatus::Error;
+        assert_eq!(info.schedule_auto_retry(3), Some(Duration::from_secs(3)));
+        info.retry_after = None;
+        info.resume_pending = false;
+        info.status = DownloadStatus::Error;
+        assert_eq!(info.schedule_auto_retry(3), Some(Duration::from_secs(6)));
+        info.retry_after = None;
+        info.resume_pending = false;
+        info.status = DownloadStatus::Error;
+        assert_eq!(info.schedule_auto_retry(3), None);
+    }
+
+    #[test]
+    fn manual_retry_starts_a_fresh_automatic_retry_budget() {
+        let mut info = lifecycle_info();
+        info.status = DownloadStatus::Error;
+        info.auto_retry_count = MAX_AUTO_RETRIES;
+        assert!(info.request_start(true));
+        assert_eq!(info.auto_retry_count, 0);
+        assert!(info.retry_after.is_none());
     }
 
     #[test]
