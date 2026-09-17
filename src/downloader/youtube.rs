@@ -341,6 +341,9 @@ struct YtFormatJson {
     format_note: Option<String>,
 }
 
+/// URL diberikan melalui stdin batch-file agar tidak muncul di argv.
+pub(crate) const YTDLP_BATCH_FILE_STDIN: &str = "--batch-file=-";
+
 /// Setelan jaringan identik untuk metadata, YouTube, dan resolver universal.
 pub(crate) fn network_args(config: &Config) -> Vec<String> {
     let mut args = Vec::new();
@@ -370,7 +373,9 @@ pub async fn fetch_formats(url: &str, config: &Config) -> Vec<FormatOption> {
     ];
     cmd.extend(cookie_args(url));
     cmd.extend(network_args(config));
-    cmd.push(url.to_string());
+    // Jangan taruh signed URL di argv (`/proc/<pid>/cmdline`). yt-dlp membaca
+    // satu URL dari stdin lewat batch-file=-.
+    cmd.push(YTDLP_BATCH_FILE_STDIN.into());
 
     // v2.10.0 (C3): `process_group(0)` seperti SEMUA child lain di crate ini
     // (AGENTS.md §3) — `yt-dlp -J` memang jarang men-spawn anak, tapi saat
@@ -380,14 +385,27 @@ pub async fn fetch_formats(url: &str, config: &Config) -> Vec<FormatOption> {
     let mut spawn = tokio::process::Command::new(&cmd[0]);
     spawn
         .args(&cmd[1..])
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     #[cfg(unix)]
     spawn.process_group(0);
-    let Ok(child) = spawn.spawn() else {
+    let Ok(mut child) = spawn.spawn() else {
         return Vec::new();
     };
+    {
+        use tokio::io::AsyncWriteExt;
+        let Some(mut stdin) = child.stdin.take() else {
+            return Vec::new();
+        };
+        if stdin.write_all(url.as_bytes()).await.is_err()
+            || stdin.write_all(b"\n").await.is_err()
+        {
+            return Vec::new();
+        }
+        // Drop stdin so yt-dlp sees EOF after the single URL.
+    }
     // Cap 20 dtk: ekstraksi situs tertentu bisa sangat lambat — lebih baik
     // pakai daftar statis daripada user menunggu tanpa kepastian.
     let Ok(out) =
@@ -560,10 +578,12 @@ pub async fn download(
         }
     }
 
-    cmd.push(url);
+    // Jangan taruh signed URL di argv (`/proc/<pid>/cmdline`). yt-dlp membaca
+    // satu URL dari stdin lewat batch-file=-.
+    cmd.push(YTDLP_BATCH_FILE_STDIN.into());
 
     // v2.3.1 (M1): async penuh — run_ytdlp kini memakai tokio::process
-    run_ytdlp(cmd, info.clone(), tx.clone()).await;
+    run_ytdlp_with_stdin(cmd, info.clone(), tx.clone(), Some(url)).await;
 }
 
 /// v2.3.1 (M1): async penuh via tokio::process — lihat komentar
@@ -576,20 +596,38 @@ pub(crate) async fn run_ytdlp(
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
 ) -> bool {
+    run_ytdlp_with_stdin(cmd, info, tx, None).await
+}
+
+/// Jalankan yt-dlp dengan URL melalui stdin, bukan argv. URL signed sering
+/// memuat kredensial sementara dan `/proc/<pid>/cmdline` dapat dibaca proses
+/// lain dengan UID yang sama. `--batch-file=-` membuat yt-dlp membaca satu
+/// URL dari stdin lalu EOF menutup batch file.
+pub(crate) async fn run_ytdlp_with_stdin(
+    cmd: Vec<String>,
+    info: Arc<Mutex<DownloadInfo>>,
+    tx: mpsc::UnboundedSender<DownloadEvent>,
+    stdin_url: Option<String>,
+) -> bool {
     // process_group(0) → killpg menjangkau ffmpeg anak-anaknya saat pause/cancel (K4).
     // Spawn + publikasi PID satu lock: pause tidak bisa kehilangan child.
     let mut i = info.lock().await;
     if i.stop_requested() {
         return false;
     }
-    let mut child = match tokio::process::Command::new(&cmd[0])
+    let mut command = tokio::process::Command::new(&cmd[0]);
+    command
         .args(&cmd[1..])
         .process_group(0)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .kill_on_drop(true);
+    if stdin_url.is_some() {
+        command.stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::null());
+    }
+    let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
@@ -610,6 +648,15 @@ pub(crate) async fn run_ytdlp(
     let pid = child.id();
     i.pid = pid;
     drop(i);
+
+    if let Some(url) = stdin_url {
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(url.as_bytes()).await;
+            let _ = stdin.write_all(b"\n").await;
+            // Drop stdin so yt-dlp sees EOF after the single URL.
+        }
+    }
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -850,6 +897,41 @@ fn parse_speed(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yt_dlp_url_input_uses_stdin_batch_file() {
+        assert_eq!(YTDLP_BATCH_FILE_STDIN, "--batch-file=-");
+        assert!(!YTDLP_BATCH_FILE_STDIN.contains("https://"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_ytdlp_sends_url_via_stdin() {
+        let item = DownloadInfo::new(
+            "stdin-url".into(),
+            "https://secret.example/token".into(),
+            "file.mp4".into(),
+            "unused".into(),
+            Default::default(),
+            None,
+        );
+        let info = Arc::new(Mutex::new(item));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let ok = run_ytdlp_with_stdin(
+            vec![
+                "sh".into(),
+                "-c".into(),
+                "IFS= read -r received && test -n \"$received\" && printf '[download] 100%%\\n'"
+                    .into(),
+            ],
+            info.clone(),
+            tx,
+            Some("https://secret.example/token".into()),
+        )
+        .await;
+        assert!(ok);
+        assert_eq!(info.lock().await.status, DownloadStatus::Completed);
+    }
 
     #[tokio::test]
     async fn stopped_download_does_not_spawn_or_become_error() {

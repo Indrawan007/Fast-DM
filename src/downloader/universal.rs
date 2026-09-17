@@ -2,7 +2,8 @@ use super::types::*;
 use crate::config::Config;
 use crate::downloader::aria2::conn_per_server;
 use crate::downloader::youtube::{
-    cookie_args, merge_output_format, network_args, output_template, quality_args, run_ytdlp,
+    cookie_args, merge_output_format, network_args, output_template, quality_args,
+    run_ytdlp_with_stdin, YTDLP_BATCH_FILE_STDIN,
 };
 use std::process::Command;
 use std::sync::Arc;
@@ -142,9 +143,11 @@ pub async fn download(
             cmd.push(format!("{}:{}", k, v));
         }
     }
-    cmd.push(url);
+    // Jangan taruh signed URL di argv (`/proc/<pid>/cmdline`). yt-dlp membaca
+    // satu URL dari stdin lewat batch-file=-.
+    cmd.push(YTDLP_BATCH_FILE_STDIN.into());
 
-    let ok = run_ytdlp(cmd, info.clone(), tx.clone()).await;
+    let ok = run_ytdlp_with_stdin(cmd, info.clone(), tx.clone(), Some(url)).await;
 
     if ok {
         return Outcome::Completed;
