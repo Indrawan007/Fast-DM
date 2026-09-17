@@ -226,9 +226,8 @@ pub(crate) fn daemon_args(port: u16, secret: &str, cfg: &Config) -> Vec<String> 
     if !cfg.verify_tls {
         v.push("--check-certificate=false".into());
     }
-    if !cfg.proxy_url.trim().is_empty() {
-        v.push(format!("--all-proxy={}", cfg.proxy_url.trim()));
-    }
+    // Kredensial proxy tidak dimasukkan ke argv daemon. Proxy disinkronkan
+    // setelah daemon terautentikasi lewat `changeGlobalOption`.
     v
 }
 
@@ -1078,7 +1077,10 @@ mod tests {
         assert!(j.contains("--http-accept-gzip=true"));
         assert!(j.contains("--max-overall-download-limit=5M"));
         assert!(j.contains("--check-certificate=false"));
-        assert!(j.contains("--all-proxy=http://127.0.0.1:8118"));
+        // Kredensial proxy tidak boleh muncul di `/proc/<pid>/cmdline`.
+        assert!(!j.contains("--all-proxy"));
+        // Proxy dikirim kemudian melalui RPC, bukan saat spawn daemon.
+        assert_eq!(global_options_extended(&cfg)["all-proxy"], "http://127.0.0.1:8118");
         // kosong/0 → tanpa flag limit; proxy kosong → tanpa flag
         let plain = Config::default();
         let j2 = daemon_args(6800, "s", &plain).join(" ");

@@ -1,6 +1,7 @@
 use super::types::*;
 use crate::config::Config;
 use regex::Regex;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
@@ -94,12 +95,21 @@ pub async fn download(
     }
 
     // Re-check stop and publish Downloading under the same item lock.
-    let (cmd, input_file) = {
+    let (cmd, cleanup_files) = {
         let mut i = info.lock().await;
         if i.stop_requested() {
             return;
         }
-        let command = build_aria2_cmd(&i, config);
+        let command = match build_aria2_cmd(&i, config) {
+            Ok(command) => command,
+            Err(msg) => {
+                i.status = DownloadStatus::Error;
+                i.error_msg = msg;
+                i.speed = 0;
+                let _ = tx.send(DownloadEvent::Error(i.clone()));
+                return;
+            }
+        };
         i.status = DownloadStatus::Downloading;
         let _ = tx.send(DownloadEvent::Progress(i.clone()));
         command
@@ -110,13 +120,16 @@ pub async fn download(
     // Spawn aria2c — v2.3.1 (M1): async penuh, tanpa spawn_blocking
     run_aria2c(cmd, info.clone(), tx.clone()).await;
 
-    // Cleanup input file
-    if let Some(path) = input_file {
+    // Cleanup private input/config files even when aria2c fails to spawn.
+    for path in cleanup_files {
         let _ = std::fs::remove_file(path);
     }
 }
 
-fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option<String>) {
+fn build_aria2_cmd(
+    info: &DownloadInfo,
+    config: &Config,
+) -> Result<(Vec<String>, Vec<PathBuf>), String> {
     // Write URL to input file (handles long URLs)
     // v2.3.0 (K3): direktori privat (XDG_RUNTIME_DIR/config dir, 0700) +
     // file 0600 — URL bisa mengandung token; jangan lagi di /tmp publik.
@@ -126,11 +139,23 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
     // Hanya URL di input-file (untuk menangani URL panjang). Semua opsi lain
     // dikirim sebagai argumen CLI: nilai dengan spasi (path folder, nama file,
     // header) tidak salah di-parse oleh format input-file aria2.
-    let _ = std::fs::write(&input_path, format!("{}\n", info.url));
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&input_path, std::fs::Permissions::from_mode(0o600));
-    }
+    Config::write_private_atomic(&input_path, format!("{}\n", info.url).as_bytes())
+        .map_err(|_| "Gagal menyiapkan input aria2".to_string())?;
+    let mut cleanup_files = vec![input_path.clone()];
+
+    // Kredensial proxy dibaca aria2 dari config privat, bukan dari argv.
+    let proxy_path = if !config.proxy_url.trim().is_empty() {
+        let path = input_dir.join(format!("aria2-{}.conf", info.id));
+        let content = format!("all-proxy={}\n", config.proxy_url.trim());
+        if Config::write_private_atomic(&path, content.as_bytes()).is_err() {
+            let _ = std::fs::remove_file(&input_path);
+            return Err("Gagal menyiapkan konfigurasi proxy aria2".into());
+        }
+        cleanup_files.push(path.clone());
+        Some(path)
+    } else {
+        None
+    };
 
     let mut cmd = vec![
         "aria2c".into(),
@@ -189,6 +214,9 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         format!("--allow-overwrite={}", !config.auto_file_renaming),
         format!("--auto-file-renaming={}", config.auto_file_renaming),
     ];
+    if let Some(path) = proxy_path {
+        cmd.push(format!("--conf-path={}", path.display()));
+    }
 
     // Header kustom dari browser extension (mis. Referer) — strip \r\n anti injection.
     // Dikirim per argumen agar nilai dengan spasi aman.
@@ -216,14 +244,7 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         }
     }
 
-    // v2.4.0 (D3): proxy untuk semua protokol (http/https/ftp). Kredensial
-    // dikandung langsung di URL (http://user:pass@host:port) — tidak perlu
-    // --all-proxy-user/--all-proxy-password terpisah.
-    if !config.proxy_url.trim().is_empty() {
-        cmd.push(format!("--all-proxy={}", config.proxy_url.trim()));
-    }
-
-    (cmd, Some(input_path.to_string_lossy().to_string()))
+    (cmd, cleanup_files)
 }
 
 /// v2.3.1 (M1): tokio::process penuh — pola lama (std::process di dalam
@@ -1003,6 +1024,39 @@ mod tests {
         assert!(valid_cookie_header_field("sid", false));
         assert!(!valid_cookie_header_field("sid=other", false));
         assert!(!valid_cookie_header_field("a;b", true));
+    }
+
+    #[test]
+    fn per_process_proxy_is_config_file_not_argv() {
+        let id = format!("proxy-{}", uuid::Uuid::new_v4().simple());
+        let item = DownloadInfo::new(
+            id,
+            "https://example.test/archive.zip".into(),
+            "archive.zip".into(),
+            "/tmp".into(),
+            Default::default(),
+            None,
+        );
+        let cfg = Config {
+            proxy_url: "http://user:secret@127.0.0.1:8080".into(),
+            ..Config::default()
+        };
+        let (args, cleanup) = build_aria2_cmd(&item, &cfg).unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains("--conf-path="));
+        assert!(!joined.contains("user"));
+        assert!(!joined.contains("secret"));
+        let proxy_file = cleanup
+            .iter()
+            .find(|path| path.extension().is_some_and(|ext| ext == "conf"))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(proxy_file).unwrap(),
+            "all-proxy=http://user:secret@127.0.0.1:8080\n"
+        );
+        for path in cleanup {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[tokio::test]

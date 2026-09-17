@@ -625,7 +625,9 @@ fn spawn_supervised(
             // coba yt-dlp dulu (resolver universal, gaya IDM); kalau situs
             // tidak didukung → fallback ke aria2.
             match universal::download(info.clone(), tx.clone(), &config).await {
-                universal::Outcome::Completed | universal::Outcome::MissingTool => {}
+                universal::Outcome::Completed
+                | universal::Outcome::MissingTool
+                | universal::Outcome::ConfigurationError => {}
                 universal::Outcome::Failed => {
                     let aborted = {
                         let i = info.lock().await;
@@ -1211,8 +1213,8 @@ impl<R: tokio::io::AsyncRead + Unpin> ChildLines<R> {
     }
 }
 
-/// v2.3.0 (K3): file input aria2 (`aria2-<id>.txt`) berisi URL penuh — mungkin
-/// bertoken login. Dibersihkan 0600 saat selesai; ini sapuan sisa sesi crash.
+/// v2.3.0 (K3): file input/config privat aria2 dan yt-dlp berisi URL atau
+/// kredensial proxy. Dibersihkan 0600 saat selesai; ini sapuan sisa sesi crash.
 fn cleanup_orphan_aria2_inputs() {
     let dir = Config::aria2_input_dir();
     if let Ok(rd) = std::fs::read_dir(&dir) {
@@ -1221,7 +1223,10 @@ fn cleanup_orphan_aria2_inputs() {
             let ours = path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("aria2-") && n.ends_with(".txt"));
+                .is_some_and(|n| {
+                    (n.starts_with("aria2-") && (n.ends_with(".txt") || n.ends_with(".conf")))
+                        || (n.starts_with("ytdlp-") && n.ends_with(".conf"))
+                });
             if ours {
                 let _ = std::fs::remove_file(&path);
             }
