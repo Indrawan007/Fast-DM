@@ -350,6 +350,17 @@ pub async fn start_server(engine: Arc<DownloadEngine>) -> Result<(), Box<dyn std
     }
 }
 
+fn control_response(action: &str, id: &str, accepted: bool) -> IpcResponse {
+    IpcResponse {
+        success: accepted,
+        id: Some(id.to_string()),
+        error: (!accepted).then(|| {
+            format!("Download tidak ditemukan atau tidak dapat di-{action}: {id}")
+        }),
+        message: None,
+    }
+}
+
 async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse {
     match msg.action.as_str() {
         "download" => {
@@ -423,40 +434,22 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
             message: Some("running".into()),
         },
 
-        "pause" => {
-            if let Some(id) = msg.id {
-                engine.pause_download(&id).await;
-            }
-            IpcResponse {
-                success: true,
-                id: None,
-                error: None,
-                message: None,
-            }
-        }
-
-        "resume" => {
-            if let Some(id) = msg.id {
-                engine.resume_download(&id).await;
-            }
-            IpcResponse {
-                success: true,
-                id: None,
-                error: None,
-                message: None,
-            }
-        }
-
-        "cancel" => {
-            if let Some(id) = msg.id {
-                engine.cancel_download(&id).await;
-            }
-            IpcResponse {
-                success: true,
-                id: None,
-                error: None,
-                message: None,
-            }
+        "pause" | "resume" | "cancel" => {
+            let Some(id) = msg.id.as_deref() else {
+                return IpcResponse {
+                    success: false,
+                    id: None,
+                    error: Some(format!("No ID untuk aksi {}", msg.action)),
+                    message: None,
+                };
+            };
+            let accepted = match msg.action.as_str() {
+                "pause" => engine.pause_download(id).await,
+                "resume" => engine.resume_download(id).await,
+                "cancel" => engine.cancel_download(id).await,
+                _ => false,
+            };
+            control_response(&msg.action, id, accepted)
         }
 
         "list" => {
@@ -824,6 +817,21 @@ mod tests {
             "https://example.com/"
         );
         assert_eq!(redact_url_for_ipc("not a URL"), "[URL disembunyikan]");
+    }
+
+    #[test]
+    fn control_response_reports_rejected_action() {
+        let response = control_response("pause", "missing", false);
+        assert!(!response.success);
+        assert_eq!(response.id.as_deref(), Some("missing"));
+        assert!(response
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("pause")));
+
+        let response = control_response("cancel", "known", true);
+        assert!(response.success);
+        assert!(response.error.is_none());
     }
 
     #[test]

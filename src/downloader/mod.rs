@@ -398,23 +398,29 @@ impl DownloadEngine {
         }
     }
 
-    pub async fn pause_download(&self, id: &str) {
+    /// Pause one download and report whether the requested transition was
+    /// accepted. IPC callers must not report success for an unknown or
+    /// terminal download ID.
+    pub async fn pause_download(&self, id: &str) -> bool {
         let downloads = self.downloads.read().await;
-        if let Some(info) = downloads.get(id) {
-            let mut i = info.lock().await;
-            if i.request_pause() {
-                kill_child_pid(i.pid);
-                let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
-                self.mark_dirty();
-            }
+        let Some(info) = downloads.get(id) else {
+            return false;
+        };
+        let mut i = info.lock().await;
+        if !i.request_pause() {
+            return false;
         }
+        kill_child_pid(i.pid);
+        let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
+        self.mark_dirty();
+        true
     }
 
-    pub async fn resume_download(&self, id: &str) {
-        // DEADLOCK FIX: guard read-lock harus di-drop SEBELUM start_download()
-        // — start_download meminta write-lock pada map yang sama, dan RwLock
-        // tokio tidak reentrant: read-guard lama tidak akan pernah di-drop
-        // selama kita menunggu write-lock → deadlock permanen.
+    /// DEADLOCK FIX: guard read-lock harus di-drop SEBELUM start_download()
+    /// — start_download meminta write-lock pada map yang sama, dan RwLock
+    /// tokio tidak reentrant: read-guard lama tidak akan pernah di-drop
+    /// selama kita menunggu write-lock → deadlock permanen.
+    pub async fn resume_download(&self, id: &str) -> bool {
         let resumable = {
             let downloads = self.downloads.read().await;
             if let Some(info) = downloads.get(id) {
@@ -423,12 +429,14 @@ impl DownloadEngine {
                 None
             }
         };
-        if matches!(
+        if !matches!(
             resumable,
             Some(DownloadStatus::Paused | DownloadStatus::Error)
         ) {
-            self.start_download(id).await;
+            return false;
         }
+        self.start_download(id).await;
+        true
     }
 
     /// Pause SEMUA unduhan (aktif + antrian) — dipakai tombol "Jeda Semua" (UI-UX C3).
@@ -467,7 +475,10 @@ impl DownloadEngine {
         }
     }
 
-    pub async fn cancel_download(&self, id: &str) {
+    /// Cancel one download and report whether the ID existed. The RPC cleanup
+    /// remains best-effort, but an unknown ID is no longer reported as success
+    /// by the IPC layer.
+    pub async fn cancel_download(&self, id: &str) -> bool {
         // Ambil handle kontrol lalu lepas semua lock SEBELUM RPC await.
         // Khusus item RPC yang sudah Paused, supervisor polling sudah selesai;
         // karena itu engine sendiri wajib forceRemove GID-nya dari daemon.
@@ -489,16 +500,18 @@ impl DownloadEngine {
             }
         };
 
-        if let Some((pid, gid)) = target {
-            kill_child_pid(pid);
-            if let Some(gid) = gid {
-                let config = self.config.read().await.clone();
-                if let Err(e) = aria2_rpc::remove_gid(&gid, &config).await {
-                    tracing::warn!("RPC cancel GID {}: {}", gid, e);
-                }
+        let Some((pid, gid)) = target else {
+            return false;
+        };
+        kill_child_pid(pid);
+        if let Some(gid) = gid {
+            let config = self.config.read().await.clone();
+            if let Err(e) = aria2_rpc::remove_gid(&gid, &config).await {
+                tracing::warn!("RPC cancel GID {}: {}", gid, e);
             }
-            self.mark_dirty();
         }
+        self.mark_dirty();
+        true
     }
 
     pub async fn clear_download(&self, id: &str) {
@@ -1565,6 +1578,19 @@ mod tests {
         assert_eq!(info.status, DownloadStatus::Downloading);
         assert!(info.worker_active);
         assert_eq!(info.retry_count, 0, "no second worker claimed");
+    }
+
+    #[tokio::test]
+    async fn control_methods_reject_unknown_or_terminal_ids() {
+        let engine = lifecycle_engine();
+        lifecycle_item(&engine, "completed", DownloadStatus::Completed).await;
+
+        assert!(!engine.pause_download("missing").await);
+        assert!(!engine.resume_download("missing").await);
+        assert!(!engine.cancel_download("missing").await);
+        assert!(!engine.pause_download("completed").await);
+        assert!(!engine.resume_download("completed").await);
+        assert!(engine.cancel_download("completed").await);
     }
 
     #[tokio::test]
