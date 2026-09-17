@@ -466,7 +466,10 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
                 .map(|d| {
                     serde_json::json!({
                         "id": d.id,
-                        "url": d.url,
+                        // Jangan kirim query/path URL mentah: signed URL sering
+                        // memuat token akses dan respons `list` diteruskan ke
+                        // extension/browser caller.
+                        "url": redact_url_for_ipc(&d.url),
                         "filename": d.filename,
                         "status": d.status.to_string(),
                         "progress": d.progress,
@@ -710,6 +713,21 @@ fn cookie_path_matches(request_path: &str, cookie_path: &str) -> bool {
                 .is_some_and(|b| *b == b'/'))
 }
 
+/// URL yang keluar lewat IPC hanya perlu identitas host untuk status.
+/// Query, fragment, userinfo, dan path sengaja dihapus karena URL download
+/// dapat berisi signed token — termasuk token yang ditempatkan di path.
+fn redact_url_for_ipc(raw: &str) -> String {
+    let Ok(mut url) = url::Url::parse(raw) else {
+        return "[URL disembunyikan]".into();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_path("/");
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -795,6 +813,17 @@ mod tests {
         assert!(!valid_cookie_field("sid=other", false));
         assert!(!valid_cookie_field("a;b", true));
         assert!(!valid_cookie_field("a\0b", true));
+    }
+
+    #[test]
+    fn redact_url_removes_credentials_and_tokens() {
+        assert_eq!(
+            redact_url_for_ipc(
+                "https://user:password@example.com/private/token.mp4?sig=secret#fragment"
+            ),
+            "https://example.com/"
+        );
+        assert_eq!(redact_url_for_ipc("not a URL"), "[URL disembunyikan]");
     }
 
     #[test]
