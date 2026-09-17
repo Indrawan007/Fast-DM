@@ -498,13 +498,15 @@ async function sendDownload(
     message.quality = quality;
   }
 
-  // Ambil cookies situs via API bila tidak dikirim eksplisit
-  // (download login-protected — dipakai yt-dlp & aria2 --load-cookies)
+  // Ambil cookies situs via API bila tidak dikirim eksplisit.
+  // Kirim metadata cookie utuh, bukan hanya string "name=value": downloader
+  // perlu mempertahankan host-only/domain, path, Secure, dan expiry agar
+  // cookie HTTPS tidak pernah turun ke HTTP atau sibling subdomain.
   if (!cookies) {
     try {
       const jar = await chrome.cookies.getAll({ url });
-      if (jar && jar.length > 0) {
-        cookies = jar.map((c) => c.name + "=" + c.value).join("; ");
+      if (Array.isArray(jar)) {
+        cookies = jar;
         domain = new URL(url).hostname;
       }
     } catch (e) {
@@ -512,8 +514,12 @@ async function sendDownload(
     }
   }
 
-  // Cookies halaman (untuk yt-dlp — video membersih+/login)
-  if (cookies && domain) {
+  // Cookies halaman (untuk yt-dlp/aria2 — download login-protected).
+  // `domain` dipertahankan untuk kompatibilitas message lama, tetapi Rust
+  // memvalidasi ulang terhadap URL request dan metadata setiap cookie.
+  if (Array.isArray(cookies) && domain) {
+    // Kirim array kosong juga: native host perlu menghapus jar lama agar
+    // kredensial dari unduhan sebelumnya tidak dipakai ulang diam-diam.
     message.cookies = cookies;
     message.domain = domain;
   }

@@ -109,7 +109,7 @@ for (const failure of ["rejected", "missing", "transport"]) {
   });
 }
 
-function background() {
+function background(cookieJar = []) {
   const badges = [];
   const requests = [];
   const logs = [];
@@ -138,7 +138,7 @@ function background() {
         local: { get: () => {}, set: () => {} },
         onChanged: event,
       },
-      cookies: { getAll: async () => [] },
+      cookies: { getAll: async () => cookieJar },
       // onDeterminingFilename wajib ada: background.js mendaftarkan listener
       // di top level (baris ~664), jadi tanpa mock ini seluruh service script
       // gagal dimuat dan SEMUA test badge error sebelum sempat berjalan.
@@ -187,3 +187,28 @@ for (const outcome of ["success", "rejected", "missing", "transport"]) {
     assert.ok(b.logs.every((line) => !line.includes("private")));
   });
 }
+
+test("background forwards cookie scope metadata instead of flattening values", async () => {
+  const cookie = {
+    name: "SID",
+    value: "secret",
+    domain: "example.com",
+    path: "/private",
+    secure: true,
+    hostOnly: true,
+    expirationDate: 4_000_000_000,
+  };
+  const b = background([cookie]);
+  const response = new Promise((resolve) =>
+    b.onMessage(
+      { action: "download", url: "https://example.com/private/file.zip" },
+      {},
+      resolve,
+    ),
+  );
+  await new Promise(setImmediate);
+  assert.deepEqual(b.requests[0].message.cookies, [cookie]);
+  assert.equal(b.requests[0].message.domain, "example.com");
+  b.requests[0].callback({ success: true });
+  assert.equal((await response).success, true);
+});

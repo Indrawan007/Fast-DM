@@ -3,6 +3,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+/// Marker untuk cookie jar yang mempertahankan metadata browser.
+/// File tanpa marker dianggap legacy dan tidak pernah dikirim ke downloader:
+/// format lama telah menghilangkan flag Secure/domain/path sehingga tidak aman
+/// untuk dipakai ulang.
+pub const COOKIE_FILE_HEADER: &str = "# Fast-DM-Cookie-Format: 2";
+
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -339,7 +345,10 @@ impl Config {
         let mut h = Self::normalize_host(host);
         while !h.is_empty() {
             let p = Self::cookies_file_for_host(&h);
-            if p.exists() {
+            // Jangan memakai cookies.txt keluaran versi lama: format lama
+            // menulis semua cookie sebagai domain-wide + Secure=FALSE.
+            // Lebih aman memaksa browser mengirim ulang metadata yang benar.
+            if Self::is_current_cookie_file(&p) {
                 return Some(p);
             }
             // Buang label kiri: "a.b.c" → "b.c"; berhenti di "c"
@@ -372,6 +381,12 @@ impl Config {
             })
             .collect();
         Self::config_dir().join(format!("cookies_{safe}.txt"))
+    }
+
+    fn is_current_cookie_file(path: &Path) -> bool {
+        fs::read_to_string(path)
+            .ok()
+            .is_some_and(|text| text.lines().any(|line| line.trim() == COOKIE_FILE_HEADER))
     }
 
     /// Snapshot config saat pertama kali dipanggil (proses berumur pendek =

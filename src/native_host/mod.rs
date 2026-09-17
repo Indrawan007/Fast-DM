@@ -1,5 +1,6 @@
 pub mod setup;
 
+use crate::ipc::BrowserCookie;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
@@ -13,7 +14,7 @@ struct NativeMessage {
     extension_id: Option<String>,
     #[serde(default)]
     headers: std::collections::HashMap<String, String>,
-    cookies: Option<String>,
+    cookies: Option<Vec<BrowserCookie>>,
     domain: Option<String>,
 }
 

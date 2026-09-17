@@ -6,6 +6,38 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
+fn default_cookie_path() -> String {
+    // Missing path must not widen a cookie to every URL on the host.
+    String::new()
+}
+
+fn default_cookie_secure() -> bool {
+    // Missing Secure metadata fails closed; an explicit `false` is preserved.
+    true
+}
+
+fn default_cookie_host_only() -> bool {
+    // Omit metadata must fail closed: a cookie tanpa hostOnly tidak boleh
+    // berubah menjadi domain-wide hanya karena client mengirim field parsial.
+    true
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct BrowserCookie {
+    pub(crate) name: String,
+    pub(crate) value: String,
+    #[serde(default)]
+    pub(crate) domain: String,
+    #[serde(default = "default_cookie_path")]
+    pub(crate) path: String,
+    #[serde(default = "default_cookie_secure")]
+    pub(crate) secure: bool,
+    #[serde(rename = "hostOnly", default = "default_cookie_host_only")]
+    pub(crate) host_only: bool,
+    #[serde(rename = "expirationDate", default)]
+    pub(crate) expiration_date: Option<f64>,
+}
+
 #[derive(Deserialize)]
 #[allow(dead_code)]
 struct IpcMessage {
@@ -17,7 +49,9 @@ struct IpcMessage {
     extension_id: Option<String>,
     #[serde(default)]
     headers: std::collections::HashMap<String, String>,
-    cookies: Option<String>,
+    cookies: Option<Vec<BrowserCookie>>,
+    // Dipertahankan untuk kompatibilitas payload, tetapi domain dari client
+    // tidak dipercaya; writer memvalidasi metadata terhadap URL request.
     domain: Option<String>,
 }
 
@@ -350,9 +384,11 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
                 };
             }
 
-            // Tulis cookies.txt SEBELUM download start (yt-dlp membacanya saat spawn)
-            if let (Some(c), Some(d)) = (msg.cookies.as_deref(), msg.domain.as_deref()) {
-                if let Err(e) = write_cookies_txt(c, d) {
+            // Tulis cookies.txt SEBELUM download start (yt-dlp membacanya saat
+            // spawn). Metadata browser divalidasi ulang terhadap URL; field
+            // `domain` dari client tidak dipakai sebagai sumber kebenaran.
+            if let Some(cookies) = msg.cookies.as_deref() {
+                if let Err(e) = write_cookies_txt(cookies, &url) {
                     tracing::warn!("set cookies: {}", e);
                 }
             }
@@ -485,58 +521,193 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
     }
 }
 
-/// Konversi cookie string browser ("k=v; k=v") → file Netscape per-domain
-/// untuk yt-dlp/aria2 (B7: per-domain agar tidak saling menimpa)
-fn write_cookies_txt(cookie_header: &str, domain: &str) -> Result<(), String> {
-    if cookie_header.len() > 256 * 1024 {
-        return Err("cookies too large".into());
-    }
-    let host = domain.trim().trim_start_matches("www.");
-    if host.is_empty() || host.chars().any(|c| c.is_whitespace()) {
-        return Err("invalid domain".into());
+/// Tulis metadata cookie browser ke file Netscape per-domain.
+///
+/// Format lama menerima string `k=v; k=v` lalu memperlebar semua cookie ke
+/// `.host`, `/`, dan `Secure=FALSE`. Itu tidak aman: host-only cookie dapat
+/// bocor ke sibling subdomain dan cookie HTTPS dapat turun ke HTTP. Sekarang
+/// metadata dari `chrome.cookies.getAll()` dipertahankan dan file ditulis
+/// atomik agar downloader tidak pernah membaca file setengah jadi.
+fn write_cookies_txt(cookies: &[BrowserCookie], request_url: &str) -> Result<(), String> {
+    const MAX_COOKIES: usize = 512;
+    const SESSION_COOKIE_TTL: i64 = 24 * 3600;
+
+    if cookies.len() > MAX_COOKIES {
+        return Err("too many cookies".into());
     }
 
-    // v2.3.0 (M7): TTL 24 jam — dulu 1 tahun (!) padahal ini salinan sesi
-    // browser; GC engine (7 hari) + kedaluwarsa mandiri menjamin tidak ada
-    // kredensial basi menumpuk di disk. Cookie session browser memang pendek
-    // umurnya, 24 jam lebih dari cukup untuk menyelesaikan unduhan.
-    let expires = chrono::Utc::now().timestamp() + 24 * 3600;
-    let mut out = String::from("# Netscape HTTP Cookie File\n");
-    let mut count = 0;
+    let parsed = url::Url::parse(request_url).map_err(|_| "invalid cookie URL".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("cookies require an HTTP(S) URL".into());
+    }
+    let request_host = parsed
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| "invalid cookie host".to_string())?;
+    let file_host = request_host.trim_start_matches("www.");
+    let now = chrono::Utc::now().timestamp();
+    let request_path = if parsed.path().is_empty() {
+        "/"
+    } else {
+        parsed.path()
+    };
 
-    for pair in cookie_header.split(';') {
-        let pair = pair.trim();
-        if pair.is_empty() {
+    let mut out = format!(
+        "# Netscape HTTP Cookie File\n{}\n",
+        crate::config::COOKIE_FILE_HEADER
+    );
+    let mut count = 0usize;
+    let path = Config::cookies_file_for(file_host);
+
+    if cookies.is_empty() {
+        clear_cookie_file(&path)?;
+        return Ok(());
+    }
+
+    for cookie in cookies {
+        let raw_domain = cookie.domain.trim().to_ascii_lowercase();
+        let cookie_domain = raw_domain.trim_start_matches('.');
+        if cookie_domain.is_empty()
+            || !cookie_domain_matches_host(cookie_domain, &request_host)
+            || !valid_cookie_field(cookie_domain, false)
+        {
             continue;
         }
-        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let name = name.trim().replace(['\t', '\r', '\n'], "");
-        let value = value.trim().replace(['\t', '\r', '\n'], "");
-        if name.is_empty() {
+
+        let path = if cookie.path.starts_with('/') && valid_cookie_field(&cookie.path, true) {
+            cookie.path.clone()
+        } else {
+            continue;
+        };
+        if !cookie_path_matches(request_path, &path) {
             continue;
         }
+        if cookie.secure && parsed.scheme() != "https" {
+            continue;
+        }
+
+        let expires = match cookie.expiration_date {
+            Some(value) if value.is_finite() && value > 0.0 => {
+                let value = value.floor();
+                if value > i64::MAX as f64 {
+                    i64::MAX
+                } else {
+                    value as i64
+                }
+            }
+            Some(_) => continue,
+            // Netscape's zero means a session cookie. Give the local copy a
+            // bounded lifetime so it cannot survive indefinitely on disk.
+            None => now.saturating_add(SESSION_COOKIE_TTL),
+        };
+        if expires > 0 && expires <= now {
+            continue;
+        }
+
+        let name = strip_cookie_field(&cookie.name);
+        let value = strip_cookie_field(&cookie.value);
+        if !valid_cookie_field(&name, false) || !valid_cookie_field(&value, true) {
+            continue;
+        }
+
+        // `hostOnly=true` means no leading dot and FALSE in the include-
+        // subdomains column. Domain cookies retain their original scope.
+        let include_subdomains = !cookie.host_only;
+        let output_domain = if include_subdomains {
+            format!(".{}", cookie_domain)
+        } else {
+            cookie_domain.to_string()
+        };
         out.push_str(&format!(
-            ".{}\tTRUE\t/\tFALSE\t{}\t{}\t{}\n",
-            host, expires, name, value
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            output_domain,
+            if include_subdomains { "TRUE" } else { "FALSE" },
+            path,
+            if cookie.secure { "TRUE" } else { "FALSE" },
+            expires,
+            name,
+            value
         ));
         count += 1;
     }
 
     if count == 0 {
-        return Err("no cookies".into());
+        clear_cookie_file(&path)?;
+        return Err("no cookies matching request URL".into());
     }
 
-    let path = Config::cookies_file_for(host);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    std::fs::write(&path, out).map_err(|e| e.to_string())?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| "cookie path has no parent".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
 
-    // Cookies = rahasia → 0600
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    // Unique temporary file + rename: concurrent writers may replace one
+    // another, but readers never observe a truncated cookie file.
+    let nonce = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let temp = path.with_file_name(format!(".cookies-{}.tmp-{}", file_host, nonce));
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = file.write_all(out.as_bytes()).and_then(|_| file.sync_all()) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e.to_string());
+    }
+    drop(file);
+    if let Err(e) = std::fs::rename(&temp, &path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e.to_string());
+    }
 
     Ok(())
+}
+
+fn clear_cookie_file(path: &std::path::Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn strip_cookie_field(value: &str) -> String {
+    value.trim().replace(['\t', '\r', '\n'], "")
+}
+
+fn valid_cookie_field(value: &str, is_value: bool) -> bool {
+    (!value.is_empty() || is_value)
+        && !value.chars().any(|ch| {
+            ch.is_control() || (!is_value && (ch == '=' || ch == ';' || ch.is_whitespace()))
+        })
+        && (!is_value || !value.contains(';'))
+}
+
+fn cookie_domain_matches_host(cookie_domain: &str, host: &str) -> bool {
+    host == cookie_domain || host.ends_with(&format!(".{}", cookie_domain))
+}
+
+fn cookie_path_matches(request_path: &str, cookie_path: &str) -> bool {
+    if cookie_path == "/" || request_path == cookie_path {
+        return true;
+    }
+    request_path.starts_with(cookie_path)
+        && (cookie_path.ends_with('/')
+            || request_path
+                .as_bytes()
+                .get(cookie_path.len())
+                .is_some_and(|b| *b == b'/'))
 }
 
 #[cfg(test)]
@@ -612,6 +783,18 @@ mod tests {
             .copied()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn cookie_scope_helpers_fail_closed() {
+        assert!(cookie_domain_matches_host("example.com", "www.example.com"));
+        assert!(!cookie_domain_matches_host("example.com", "notexample.com"));
+        assert!(cookie_path_matches("/private/file", "/private"));
+        assert!(!cookie_path_matches("/private-file", "/private"));
+        assert!(valid_cookie_field("sid", false));
+        assert!(!valid_cookie_field("sid=other", false));
+        assert!(!valid_cookie_field("a;b", true));
+        assert!(!valid_cookie_field("a\0b", true));
     }
 
     #[test]

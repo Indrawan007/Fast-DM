@@ -761,17 +761,19 @@ pub(crate) async fn resolve_filename(
 /// `pub(crate)`: v2.9.0 (B2.2) juga dipakai jalur RPC sebagai opsi per-URI
 /// `cookie` di `addUri` (daemon global tidak boleh menyentuh domain lain).
 pub(crate) fn cookie_header_for(url: &str) -> Option<String> {
-    let host = url::Url::parse(url)
-        .ok()?
-        .host_str()?
-        .trim_start_matches("www.")
-        .to_ascii_lowercase();
-    // File per-domain dulu (termasuk domain induk — file video sering ada di
-    // subdomain CDN, sedangkan cookies disimpan dengan host halaman);
-    // fallback ke cookies.txt lama (versi sebelumnya)
-    let path = Config::find_cookies_file(&host)
-        .unwrap_or_else(|| Config::config_dir().join("cookies.txt"));
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let request_path = if parsed.path().is_empty() {
+        "/"
+    } else {
+        parsed.path()
+    };
+    let path = Config::find_cookies_file(&host)?;
     let text = std::fs::read_to_string(&path).ok()?;
+    let now = chrono::Utc::now().timestamp();
     let mut pairs: Vec<String> = Vec::new();
 
     for line in text.lines() {
@@ -780,17 +782,52 @@ pub(crate) fn cookie_header_for(url: &str) -> Option<String> {
             continue;
         }
         let f: Vec<&str> = line.split('\t').collect();
-        if f.len() < 7 {
+        if f.len() != 7 {
             continue;
         }
-        let domain = f[0].trim_start_matches('.').to_ascii_lowercase();
-        // Cookie berlaku bila domain sama / subdomain dari domain cookie
-        if host == domain || host.ends_with(&format!(".{}", domain)) {
-            let name = f[5].trim();
-            let value = f[6].trim();
-            if !name.is_empty() {
-                pairs.push(format!("{}={}", name, value));
-            }
+
+        let raw_domain = f[0].trim().to_ascii_lowercase();
+        let domain = raw_domain.trim_start_matches('.');
+        if domain.is_empty() || !cookie_domain_matches_host(domain, &host) {
+            continue;
+        }
+        let include_subdomains = match f[1].trim().to_ascii_uppercase().as_str() {
+            "TRUE" => true,
+            "FALSE" => false,
+            _ => continue,
+        };
+        if !include_subdomains && host != domain {
+            continue;
+        }
+
+        let cookie_path = f[2].trim();
+        if !cookie_path.starts_with('/') || !cookie_path_matches(request_path, cookie_path) {
+            continue;
+        }
+        let secure = match f[3].trim().to_ascii_uppercase().as_str() {
+            "TRUE" => true,
+            "FALSE" => false,
+            _ => continue,
+        };
+        if secure && parsed.scheme() != "https" {
+            continue;
+        }
+        let expires = match f[4].trim().parse::<i64>() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if expires < 0 || (expires > 0 && expires <= now) {
+            continue;
+        }
+
+        let name = f[5].trim();
+        let value = f[6].trim();
+        if !valid_cookie_header_field(name, false) || !valid_cookie_header_field(value, true) {
+            continue;
+        }
+        pairs.push(format!("{}={}", name, value));
+        if pairs.len() >= 512 {
+            break;
         }
     }
 
@@ -799,6 +836,30 @@ pub(crate) fn cookie_header_for(url: &str) -> Option<String> {
     } else {
         Some(pairs.join("; "))
     }
+}
+
+fn cookie_domain_matches_host(cookie_domain: &str, host: &str) -> bool {
+    host == cookie_domain || host.ends_with(&format!(".{}", cookie_domain))
+}
+
+fn cookie_path_matches(request_path: &str, cookie_path: &str) -> bool {
+    if cookie_path == "/" || request_path == cookie_path {
+        return true;
+    }
+    request_path.starts_with(cookie_path)
+        && (cookie_path.ends_with('/')
+            || request_path
+                .as_bytes()
+                .get(cookie_path.len())
+                .is_some_and(|byte| *byte == b'/'))
+}
+
+fn valid_cookie_header_field(value: &str, is_value: bool) -> bool {
+    (!value.is_empty() || is_value)
+        && !value.chars().any(|ch| {
+            ch.is_control() || (!is_value && (ch == '=' || ch == ';' || ch.is_whitespace()))
+        })
+        && (!is_value || !value.contains(';'))
 }
 
 pub(crate) fn is_generic_filename(name: &str) -> bool {
@@ -932,6 +993,17 @@ pub(crate) fn parse_content_disposition(cd: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cookie_scope_helpers_match_scheme_path_and_domain() {
+        assert!(cookie_domain_matches_host("example.com", "cdn.example.com"));
+        assert!(!cookie_domain_matches_host("example.com", "example.com.evil"));
+        assert!(cookie_path_matches("/account/file", "/account"));
+        assert!(!cookie_path_matches("/accounting", "/account"));
+        assert!(valid_cookie_header_field("sid", false));
+        assert!(!valid_cookie_header_field("sid=other", false));
+        assert!(!valid_cookie_header_field("a;b", true));
+    }
 
     #[tokio::test]
     async fn stopped_download_does_not_spawn_or_become_error() {
