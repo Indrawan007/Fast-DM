@@ -730,6 +730,13 @@
   // ═══════════════════════════════════════════════
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.action === "getSniffedCandidates") {
+      // Context-menu video actions use this when Chromium exposes only a
+      // blob:/MediaSource URL for the selected element.
+      sendResponse({ urls: readSniffedCandidates() });
+      return false;
+    }
+
     if (message.action === "detectVideos") {
       const videos = new Set();
 

@@ -109,12 +109,26 @@ for (const failure of ["rejected", "missing", "transport"]) {
   });
 }
 
-function background(cookieJar = []) {
+function background(cookieJar = [], sniffedCandidates = []) {
   const badges = [];
   const requests = [];
   const logs = [];
+  const alarmCreates = [];
+  const alarmClears = [];
   let onMessage;
+  let onContextMenu;
+  let onAlarm;
   const event = { addListener() {} };
+  const contextMenuEvent = {
+    addListener(handler) {
+      onContextMenu = handler;
+    },
+  };
+  const alarmEvent = {
+    addListener(handler) {
+      onAlarm = handler;
+    },
+  };
   const context = vm.createContext({
     URL,
     setTimeout: () => 1,
@@ -138,6 +152,17 @@ function background(cookieJar = []) {
         local: { get: () => {}, set: () => {} },
         onChanged: event,
       },
+      alarms: {
+        onAlarm: alarmEvent,
+        create: (name, info) => alarmCreates.push({ name, info }),
+        clear: (name) => alarmClears.push(name),
+      },
+      tabs: {
+        sendMessage: (_tabId, message, callback) => {
+          assert.equal(message.action, "getSniffedCandidates");
+          callback({ urls: sniffedCandidates });
+        },
+      },
       cookies: { getAll: async () => cookieJar },
       // onDeterminingFilename wajib ada: background.js mendaftarkan listener
       // di top level (baris ~664), jadi tanpa mock ini seluruh service script
@@ -145,7 +170,7 @@ function background(cookieJar = []) {
       // API ini Chrome-only — extension memang hanya menarget Chromium
       // (manifest MV3 + `key`, setup-browser.sh: chrome/brave/edge).
       downloads: { onCreated: event, onDeterminingFilename: event },
-      contextMenus: { onClicked: event },
+      contextMenus: { onClicked: contextMenuEvent },
       action: {
         setBadgeText: ({ text }) => badges.push(text),
         setBadgeBackgroundColor: () => {},
@@ -153,7 +178,17 @@ function background(cookieJar = []) {
     },
   });
   vm.runInContext(source("background.js"), context);
-  return { badges, requests, logs, onMessage, context };
+  return {
+    badges,
+    requests,
+    logs,
+    onMessage,
+    onContextMenu,
+    onAlarm,
+    alarmCreates,
+    alarmClears,
+    context,
+  };
 }
 
 for (const outcome of ["success", "rejected", "missing", "transport"]) {
@@ -187,6 +222,46 @@ for (const outcome of ["success", "rejected", "missing", "transport"]) {
     assert.ok(b.logs.every((line) => !line.includes("private")));
   });
 }
+
+test("badge cleanup survives service-worker suspension via chrome alarm", async () => {
+  const b = background();
+  const response = new Promise((resolve) =>
+    b.onMessage(
+      { action: "download", url: "https://example.com/a.zip" },
+      {},
+      resolve,
+    ),
+  );
+  await new Promise(setImmediate);
+  b.requests[0].callback({ success: true });
+  assert.equal((await response).success, true);
+  assert.equal(
+    b.alarmCreates.at(-1).name,
+    "fastdm-badge-clear",
+    "result badge has a persistent cleanup alarm",
+  );
+  b.onAlarm({ name: "fastdm-badge-clear" });
+  assert.equal(b.badges.at(-1), "");
+});
+
+test("context-menu blob video uses the latest sniffer candidate", async () => {
+  const candidate = "https://cdn.example/video.m3u8?session=abc";
+  const b = background([], [candidate]);
+  const pending = b.onContextMenu(
+    {
+      menuItemId: "fastdm-download-video",
+      srcUrl: "blob:https://example.com/opaque-id",
+      pageUrl: "https://example.com/watch",
+    },
+    { id: 7 },
+  );
+  await new Promise(setImmediate);
+  assert.equal(b.requests.length, 1);
+  assert.equal(b.requests[0].message.url, candidate);
+  assert.equal(b.requests[0].message.headers.Referer, "https://example.com/watch");
+  b.requests[0].callback({ success: true });
+  await pending;
+});
 
 test("background forwards cookie scope metadata instead of flattening values", async () => {
   const cookie = {
