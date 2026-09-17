@@ -428,23 +428,40 @@ impl Config {
         })
     }
 
-    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let dir = Self::config_dir();
-        fs::create_dir_all(&dir)?;
-        let json = serde_json::to_string_pretty(self)?;
-        // Tulis atomik (tmp + rename) supaya config tidak korup kalau crash
-        let path = Self::config_file();
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, json)?;
-        // v2.10.0 (B1): config.json bisa memuat `proxy_url` berisi kredensial
-        // (http://user:pass@host:port) — samakan perlakuannya dengan
-        // session.json/cookie/rpc.secret yang sudah 0600.
+    /// Tulis file privat secara atomik dengan mode 0600 sejak file dibuat.
+    /// Temp file unik + `create_new` mencegah dua proses menimpa temp bersama
+    /// dan mencegah jendela singkat `proxy_url`/URL token terbaca sebelum chmod.
+    pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("state");
+        let temp = parent.join(format!(".{name}.tmp-{}", uuid::Uuid::new_v4().simple()));
+
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
-        fs::rename(&tmp, &path)?;
+
+        let result = (|| {
+            let mut file = options.open(&temp)?;
+            use std::io::Write;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temp, path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        result
+    }
+
+    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let json = serde_json::to_string_pretty(self)?;
+        Self::write_private_atomic(&Self::config_file(), json.as_bytes())?;
         Ok(())
     }
 }
@@ -595,6 +612,33 @@ mod tests {
         assert!(c.timeout > 0);
         assert!(c.verify_tls); // default aman
         assert!(c.auto_resume); // K5: default lanjutkan restore otomatis
+    }
+
+    #[test]
+    fn private_atomic_write_replaces_file_without_fixed_temp() {
+        let dir = std::env::temp_dir().join(format!(
+            "fast-dm-private-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let path = dir.join("state.json");
+
+        Config::write_private_atomic(&path, br#"{"version":1}"#).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"version":1}"#);
+        Config::write_private_atomic(&path, br#"{"version":2}"#).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"version":2}"#);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        assert!(
+            fs::read_dir(&dir)
+                .unwrap()
+                .all(|entry| entry.unwrap().file_name() != ".state.json.tmp")
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ── v2.3.0: path privat (K1/K3) ──

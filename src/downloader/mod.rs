@@ -1355,19 +1355,8 @@ fn write_session_snapshot(mut all: Vec<DownloadInfo>) -> Result<(), String> {
         downloads: all,
     };
     let json = serde_json::to_string(&wrapped).map_err(|e| e.to_string())?;
-    let path = session_file();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    crate::config::Config::write_private_atomic(&session_file(), json.as_bytes())
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
