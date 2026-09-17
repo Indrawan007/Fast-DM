@@ -2,7 +2,6 @@ use crate::config::Config;
 use glob::glob;
 use serde_json::json;
 use std::fs;
-use std::os::unix::fs::PermissionsExt; // from_mode()
 use std::path::{Path, PathBuf};
 
 const HOST_NAME: &str = "com.fastdm.native";
@@ -333,6 +332,12 @@ pub fn register_extension_id(ext_id: &str) -> Result<usize, Box<dyn std::error::
     Ok(updated)
 }
 
+/// Quote satu path untuk posisi command pada shell POSIX.
+/// Single-quote menutup ekspansi `$`, backtick, spasi, dan metakarakter lain.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 pub fn resolve_native_path() -> String {
     // Prioritas: /opt/fast-dm/fast-dm-native (dari .deb install)
     if Path::new(NATIVE_PATH).exists() {
@@ -342,28 +347,27 @@ pub fn resolve_native_path() -> String {
     // Fallback: cari di lokasi executable saat ini
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            // Cek native-host wrapper di folder yang sama
-            let candidate = parent.join("fast-dm-native");
-            if candidate.exists() {
-                return candidate.to_string_lossy().to_string();
-            }
             // B16: Development (cargo run/build) — exe ada di target/<profile>/.
-            // Buat wrapper kecil di situ (manifest NMH tidak bisa membawa
-            // argumen --native), sehingga native messaging bisa diuji tanpa
-            // install .deb.
+            // Buat/refresh wrapper kecil di situ (manifest NMH tidak bisa
+            // membawa argumen --native), sehingga native messaging bisa diuji
+            // tanpa install .deb. Wrapper yang sudah ada juga di-refresh agar
+            // format quoting dan permission lama tidak dipertahankan.
             let in_target = parent
                 .file_name()
                 .is_some_and(|p| p == "debug" || p == "release")
                 && parent
                     .parent()
                     .is_some_and(|p| p.file_name() == Some(std::ffi::OsStr::new("target")));
+            let candidate = parent.join("fast-dm-native");
+            if !in_target && candidate.exists() {
+                return candidate.to_string_lossy().to_string();
+            }
             if in_target {
-                let _ = fs::write(
-                    &candidate,
-                    format!("#!/bin/sh\nexec \"{}\" --native \"$@\"\n", exe.display()),
+                let script = format!(
+                    "#!/bin/sh\nexec {} --native \"$@\"\n",
+                    shell_quote(&exe.to_string_lossy())
                 );
-                let _ = fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755));
-                if candidate.exists() {
+                if Config::write_atomic_with_mode(&candidate, script.as_bytes(), 0o755).is_ok() {
                     return candidate.to_string_lossy().to_string();
                 }
             }
@@ -458,6 +462,13 @@ mod tests {
 
     fn ids(n: usize, prefix: &str) -> Vec<String> {
         (0..n).map(|i| format!("{prefix}{i}")).collect()
+    }
+
+    #[test]
+    fn shell_quote_blocks_shell_expansion_and_handles_apostrophe() {
+        assert_eq!(shell_quote("/tmp/Fast DM/bin"), "'/tmp/Fast DM/bin'");
+        assert_eq!(shell_quote("/tmp/a'b"), "'/tmp/a'\"'\"'b'");
+        assert_eq!(shell_quote("/tmp/$(touch hacked)"), "'/tmp/$(touch hacked)'");
     }
 
     // ── v2.9.4 (C2): is_valid_extension_id ──
