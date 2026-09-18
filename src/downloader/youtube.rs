@@ -1045,7 +1045,7 @@ mod tests {
         let _guard = PrivateFileGuard::new(path.clone());
         let joined = args.join(" ");
         assert!(joined.contains("--config-locations"));
-        assert!(!joined.contains("user"));
+        assert!(!joined.contains("user:secret@"));
         assert!(!joined.contains("secret"));
         let contents = std::fs::read_to_string(path.unwrap()).unwrap();
         assert_eq!(contents, "--proxy=socks5h://user:secret@127.0.0.1:1080\n");

@@ -2331,7 +2331,7 @@ mod tests {
 
     #[test]
     fn prune_completed_history_keeps_recent_and_active_items() {
-        let now = 10_000_000_i64;
+        let now = 10_000_000_000_i64;
         let old = now - COMPLETED_RETENTION_MILLIS - 1;
         let recent = now - COMPLETED_RETENTION_MILLIS + 1;
         let mut old_completed = DownloadInfo::new(

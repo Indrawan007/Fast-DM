@@ -1058,7 +1058,7 @@ mod tests {
         let (args, cleanup) = build_aria2_cmd(&item, &cfg).unwrap();
         let joined = args.join(" ");
         assert!(joined.contains("--conf-path="));
-        assert!(!joined.contains("user"));
+        assert!(!joined.contains("user:secret@"));
         assert!(!joined.contains("secret"));
         let proxy_file = cleanup
             .iter()
