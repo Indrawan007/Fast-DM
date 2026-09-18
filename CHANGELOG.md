@@ -3,6 +3,30 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.2.1] - 2026-09-18
+
+### Fixed
+
+- Badge extension memakai `chrome.alarms` sebagai fallback saat Service Worker
+  disuspend; timer lama tidak lagi menghapus badge hasil yang lebih baru.
+- Context menu video dengan URL `blob:`/MediaSource sekarang meminta kandidat
+  media dari sniffer sebelum mengirim unduhan.
+- Downloader memiliki retry supervisor terbatas dengan exponential backoff;
+  retry dapat dibatalkan dan tidak menahan slot antrean lain.
+- Kegagalan pembuatan HTTP client resolver di-cache berdasarkan konfigurasi TLS
+  dan proxy, sehingga builder yang gagal tidak diulang pada setiap unduhan.
+- `config.json` dan `session.json` memiliki envelope/version validation dengan
+  kompatibilitas format legacy; riwayat `Completed` yang lebih tua dari 30 hari
+  dibersihkan saat flush session.
+- Wrapper yt-dlp yang tidak digunakan dihapus dan regression test proxy dibuat
+  tidak bergantung pada substring path seperti `/run/user/` atau `--user-agent`.
+
+### Tests
+
+- Regression suite mencakup retry/backoff, session pruning, schema version,
+  extension alarms, context-menu sniffer fallback, dan proxy credential
+  redaction.
+
 ## [3.2.0] - 2026-09-16
 
 ### Added
