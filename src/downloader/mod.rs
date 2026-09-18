@@ -1298,6 +1298,10 @@ fn cleanup_orphan_aria2_inputs() {
 static RE_INVALID_CHARS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"[<>:"/\\|?*\x00-\x1f]"#).unwrap());
 
+const SESSION_VERSION: u32 = 1;
+const COMPLETED_RETENTION_MILLIS: i64 = 30 * 24 * 60 * 60 * 1_000;
+const MAX_SESSION_ITEMS: usize = 200;
+
 fn session_file() -> std::path::PathBuf {
     Config::config_dir().join("session.json")
 }
@@ -1317,6 +1321,10 @@ fn parse_session(content: &str) -> Option<Vec<DownloadInfo>> {
         return Some(Vec::new());
     }
     if let Ok(sf) = serde_json::from_str::<SessionFile>(content) {
+        if sf.version != SESSION_VERSION {
+            tracing::warn!("Versi session.json tidak didukung: {}", sf.version);
+            return None;
+        }
         return Some(sf.downloads);
     }
     if let Ok(v) = serde_json::from_str::<Vec<DownloadInfo>>(content) {
@@ -1404,12 +1412,27 @@ pub(crate) fn redact_for_persist(d: &mut DownloadInfo) {
     }
 }
 
+/// Buang riwayat Completed yang sudah lama, tetapi pertahankan item aktif,
+/// error, dan item legacy yang tidak memiliki timestamp valid.
+fn prune_completed_history(all: &mut Vec<DownloadInfo>, now_millis: i64) -> usize {
+    let cutoff = now_millis.saturating_sub(COMPLETED_RETENTION_MILLIS);
+    let before = all.len();
+    all.retain(|d| {
+        !(d.status == DownloadStatus::Completed && d.created > 0 && d.created < cutoff)
+    });
+    before - all.len()
+}
+
 /// Tulis satu snapshot session secara atomik, dibatasi 200 entri terbaru.
 fn write_session_snapshot(mut all: Vec<DownloadInfo>) -> Result<(), String> {
+    let removed = prune_completed_history(&mut all, chrono::Utc::now().timestamp_millis());
+    if removed > 0 {
+        tracing::info!("{} riwayat Completed lama dibuang dari session", removed);
+    }
     // urut (created_ms, id) — konsisten dengan promote_next (L4)
     all.sort_by_key(|d| (d.created, d.id.clone()));
-    if all.len() > 200 {
-        all = all.split_off(all.len() - 200);
+    if all.len() > MAX_SESSION_ITEMS {
+        all = all.split_off(all.len() - MAX_SESSION_ITEMS);
     }
     // B1: kredensial tidak pernah menyentuh disk lewat jalur ini.
     for d in &mut all {
@@ -1417,7 +1440,7 @@ fn write_session_snapshot(mut all: Vec<DownloadInfo>) -> Result<(), String> {
     }
 
     let wrapped = SessionFile {
-        version: 1,
+        version: SESSION_VERSION,
         downloads: all,
     };
     let json = serde_json::to_string(&wrapped).map_err(|e| e.to_string())?;
@@ -2297,6 +2320,42 @@ mod tests {
         assert!(
             parse_session("{bukan json").is_none(),
             "korup → None (caller bikin backup)"
+        );
+    }
+
+    #[test]
+    fn parse_session_rejects_unknown_version() {
+        let json = r#"{"version":99,"downloads":[]}"#;
+        assert!(parse_session(json).is_none());
+    }
+
+    #[test]
+    fn prune_completed_history_keeps_recent_and_active_items() {
+        let now = 10_000_000_i64;
+        let old = now - COMPLETED_RETENTION_MILLIS - 1;
+        let recent = now - COMPLETED_RETENTION_MILLIS + 1;
+        let mut old_completed = DownloadInfo::new(
+            "old".into(),
+            "https://example.test/old.zip".into(),
+            "old.zip".into(),
+            "/tmp".into(),
+            Default::default(),
+            None,
+        );
+        old_completed.status = DownloadStatus::Completed;
+        old_completed.created = old;
+        let mut recent_completed = old_completed.clone();
+        recent_completed.id = "recent".into();
+        recent_completed.created = recent;
+        let mut active = old_completed.clone();
+        active.id = "active".into();
+        active.status = DownloadStatus::Downloading;
+        let mut all = vec![old_completed, recent_completed, active];
+
+        assert_eq!(prune_completed_history(&mut all, now), 1);
+        assert_eq!(
+            all.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            vec!["recent", "active"]
         );
     }
 

@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 pub const COOKIE_FILE_HEADER: &str = "# Fast-DM-Cookie-Format: 2";
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
+const CONFIG_FILE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -54,6 +55,26 @@ pub struct Config {
     /// user menggeser toggle di Pengaturan (bukan tiap save).
     #[serde(default)]
     pub autostart: bool,
+}
+
+/// Envelope konfigurasi v1. Config lama yang langsung berisi field settings
+/// tetap diterima agar upgrade tidak menghapus pengaturan user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConfigFile {
+    version: u32,
+    settings: Config,
+}
+
+fn parse_config(content: &str) -> Result<Config, String> {
+    let value: serde_json::Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
+    if value.get("version").is_some() || value.get("settings").is_some() {
+        let file: ConfigFile = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        if file.version != CONFIG_FILE_VERSION {
+            return Err(format!("versi config tidak didukung: {}", file.version));
+        }
+        return Ok(file.settings);
+    }
+    serde_json::from_value(value).map_err(|e| e.to_string())
 }
 
 fn default_rpc_port() -> u16 {
@@ -407,7 +428,7 @@ impl Config {
             let path = Self::config_file();
             if path.exists() {
                 match fs::read_to_string(&path) {
-                    Ok(content) => match serde_json::from_str(&content) {
+                    Ok(content) => match parse_config(&content) {
                         Ok(cfg) => cfg,
                         Err(e) => {
                             // Jangan diam-diam reset config user — log dan lanjut default
@@ -469,7 +490,11 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let json = serde_json::to_string_pretty(self)?;
+        let file = ConfigFile {
+            version: CONFIG_FILE_VERSION,
+            settings: self.clone(),
+        };
+        let json = serde_json::to_string_pretty(&file)?;
         Self::write_private_atomic(&Self::config_file(), json.as_bytes())?;
         Ok(())
     }
@@ -722,6 +747,27 @@ mod tests {
         assert_eq!(restored.download_dir, original.download_dir);
         assert_eq!(restored.max_connections, original.max_connections);
         assert_eq!(restored.verify_tls, original.verify_tls);
+    }
+
+    #[test]
+    fn config_file_parser_accepts_versioned_and_legacy_shapes() {
+        let original = Config::default();
+        let wrapped = serde_json::to_string(&ConfigFile {
+            version: CONFIG_FILE_VERSION,
+            settings: original.clone(),
+        })
+        .unwrap();
+        assert_eq!(parse_config(&wrapped).unwrap().rpc_port, original.rpc_port);
+
+        let legacy = serde_json::to_string(&original).unwrap();
+        assert_eq!(parse_config(&legacy).unwrap().rpc_port, original.rpc_port);
+    }
+
+    #[test]
+    fn config_file_parser_rejects_unknown_version() {
+        let json = r#"{"version":99,"settings":{}}"#;
+        let error = parse_config(json).unwrap_err();
+        assert!(error.contains("versi config tidak didukung"));
     }
 
     #[test]
