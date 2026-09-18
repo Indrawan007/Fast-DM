@@ -48,12 +48,19 @@ jobs:
 
         run: cargo fmt --all -- --check
 
-      - name: Clippy (advisory dulu — see note)
-        # v2.8.1 (CI clippy): advisory agar CI tidak merah sebelum codebase
-        # bersih. Kalau `cargo clippy --all-targets -- -D warnings` sudah
-        # hijau di mesin dev, HAPUS baris `continue-on-error` ini untuk
-        # menjadikannya gate blocking.
-        continue-on-error: true
+      - name: Audit Rust dependencies
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Run cargo audit
+        run: cargo audit
+
+      - name: Check dependency policy
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Run cargo deny
+        run: cargo deny check advisories bans licenses sources
+
+      - name: Clippy (blocking)
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Run all tests (unit + integration)
@@ -94,6 +101,9 @@ jobs:
 
       - name: Test browser extension
         run: node --test tests/extension.test.cjs
+
+      - name: Lint Chromium extension
+        run: node tests/extension_lint.cjs
 
       - name: Zip extension
         run: |

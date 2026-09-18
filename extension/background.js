@@ -498,13 +498,15 @@ async function sendDownload(
     message.quality = quality;
   }
 
-  // Ambil cookies situs via API bila tidak dikirim eksplisit
-  // (download login-protected — dipakai yt-dlp & aria2 --load-cookies)
+  // Ambil cookies situs via API bila tidak dikirim eksplisit.
+  // Kirim metadata cookie utuh, bukan hanya string "name=value": downloader
+  // perlu mempertahankan host-only/domain, path, Secure, dan expiry agar
+  // cookie HTTPS tidak pernah turun ke HTTP atau sibling subdomain.
   if (!cookies) {
     try {
       const jar = await chrome.cookies.getAll({ url });
-      if (jar && jar.length > 0) {
-        cookies = jar.map((c) => c.name + "=" + c.value).join("; ");
+      if (Array.isArray(jar)) {
+        cookies = jar;
         domain = new URL(url).hostname;
       }
     } catch (e) {
@@ -512,8 +514,12 @@ async function sendDownload(
     }
   }
 
-  // Cookies halaman (untuk yt-dlp — video membersih+/login)
-  if (cookies && domain) {
+  // Cookies halaman (untuk yt-dlp/aria2 — download login-protected).
+  // `domain` dipertahankan untuk kompatibilitas message lama, tetapi Rust
+  // memvalidasi ulang terhadap URL request dan metadata setiap cookie.
+  if (Array.isArray(cookies) && domain) {
+    // Kirim array kosong juga: native host perlu menghapus jar lama agar
+    // kredensial dari unduhan sebelumnya tidak dipakai ulang diam-diam.
     message.cookies = cookies;
     message.domain = domain;
   }
@@ -549,19 +555,56 @@ async function sendDownload(
 // B4f: timer badge dilacak. Tanpa ini, urutan "…" → "⬇" (atau dua unduhan
 // berdekatan) membuat timeout milik badge LAMA menghapus badge yang baru
 // dipasang sebelum 3 detik habis.
+//
+// L6: setTimeout saja tidak cukup untuk MV3 — service worker boleh disuspend
+// sebelum callback berjalan. Timer lokal tetap dipakai agar badge hilang tepat
+// waktu saat worker aktif, sedangkan chrome.alarms menjadi fallback persisten
+// yang membangunkan worker setelah suspend.
+const BADGE_CLEAR_ALARM = "fastdm-badge-clear";
 let badgeTimer = null;
+let badgeGeneration = 0;
+
+function clearBadgeAlarm() {
+  if (chrome.alarms?.clear) chrome.alarms.clear(BADGE_CLEAR_ALARM);
+}
 
 function showBadge(text, color, holdMs = 3000) {
+  const generation = ++badgeGeneration;
   if (badgeTimer) clearTimeout(badgeTimer);
   chrome.action.setBadgeText({ text });
   chrome.action.setBadgeBackgroundColor({ color });
-  badgeTimer =
-    holdMs > 0
-      ? setTimeout(() => {
-          badgeTimer = null;
-          chrome.action.setBadgeText({ text: "" });
-        }, holdMs)
-      : null;
+
+  if (holdMs <= 0) {
+    badgeTimer = null;
+    clearBadgeAlarm();
+    return;
+  }
+
+  // create() dengan nama yang sama mengganti alarm sebelumnya. Jangan
+  // mengandalkan clear() lalu create() berurutan karena keduanya async.
+  if (chrome.alarms?.create) {
+    chrome.alarms.create(BADGE_CLEAR_ALARM, {
+      when: Date.now() + holdMs,
+    });
+  }
+  badgeTimer = setTimeout(() => {
+    if (generation !== badgeGeneration) return;
+    badgeTimer = null;
+    chrome.action.setBadgeText({ text: "" });
+    clearBadgeAlarm();
+  }, holdMs);
+}
+
+if (chrome.alarms?.onAlarm) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name !== BADGE_CLEAR_ALARM) return;
+    // Alarm dapat membangunkan worker baru; pada worker lama invalidasi timer
+    // lokal agar callback yang terlambat tidak menghapus badge berikutnya.
+    badgeGeneration += 1;
+    if (badgeTimer) clearTimeout(badgeTimer);
+    badgeTimer = null;
+    chrome.action.setBadgeText({ text: "" });
+  });
 }
 
 // ═══════════════════════════════════════════════
@@ -768,7 +811,39 @@ function shouldInterceptUrl(url, fileSize, mimeType) {
 // Context Menu
 // ═══════════════════════════════════════════════
 
-chrome.contextMenus.onClicked.addListener((info, tab) => {
+function sniffedCandidatesForTab(tabId) {
+  if (!tabId || !chrome.tabs?.sendMessage) return Promise.resolve([]);
+  return new Promise((resolve) => {
+    try {
+      chrome.tabs.sendMessage(
+        tabId,
+        { action: "getSniffedCandidates" },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            resolve([]);
+            return;
+          }
+          const urls =
+            response && Array.isArray(response.urls) ? response.urls : [];
+          resolve(
+            urls.filter(
+              (candidate) =>
+                typeof candidate === "string" &&
+                candidate.length > 0 &&
+                !candidate.startsWith("blob:") &&
+                !candidate.startsWith("mediastream:"),
+            ),
+          );
+        },
+      );
+    } catch (e) {
+      // Restricted pages may not have a content script; retain normal fallback.
+      resolve([]);
+    }
+  });
+}
+
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   let url = null;
   let filename = null;
 
@@ -782,6 +857,22 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     case "fastdm-download-image":
       url = info.srcUrl;
       break;
+  }
+
+  // A video element backed by MSE normally exposes only blob: in the context
+  // menu. Ask the content script for URLs captured by the MAIN-world sniffer
+  // instead of sending an unusable blob URL to aria2/yt-dlp.
+  if (
+    videoMenu &&
+    (!url || url.startsWith("blob:") || url.startsWith("mediastream:"))
+  ) {
+    const candidates = await sniffedCandidatesForTab(tab?.id);
+    url = candidates.at(-1) || null;
+    if (!url) {
+      console.warn("[FastDM] No downloadable media candidate for context menu");
+      showBadge("!", "#f38ba8");
+      return;
+    }
   }
 
   if (!url) return;
@@ -811,7 +902,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     /* ignore */
   }
 
-  sendDownload(url, filename, headers);
+  await sendDownload(url, filename, headers);
 });
 
 // ═══════════════════════════════════════════════

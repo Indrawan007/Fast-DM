@@ -2,7 +2,6 @@ use crate::config::Config;
 use glob::glob;
 use serde_json::json;
 use std::fs;
-use std::os::unix::fs::PermissionsExt; // from_mode()
 use std::path::{Path, PathBuf};
 
 const HOST_NAME: &str = "com.fastdm.native";
@@ -82,14 +81,13 @@ fn load_registered_ids() -> Vec<String> {
     valid
 }
 
-fn save_registered_ids(ids: &[String]) {
+fn save_registered_ids(ids: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let path = Config::config_dir().join(REGISTRY_FILE);
-    if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir);
-    }
-    if let Ok(json) = serde_json::to_string(ids) {
-        let _ = fs::write(&path, json);
-    }
+    let json = serde_json::to_vec(ids)?;
+    // Registry berisi state akses extension; tulis atomik dan privat agar
+    // crash/dua proses register tidak meninggalkan JSON setengah jadi.
+    Config::write_private_atomic(&path, &json)?;
+    Ok(())
 }
 
 /// Semua origin yang boleh memanggil native host: ID packed + ID yang pernah
@@ -113,20 +111,27 @@ fn browser_profile_exists(nmh_dir: &Path) -> bool {
     nmh_dir.parent().is_some_and(|p| p.is_dir())
 }
 
+/// Tulis manifest sementara dengan mode browser-readable lalu rename atomik.
+fn write_manifest_atomic(path: &Path, json_str: &str) -> std::io::Result<()> {
+    // Manifest bukan credential, jadi 0644 tetap kompatibel dengan browser;
+    // atomic rename mencegah browser membaca JSON parsial saat register/startup.
+    Config::write_atomic_with_mode(path, json_str.as_bytes(), 0o644)
+}
+
 /// Tulis manifest ke semua lokasi browser, kembalikan jumlah yang ditulis.
-fn write_manifests(json_str: &str) -> usize {
+fn write_manifests(json_str: &str) -> Result<usize, Box<dyn std::error::Error>> {
     let mut written = 0;
     for dir in get_all_nmh_dirs() {
         if !browser_profile_exists(&dir) {
             continue;
         }
         let manifest = dir.join(format!("{}.json", HOST_NAME));
-        if fs::create_dir_all(dir).is_ok() && fs::write(&manifest, json_str).is_ok() {
-            written += 1;
-            tracing::debug!("Manifest: {}", manifest.display());
-        }
+        fs::create_dir_all(&dir)?;
+        write_manifest_atomic(&manifest, json_str)?;
+        written += 1;
+        tracing::debug!("Manifest: {}", manifest.display());
     }
-    written
+    Ok(written)
 }
 
 pub fn check_and_setup() -> Result<usize, Box<dyn std::error::Error>> {
@@ -143,6 +148,7 @@ pub fn check_and_setup() -> Result<usize, Box<dyn std::error::Error>> {
     let json_str = serde_json::to_string_pretty(&host_json)?;
     let dirs = get_all_nmh_dirs();
     let mut created = 0;
+    let mut first_write_error: Option<std::io::Error> = None;
 
     tracing::debug!("Checking {} browser locations", dirs.len());
 
@@ -166,15 +172,26 @@ pub fn check_and_setup() -> Result<usize, Box<dyn std::error::Error>> {
             true
         };
 
-        if need_update && fs::create_dir_all(dir).is_ok() && fs::write(&manifest, &json_str).is_ok()
-        {
-            created += 1;
-            tracing::debug!("Setup: {}", manifest.display());
+        if need_update {
+            let write =
+                fs::create_dir_all(dir).and_then(|_| write_manifest_atomic(&manifest, &json_str));
+            if let Err(e) = write {
+                tracing::warn!("Setup: gagal menulis manifest {}: {e}", manifest.display());
+                if first_write_error.is_none() {
+                    first_write_error = Some(e);
+                }
+            } else {
+                created += 1;
+                tracing::debug!("Setup: {}", manifest.display());
+            }
         }
     }
 
     if created > 0 {
         tracing::info!("Setup: {} browser manifest(s) created/updated", created);
+    }
+    if let Some(e) = first_write_error {
+        return Err(e.into());
     }
 
     Ok(created)
@@ -285,7 +302,7 @@ pub fn register_extension_id(ext_id: &str) -> Result<usize, Box<dyn std::error::
     // jarang (background.js men-dedup lewat storage), jadi biayanya sepele.
     let mut registered = load_registered_ids();
     let newly_added = push_registered_id(&mut registered, ext_id);
-    save_registered_ids(&registered);
+    save_registered_ids(&registered)?;
 
     // C2: umumkan origin baru. Dilakukan tepat setelah registry ditulis — bukan
     // setelah manifest — karena registry itulah sumber `allowed_origins` dan
@@ -305,7 +322,7 @@ pub fn register_extension_id(ext_id: &str) -> Result<usize, Box<dyn std::error::
     });
 
     let json_str = serde_json::to_string_pretty(&host_json)?;
-    let updated = write_manifests(&json_str);
+    let updated = write_manifests(&json_str)?;
 
     tracing::info!(
         "Extension ID registered: {} ({} manifests)",
@@ -313,6 +330,12 @@ pub fn register_extension_id(ext_id: &str) -> Result<usize, Box<dyn std::error::
         updated
     );
     Ok(updated)
+}
+
+/// Quote satu path untuk posisi command pada shell POSIX.
+/// Single-quote menutup ekspansi `$`, backtick, spasi, dan metakarakter lain.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 pub fn resolve_native_path() -> String {
@@ -324,28 +347,27 @@ pub fn resolve_native_path() -> String {
     // Fallback: cari di lokasi executable saat ini
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            // Cek native-host wrapper di folder yang sama
-            let candidate = parent.join("fast-dm-native");
-            if candidate.exists() {
-                return candidate.to_string_lossy().to_string();
-            }
             // B16: Development (cargo run/build) — exe ada di target/<profile>/.
-            // Buat wrapper kecil di situ (manifest NMH tidak bisa membawa
-            // argumen --native), sehingga native messaging bisa diuji tanpa
-            // install .deb.
+            // Buat/refresh wrapper kecil di situ (manifest NMH tidak bisa
+            // membawa argumen --native), sehingga native messaging bisa diuji
+            // tanpa install .deb. Wrapper yang sudah ada juga di-refresh agar
+            // format quoting dan permission lama tidak dipertahankan.
             let in_target = parent
                 .file_name()
                 .is_some_and(|p| p == "debug" || p == "release")
                 && parent
                     .parent()
                     .is_some_and(|p| p.file_name() == Some(std::ffi::OsStr::new("target")));
+            let candidate = parent.join("fast-dm-native");
+            if !in_target && candidate.exists() {
+                return candidate.to_string_lossy().to_string();
+            }
             if in_target {
-                let _ = fs::write(
-                    &candidate,
-                    format!("#!/bin/sh\nexec \"{}\" --native \"$@\"\n", exe.display()),
+                let script = format!(
+                    "#!/bin/sh\nexec {} --native \"$@\"\n",
+                    shell_quote(&exe.to_string_lossy())
                 );
-                let _ = fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755));
-                if candidate.exists() {
+                if Config::write_atomic_with_mode(&candidate, script.as_bytes(), 0o755).is_ok() {
                     return candidate.to_string_lossy().to_string();
                 }
             }
@@ -440,6 +462,16 @@ mod tests {
 
     fn ids(n: usize, prefix: &str) -> Vec<String> {
         (0..n).map(|i| format!("{prefix}{i}")).collect()
+    }
+
+    #[test]
+    fn shell_quote_blocks_shell_expansion_and_handles_apostrophe() {
+        assert_eq!(shell_quote("/tmp/Fast DM/bin"), "'/tmp/Fast DM/bin'");
+        assert_eq!(shell_quote("/tmp/a'b"), "'/tmp/a'\"'\"'b'");
+        assert_eq!(
+            shell_quote("/tmp/$(touch hacked)"),
+            "'/tmp/$(touch hacked)'"
+        );
     }
 
     // ── v2.9.4 (C2): is_valid_extension_id ──

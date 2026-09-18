@@ -47,6 +47,9 @@ jobs:
       - name: Test browser extension
         run: node --test tests/extension.test.cjs
 
+      - name: Lint Chromium extension
+        run: node tests/extension_lint.cjs
+
       - name: Build extension zip
         run: |
           VERSION="${GITHUB_REF_NAME#v}"

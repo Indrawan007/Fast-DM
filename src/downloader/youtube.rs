@@ -2,6 +2,7 @@ use super::aria2::conn_per_server;
 use super::types::*;
 use crate::config::Config;
 use regex::Regex;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
@@ -341,16 +342,60 @@ struct YtFormatJson {
     format_note: Option<String>,
 }
 
+/// URL diberikan melalui stdin batch-file agar tidak muncul di argv.
+pub(crate) const YTDLP_BATCH_FILE_STDIN: &str = "--batch-file=-";
+
 /// Setelan jaringan identik untuk metadata, YouTube, dan resolver universal.
+/// Kredensial proxy dimuat lewat file config privat; hanya opsi TLS yang aman
+/// untuk tetap dikirim langsung sebagai argv.
 pub(crate) fn network_args(config: &Config) -> Vec<String> {
-    let mut args = Vec::new();
-    if !config.proxy_url.trim().is_empty() {
-        args.extend(["--proxy".into(), config.proxy_url.trim().to_string()]);
+    if config.verify_tls {
+        Vec::new()
+    } else {
+        vec!["--no-check-certificates".into()]
     }
-    if !config.verify_tls {
-        args.push("--no-check-certificates".into());
+}
+
+fn ytdlp_proxy_config_contents(proxy: &str) -> String {
+    format!("--proxy={proxy}\n")
+}
+
+/// Siapkan config yt-dlp privat. Path boleh masuk argv, tetapi URL proxy
+/// berkredensial tidak boleh masuk `/proc/<pid>/cmdline`.
+pub(crate) fn ytdlp_proxy_args(config: &Config) -> Result<(Vec<String>, Option<PathBuf>), String> {
+    let proxy = config.proxy_url.trim();
+    if proxy.is_empty() {
+        return Ok((Vec::new(), None));
     }
-    args
+
+    let path =
+        Config::aria2_input_dir().join(format!("ytdlp-{}.conf", uuid::Uuid::new_v4().simple()));
+    Config::write_private_atomic(&path, ytdlp_proxy_config_contents(proxy).as_bytes())
+        .map_err(|_| "Gagal menyiapkan konfigurasi proxy yt-dlp".to_string())?;
+    Ok((
+        vec![
+            "--config-locations".into(),
+            path.to_string_lossy().into_owned(),
+        ],
+        Some(path),
+    ))
+}
+
+/// Hapus config privat di semua jalur return, termasuk timeout/spawn gagal.
+pub(crate) struct PrivateFileGuard(Option<PathBuf>);
+
+impl PrivateFileGuard {
+    pub(crate) fn new(path: Option<PathBuf>) -> Self {
+        Self(path)
+    }
+}
+
+impl Drop for PrivateFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// Ambil daftar format NYATA untuk sebuah URL via `yt-dlp -J` (simulated
@@ -368,9 +413,17 @@ pub async fn fetch_formats(url: &str, config: &Config) -> Vec<FormatOption> {
         "--socket-timeout".into(),
         "10".into(),
     ];
+    let (proxy_args, proxy_file) = match ytdlp_proxy_args(config) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let _proxy_file = PrivateFileGuard::new(proxy_file);
     cmd.extend(cookie_args(url));
+    cmd.extend(proxy_args);
     cmd.extend(network_args(config));
-    cmd.push(url.to_string());
+    // Jangan taruh signed URL di argv (`/proc/<pid>/cmdline`). yt-dlp membaca
+    // satu URL dari stdin lewat batch-file=-.
+    cmd.push(YTDLP_BATCH_FILE_STDIN.into());
 
     // v2.10.0 (C3): `process_group(0)` seperti SEMUA child lain di crate ini
     // (AGENTS.md §3) — `yt-dlp -J` memang jarang men-spawn anak, tapi saat
@@ -380,14 +433,25 @@ pub async fn fetch_formats(url: &str, config: &Config) -> Vec<FormatOption> {
     let mut spawn = tokio::process::Command::new(&cmd[0]);
     spawn
         .args(&cmd[1..])
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     #[cfg(unix)]
     spawn.process_group(0);
-    let Ok(child) = spawn.spawn() else {
+    let Ok(mut child) = spawn.spawn() else {
         return Vec::new();
     };
+    {
+        use tokio::io::AsyncWriteExt;
+        let Some(mut stdin) = child.stdin.take() else {
+            return Vec::new();
+        };
+        if stdin.write_all(url.as_bytes()).await.is_err() || stdin.write_all(b"\n").await.is_err() {
+            return Vec::new();
+        }
+        // Drop stdin so yt-dlp sees EOF after the single URL.
+    }
     // Cap 20 dtk: ekstraksi situs tertentu bisa sangat lambat — lebih baik
     // pakai daftar statis daripada user menunggu tanpa kepastian.
     let Ok(out) =
@@ -495,6 +559,21 @@ pub async fn download(
         )
     };
 
+    let (proxy_args, proxy_file) = match ytdlp_proxy_args(config) {
+        Ok(value) => value,
+        Err(msg) => {
+            let mut i = info.lock().await;
+            if !i.stop_requested() {
+                i.status = DownloadStatus::Error;
+                i.error_msg = msg;
+                i.speed = 0;
+                let _ = tx.send(DownloadEvent::Error(i.clone()));
+            }
+            return;
+        }
+    };
+    let _proxy_file = PrivateFileGuard::new(proxy_file);
+
     let mut cmd = vec!["yt-dlp".to_string()];
     cmd.extend(quality_args(quality.as_deref()));
     // v2.10.5 (perf): fragmen HLS/DASH (m3u8/mpd) diunduh PARALEL — default
@@ -548,6 +627,8 @@ pub async fn download(
     }
 
     // v2.4.0 (D3): proxy dari Pengaturan — yt-dlp & ffmpeg turunannya ikut.
+    // URL proxy berada di config privat; argv hanya membawa path-nya.
+    cmd.extend(proxy_args);
     cmd.extend(network_args(config));
 
     // Header kustom dari browser extension (mis. Referer)
@@ -560,21 +641,23 @@ pub async fn download(
         }
     }
 
-    cmd.push(url);
+    // Jangan taruh signed URL di argv (`/proc/<pid>/cmdline`). yt-dlp membaca
+    // satu URL dari stdin lewat batch-file=-.
+    cmd.push(YTDLP_BATCH_FILE_STDIN.into());
 
     // v2.3.1 (M1): async penuh — run_ytdlp kini memakai tokio::process
-    run_ytdlp(cmd, info.clone(), tx.clone()).await;
+    run_ytdlp_with_stdin(cmd, info.clone(), tx.clone(), Some(url)).await;
 }
 
-/// v2.3.1 (M1): async penuh via tokio::process — lihat komentar
-/// `aria2::run_aria2c` untuk alasan lengkap (ticker cek status, wait paus
-/// terbatas + eskalasi SIGKILL, kill_on_drop, ChildLines anti-kehilangan-byte).
-/// `false` = tidak selesai normal (cancel/pause/error) — dipakai universal.rs
-/// untuk memutuskan fallback aria2.
-pub(crate) async fn run_ytdlp(
+/// Jalankan yt-dlp dengan URL melalui stdin, bukan argv. URL signed sering
+/// memuat kredensial sementara dan `/proc/<pid>/cmdline` dapat dibaca proses
+/// lain dengan UID yang sama. `--batch-file=-` membuat yt-dlp membaca satu
+/// URL dari stdin lalu EOF menutup batch file.
+pub(crate) async fn run_ytdlp_with_stdin(
     cmd: Vec<String>,
     info: Arc<Mutex<DownloadInfo>>,
     tx: mpsc::UnboundedSender<DownloadEvent>,
+    stdin_url: Option<String>,
 ) -> bool {
     // process_group(0) → killpg menjangkau ffmpeg anak-anaknya saat pause/cancel (K4).
     // Spawn + publikasi PID satu lock: pause tidak bisa kehilangan child.
@@ -582,14 +665,19 @@ pub(crate) async fn run_ytdlp(
     if i.stop_requested() {
         return false;
     }
-    let mut child = match tokio::process::Command::new(&cmd[0])
+    let mut command = tokio::process::Command::new(&cmd[0]);
+    command
         .args(&cmd[1..])
         .process_group(0)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .kill_on_drop(true);
+    if stdin_url.is_some() {
+        command.stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::null());
+    }
+    let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
@@ -610,6 +698,15 @@ pub(crate) async fn run_ytdlp(
     let pid = child.id();
     i.pid = pid;
     drop(i);
+
+    if let Some(url) = stdin_url {
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(url.as_bytes()).await;
+            let _ = stdin.write_all(b"\n").await;
+            // Drop stdin so yt-dlp sees EOF after the single URL.
+        }
+    }
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -851,6 +948,41 @@ fn parse_speed(s: &str) -> u64 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn yt_dlp_url_input_uses_stdin_batch_file() {
+        assert_eq!(YTDLP_BATCH_FILE_STDIN, "--batch-file=-");
+        assert!(!YTDLP_BATCH_FILE_STDIN.contains("https://"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_ytdlp_sends_url_via_stdin() {
+        let item = DownloadInfo::new(
+            "stdin-url".into(),
+            "https://secret.example/token".into(),
+            "file.mp4".into(),
+            "unused".into(),
+            Default::default(),
+            None,
+        );
+        let info = Arc::new(Mutex::new(item));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let ok = run_ytdlp_with_stdin(
+            vec![
+                "sh".into(),
+                "-c".into(),
+                "IFS= read -r received && test -n \"$received\" && printf '[download] 100%%\\n'"
+                    .into(),
+            ],
+            info.clone(),
+            tx,
+            Some("https://secret.example/token".into()),
+        )
+        .await;
+        assert!(ok);
+        assert_eq!(info.lock().await.status, DownloadStatus::Completed);
+    }
+
     #[tokio::test]
     async fn stopped_download_does_not_spawn_or_become_error() {
         for status in [DownloadStatus::Paused, DownloadStatus::Cancelled] {
@@ -865,10 +997,11 @@ mod tests {
             item.status = status;
             let info = Arc::new(Mutex::new(item));
             let (tx, mut rx) = mpsc::unbounded_channel();
-            run_ytdlp(
+            run_ytdlp_with_stdin(
                 vec!["/nonexistent/fastdm-must-not-spawn".into()],
                 info.clone(),
                 tx,
+                None,
             )
             .await;
             assert_eq!(info.lock().await.status, status);
@@ -883,27 +1016,33 @@ mod tests {
     }
 
     #[test]
-    fn network_args_apply_proxy_and_explicit_tls_opt_out() {
+    fn network_args_apply_explicit_tls_opt_out() {
         let mut cfg = Config {
-            proxy_url: "  socks5h://127.0.0.1:1080  ".into(),
+            proxy_url: "  socks5h://user:secret@127.0.0.1:1080  ".into(),
             verify_tls: false,
             ..Config::default()
         };
-        assert_eq!(
-            network_args(&cfg),
-            vec![
-                "--proxy",
-                "socks5h://127.0.0.1:1080",
-                "--no-check-certificates"
-            ]
-        );
+        assert_eq!(network_args(&cfg), vec!["--no-check-certificates"]);
         cfg.verify_tls = true;
-        assert_eq!(
-            network_args(&cfg),
-            vec!["--proxy", "socks5h://127.0.0.1:1080"]
-        );
+        assert!(network_args(&cfg).is_empty());
         cfg.proxy_url = "   ".into();
         assert!(network_args(&cfg).is_empty());
+    }
+
+    #[test]
+    fn proxy_credentials_stay_in_private_config_file() {
+        let cfg = Config {
+            proxy_url: "  socks5h://user:secret@127.0.0.1:1080  ".into(),
+            ..Config::default()
+        };
+        let (args, path) = ytdlp_proxy_args(&cfg).unwrap();
+        let _guard = PrivateFileGuard::new(path.clone());
+        let joined = args.join(" ");
+        assert!(joined.contains("--config-locations"));
+        assert!(!joined.contains("user:secret@"));
+        assert!(!joined.contains("secret"));
+        let contents = std::fs::read_to_string(path.unwrap()).unwrap();
+        assert_eq!(contents, "--proxy=socks5h://user:secret@127.0.0.1:1080\n");
     }
 
     // ── v2.9.3: kesegaran cookie file (murni, tanpa filesystem) ──

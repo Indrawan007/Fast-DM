@@ -398,23 +398,29 @@ impl DownloadEngine {
         }
     }
 
-    pub async fn pause_download(&self, id: &str) {
+    /// Pause one download and report whether the requested transition was
+    /// accepted. IPC callers must not report success for an unknown or
+    /// terminal download ID.
+    pub async fn pause_download(&self, id: &str) -> bool {
         let downloads = self.downloads.read().await;
-        if let Some(info) = downloads.get(id) {
-            let mut i = info.lock().await;
-            if i.request_pause() {
-                kill_child_pid(i.pid);
-                let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
-                self.mark_dirty();
-            }
+        let Some(info) = downloads.get(id) else {
+            return false;
+        };
+        let mut i = info.lock().await;
+        if !i.request_pause() {
+            return false;
         }
+        kill_child_pid(i.pid);
+        let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
+        self.mark_dirty();
+        true
     }
 
-    pub async fn resume_download(&self, id: &str) {
-        // DEADLOCK FIX: guard read-lock harus di-drop SEBELUM start_download()
-        // — start_download meminta write-lock pada map yang sama, dan RwLock
-        // tokio tidak reentrant: read-guard lama tidak akan pernah di-drop
-        // selama kita menunggu write-lock → deadlock permanen.
+    /// DEADLOCK FIX: guard read-lock harus di-drop SEBELUM start_download()
+    /// — start_download meminta write-lock pada map yang sama, dan RwLock
+    /// tokio tidak reentrant: read-guard lama tidak akan pernah di-drop
+    /// selama kita menunggu write-lock → deadlock permanen.
+    pub async fn resume_download(&self, id: &str) -> bool {
         let resumable = {
             let downloads = self.downloads.read().await;
             if let Some(info) = downloads.get(id) {
@@ -423,12 +429,14 @@ impl DownloadEngine {
                 None
             }
         };
-        if matches!(
+        if !matches!(
             resumable,
             Some(DownloadStatus::Paused | DownloadStatus::Error)
         ) {
-            self.start_download(id).await;
+            return false;
         }
+        self.start_download(id).await;
+        true
     }
 
     /// Pause SEMUA unduhan (aktif + antrian) — dipakai tombol "Jeda Semua" (UI-UX C3).
@@ -467,7 +475,10 @@ impl DownloadEngine {
         }
     }
 
-    pub async fn cancel_download(&self, id: &str) {
+    /// Cancel one download and report whether the ID existed. The RPC cleanup
+    /// remains best-effort, but an unknown ID is no longer reported as success
+    /// by the IPC layer.
+    pub async fn cancel_download(&self, id: &str) -> bool {
         // Ambil handle kontrol lalu lepas semua lock SEBELUM RPC await.
         // Khusus item RPC yang sudah Paused, supervisor polling sudah selesai;
         // karena itu engine sendiri wajib forceRemove GID-nya dari daemon.
@@ -479,6 +490,8 @@ impl DownloadEngine {
                     let target = (i.pid.take(), i.rpc_gid.take());
                     i.status = DownloadStatus::Cancelled;
                     i.resume_pending = false;
+                    i.retry_after = None;
+                    i.auto_retry_count = 0;
                     i.status_detail.clear();
 
                     i.speed = 0;
@@ -489,16 +502,18 @@ impl DownloadEngine {
             }
         };
 
-        if let Some((pid, gid)) = target {
-            kill_child_pid(pid);
-            if let Some(gid) = gid {
-                let config = self.config.read().await.clone();
-                if let Err(e) = aria2_rpc::remove_gid(&gid, &config).await {
-                    tracing::warn!("RPC cancel GID {}: {}", gid, e);
-                }
+        let Some((pid, gid)) = target else {
+            return false;
+        };
+        kill_child_pid(pid);
+        if let Some(gid) = gid {
+            let config = self.config.read().await.clone();
+            if let Err(e) = aria2_rpc::remove_gid(&gid, &config).await {
+                tracing::warn!("RPC cancel GID {}: {}", gid, e);
             }
-            self.mark_dirty();
         }
+        self.mark_dirty();
+        true
     }
 
     pub async fn clear_download(&self, id: &str) {
@@ -512,6 +527,8 @@ impl DownloadEngine {
                     let target = (i.pid.take(), i.rpc_gid.take());
                     i.status = DownloadStatus::Cancelled;
                     i.resume_pending = false;
+                    i.retry_after = None;
+                    i.auto_retry_count = 0;
                     i.status_detail.clear();
                     i.speed = 0;
                     Some(target)
@@ -612,7 +629,9 @@ fn spawn_supervised(
             // coba yt-dlp dulu (resolver universal, gaya IDM); kalau situs
             // tidak didukung → fallback ke aria2.
             match universal::download(info.clone(), tx.clone(), &config).await {
-                universal::Outcome::Completed | universal::Outcome::MissingTool => {}
+                universal::Outcome::Completed
+                | universal::Outcome::MissingTool
+                | universal::Outcome::ConfigurationError => {}
                 universal::Outcome::Failed => {
                     let aborted = {
                         let i = info.lock().await;
@@ -625,11 +644,25 @@ fn spawn_supervised(
             }
         }
 
+        // Gagal sekali tidak langsung menjadi Error terminal: supervisor memberi
+        // dua kesempatan retry dengan backoff eksponensial kecil. Retry internal
+        // aria2/yt-dlp tetap berjalan sendiri; ini menangani kegagalan di luar
+        // backend, seperti resolver/network/daemon yang pulih sesaat kemudian.
+        let _ = {
+            let mut i = info.lock().await;
+            if !shutting_down.load(Ordering::SeqCst) {
+                i.schedule_auto_retry(original_config.retry_wait)
+            } else {
+                None
+            }
+        };
+
         // Slot baru dilepas setelah seluruh cleanup backend selesai. Resume
         // yang diminta saat pause kini aman dipromosikan sebagai worker baru.
-        {
+        let retry_deadline = {
             let map = downloads.write().await;
             let mut i = info.lock().await;
+            let deadline = i.retry_after;
             i.finish_worker(!shutting_down.load(Ordering::SeqCst));
             if map
                 .get(&i.id)
@@ -637,9 +670,52 @@ fn spawn_supervised(
             {
                 let _ = tx.send(DownloadEvent::Progress(i.clone()));
             }
-        }
+            deadline
+        };
         dirty.store(true, Ordering::SeqCst);
-        promote_next(downloads, tx, shared_config, dirty, shutting_down).await;
+
+        if let Some(deadline) = retry_deadline {
+            // Retry yang sedang backoff tidak boleh menahan slot kosong:
+            // promosikan antrean lain sekarang, lalu cek ulang item ini saat
+            // deadline tercapai.
+            promote_next(
+                downloads.clone(),
+                tx.clone(),
+                shared_config.clone(),
+                dirty.clone(),
+                shutting_down.clone(),
+            )
+            .await;
+            let delay = deadline.saturating_duration_since(std::time::Instant::now());
+            tokio::time::sleep(delay).await;
+            let map = downloads.write().await;
+            let mut ready = false;
+            if !shutting_down.load(Ordering::SeqCst)
+                && map.values().any(|current| Arc::ptr_eq(current, &info))
+            {
+                let mut i = info.lock().await;
+                if i.status == DownloadStatus::Error
+                    && i.resume_pending
+                    && i.retry_after == Some(deadline)
+                {
+                    i.retry_after = None;
+                    i.resume_pending = false;
+                    i.status = DownloadStatus::Queued;
+                    i.status_detail.clear();
+                    let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                    ready = true;
+                }
+            }
+            drop(map);
+            if ready {
+                dirty.store(true, Ordering::SeqCst);
+            }
+            // Always promote after the delay: user actions may have cancelled
+            // the retry, but another queued item can still use the freed slot.
+            promote_next(downloads, tx, shared_config, dirty, shutting_down).await;
+        } else {
+            promote_next(downloads, tx, shared_config, dirty, shutting_down).await;
+        }
     });
 }
 
@@ -1198,17 +1274,17 @@ impl<R: tokio::io::AsyncRead + Unpin> ChildLines<R> {
     }
 }
 
-/// v2.3.0 (K3): file input aria2 (`aria2-<id>.txt`) berisi URL penuh — mungkin
-/// bertoken login. Dibersihkan 0600 saat selesai; ini sapuan sisa sesi crash.
+/// v2.3.0 (K3): file input/config privat aria2 dan yt-dlp berisi URL atau
+/// kredensial proxy. Dibersihkan 0600 saat selesai; ini sapuan sisa sesi crash.
 fn cleanup_orphan_aria2_inputs() {
     let dir = Config::aria2_input_dir();
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for entry in rd.flatten() {
             let path = entry.path();
-            let ours = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("aria2-") && n.ends_with(".txt"));
+            let ours = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                (n.starts_with("aria2-") && (n.ends_with(".txt") || n.ends_with(".conf")))
+                    || (n.starts_with("ytdlp-") && n.ends_with(".conf"))
+            });
             if ours {
                 let _ = std::fs::remove_file(&path);
             }
@@ -1218,6 +1294,10 @@ fn cleanup_orphan_aria2_inputs() {
 
 static RE_INVALID_CHARS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"[<>:"/\\|?*\x00-\x1f]"#).unwrap());
+
+const SESSION_VERSION: u32 = 1;
+const COMPLETED_RETENTION_MILLIS: i64 = 30 * 24 * 60 * 60 * 1_000;
+const MAX_SESSION_ITEMS: usize = 200;
 
 fn session_file() -> std::path::PathBuf {
     Config::config_dir().join("session.json")
@@ -1238,6 +1318,10 @@ fn parse_session(content: &str) -> Option<Vec<DownloadInfo>> {
         return Some(Vec::new());
     }
     if let Ok(sf) = serde_json::from_str::<SessionFile>(content) {
+        if sf.version != SESSION_VERSION {
+            tracing::warn!("Versi session.json tidak didukung: {}", sf.version);
+            return None;
+        }
         return Some(sf.downloads);
     }
     if let Ok(v) = serde_json::from_str::<Vec<DownloadInfo>>(content) {
@@ -1325,12 +1409,25 @@ pub(crate) fn redact_for_persist(d: &mut DownloadInfo) {
     }
 }
 
+/// Buang riwayat Completed yang sudah lama, tetapi pertahankan item aktif,
+/// error, dan item legacy yang tidak memiliki timestamp valid.
+fn prune_completed_history(all: &mut Vec<DownloadInfo>, now_millis: i64) -> usize {
+    let cutoff = now_millis.saturating_sub(COMPLETED_RETENTION_MILLIS);
+    let before = all.len();
+    all.retain(|d| !(d.status == DownloadStatus::Completed && d.created > 0 && d.created < cutoff));
+    before - all.len()
+}
+
 /// Tulis satu snapshot session secara atomik, dibatasi 200 entri terbaru.
 fn write_session_snapshot(mut all: Vec<DownloadInfo>) -> Result<(), String> {
+    let removed = prune_completed_history(&mut all, chrono::Utc::now().timestamp_millis());
+    if removed > 0 {
+        tracing::info!("{} riwayat Completed lama dibuang dari session", removed);
+    }
     // urut (created_ms, id) — konsisten dengan promote_next (L4)
     all.sort_by_key(|d| (d.created, d.id.clone()));
-    if all.len() > 200 {
-        all = all.split_off(all.len() - 200);
+    if all.len() > MAX_SESSION_ITEMS {
+        all = all.split_off(all.len() - MAX_SESSION_ITEMS);
     }
     // B1: kredensial tidak pernah menyentuh disk lewat jalur ini.
     for d in &mut all {
@@ -1338,23 +1435,12 @@ fn write_session_snapshot(mut all: Vec<DownloadInfo>) -> Result<(), String> {
     }
 
     let wrapped = SessionFile {
-        version: 1,
+        version: SESSION_VERSION,
         downloads: all,
     };
     let json = serde_json::to_string(&wrapped).map_err(|e| e.to_string())?;
-    let path = session_file();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    crate::config::Config::write_private_atomic(&session_file(), json.as_bytes())
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1565,6 +1651,19 @@ mod tests {
         assert_eq!(info.status, DownloadStatus::Downloading);
         assert!(info.worker_active);
         assert_eq!(info.retry_count, 0, "no second worker claimed");
+    }
+
+    #[tokio::test]
+    async fn control_methods_reject_unknown_or_terminal_ids() {
+        let engine = lifecycle_engine();
+        lifecycle_item(&engine, "completed", DownloadStatus::Completed).await;
+
+        assert!(!engine.pause_download("missing").await);
+        assert!(!engine.resume_download("missing").await);
+        assert!(!engine.cancel_download("missing").await);
+        assert!(!engine.pause_download("completed").await);
+        assert!(!engine.resume_download("completed").await);
+        assert!(engine.cancel_download("completed").await);
     }
 
     #[tokio::test]
@@ -2216,6 +2315,42 @@ mod tests {
         assert!(
             parse_session("{bukan json").is_none(),
             "korup → None (caller bikin backup)"
+        );
+    }
+
+    #[test]
+    fn parse_session_rejects_unknown_version() {
+        let json = r#"{"version":99,"downloads":[]}"#;
+        assert!(parse_session(json).is_none());
+    }
+
+    #[test]
+    fn prune_completed_history_keeps_recent_and_active_items() {
+        let now = 10_000_000_000_i64;
+        let old = now - COMPLETED_RETENTION_MILLIS - 1;
+        let recent = now - COMPLETED_RETENTION_MILLIS + 1;
+        let mut old_completed = DownloadInfo::new(
+            "old".into(),
+            "https://example.test/old.zip".into(),
+            "old.zip".into(),
+            "/tmp".into(),
+            Default::default(),
+            None,
+        );
+        old_completed.status = DownloadStatus::Completed;
+        old_completed.created = old;
+        let mut recent_completed = old_completed.clone();
+        recent_completed.id = "recent".into();
+        recent_completed.created = recent;
+        let mut active = old_completed.clone();
+        active.id = "active".into();
+        active.status = DownloadStatus::Downloading;
+        let mut all = vec![old_completed, recent_completed, active];
+
+        assert_eq!(prune_completed_history(&mut all, now), 1);
+        assert_eq!(
+            all.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            vec!["recent", "active"]
         );
     }
 

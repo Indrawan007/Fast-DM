@@ -187,13 +187,18 @@ fn parse_response(v: Value) -> Result<Value, String> {
 static DAEMON: tokio::sync::Mutex<Option<tokio::process::Child>> =
     tokio::sync::Mutex::const_new(None);
 
+/// Isi config privat `aria2c` untuk nilai yang tidak boleh masuk argv.
+pub(crate) fn daemon_config_contents(secret: &str) -> String {
+    format!("rpc-secret={secret}\n")
+}
+
 /// Argumen `aria2c` untuk mode daemon. Urutan stabil — diuji unit.
-pub(crate) fn daemon_args(port: u16, secret: &str, cfg: &Config) -> Vec<String> {
+/// `rpc-secret` dimuat dari config privat yang dibuat oleh `ensure_daemon`.
+pub(crate) fn daemon_args(port: u16, _secret: &str, cfg: &Config) -> Vec<String> {
     let mut v = vec![
         "--enable-rpc".into(),
         "--rpc-listen-all=false".into(),
         format!("--rpc-listen-port={}", port),
-        format!("--rpc-secret={}", secret),
         format!("--dir={}", cfg.download_dir),
         "--auto-save-interval=5".into(),
         format!("--max-concurrent-downloads={}", cfg.max_concurrent.max(1)),
@@ -226,9 +231,9 @@ pub(crate) fn daemon_args(port: u16, secret: &str, cfg: &Config) -> Vec<String> 
     if !cfg.verify_tls {
         v.push("--check-certificate=false".into());
     }
-    if !cfg.proxy_url.trim().is_empty() {
-        v.push(format!("--all-proxy={}", cfg.proxy_url.trim()));
-    }
+    // Kredensial proxy tidak dimasukkan ke argv daemon. Proxy disinkronkan
+    // setelah daemon terautentikasi lewat `changeGlobalOption`.
+
     v
 }
 
@@ -433,8 +438,22 @@ async fn ensure_daemon(cfg: &Config) -> Result<Rpc, String> {
             }
         }
     }
+    let mut daemon_config = None;
     if !child_alive {
-        let args = daemon_args(cfg.rpc_port, &rpc.secret, cfg);
+        // `rpc-secret` dibaca dari file 0600 lalu file dihapus setelah daemon
+        // menjawab probe. Path saja yang masuk argv; secret tidak pernah ikut.
+        let path = Config::aria2_input_dir().join(format!(
+            "aria2-daemon-{}.conf",
+            uuid::Uuid::new_v4().simple()
+        ));
+        if Config::write_private_atomic(&path, daemon_config_contents(&rpc.secret).as_bytes())
+            .is_err()
+        {
+            drop(guard);
+            return Err("Gagal menyiapkan konfigurasi privat daemon aria2".into());
+        }
+        let mut args = daemon_args(cfg.rpc_port, &rpc.secret, cfg);
+        args.push(format!("--conf-path={}", path.display()));
         let mut cmd = tokio::process::Command::new("aria2c");
         cmd.args(&args)
             .stdin(std::process::Stdio::null())
@@ -443,18 +462,30 @@ async fn ensure_daemon(cfg: &Config) -> Result<Rpc, String> {
             .kill_on_drop(true);
         #[cfg(unix)]
         cmd.process_group(0);
-        let child = cmd.spawn().map_err(|e| {
-            // v3.0.0: pesan digeneriskan — daemon kini hanya melayani
-            // http/https/ftp (dulu menyebut magnet).
-            format!("aria2c gagal dijalankan: {e} (pastikan aria2 terpasang)")
-        })?;
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                drop(guard);
+                // v3.0.0: pesan digeneriskan — daemon kini hanya melayani
+                // http/https/ftp (dulu menyebut magnet).
+                return Err(format!(
+                    "aria2c gagal dijalankan: {e} (pastikan aria2 terpasang)"
+                ));
+            }
+        };
         *guard = Some(child);
+        daemon_config = Some(path);
     }
     drop(guard);
     // C1: siap → buka gerbang; gagal → tutup selama DAEMON_RETRY_MS supaya
     // unduhan berikutnya gagal cepat dengan pesan yang sama, bukan menunggu
     // 6 detik lagi.
-    match rpc.wait_ready(Duration::from_secs(6)).await {
+    let ready = rpc.wait_ready(Duration::from_secs(6)).await;
+    if let Some(path) = daemon_config {
+        let _ = std::fs::remove_file(path);
+    }
+    match ready {
         Ok(()) => {
             reset_daemon_gate();
             Ok(rpc)
@@ -1071,14 +1102,22 @@ mod tests {
         let j = a.join(" ");
         assert!(a[0] == "--enable-rpc" && a[1] == "--rpc-listen-all=false");
         assert!(j.contains("--rpc-listen-port=6800"));
-        assert!(j.contains("--rpc-secret=sec"));
+        assert!(!j.contains("--rpc-secret"));
+        assert!(!j.contains("sec"));
+        assert_eq!(daemon_config_contents("sec"), "rpc-secret=sec\n");
         assert!(j.contains("--auto-save-interval=5"));
         assert!(j.contains("--socket-recv-buffer-size=1M"));
         assert!(j.contains("--content-disposition-default-utf8=true"));
         assert!(j.contains("--http-accept-gzip=true"));
         assert!(j.contains("--max-overall-download-limit=5M"));
         assert!(j.contains("--check-certificate=false"));
-        assert!(j.contains("--all-proxy=http://127.0.0.1:8118"));
+        // Kredensial proxy tidak boleh muncul di `/proc/<pid>/cmdline`.
+        assert!(!j.contains("--all-proxy"));
+        // Proxy dikirim kemudian melalui RPC, bukan saat spawn daemon.
+        assert_eq!(
+            global_options_extended(&cfg)["all-proxy"],
+            "http://127.0.0.1:8118"
+        );
         // kosong/0 → tanpa flag limit; proxy kosong → tanpa flag
         let plain = Config::default();
         let j2 = daemon_args(6800, "s", &plain).join(" ");

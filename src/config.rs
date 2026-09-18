@@ -3,7 +3,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+/// Marker untuk cookie jar yang mempertahankan metadata browser.
+/// File tanpa marker dianggap legacy dan tidak pernah dikirim ke downloader:
+/// format lama telah menghilangkan flag Secure/domain/path sehingga tidak aman
+/// untuk dipakai ulang.
+pub const COOKIE_FILE_HEADER: &str = "# Fast-DM-Cookie-Format: 2";
+
 static CONFIG: OnceLock<Config> = OnceLock::new();
+const CONFIG_FILE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -48,6 +55,26 @@ pub struct Config {
     /// user menggeser toggle di Pengaturan (bukan tiap save).
     #[serde(default)]
     pub autostart: bool,
+}
+
+/// Envelope konfigurasi v1. Config lama yang langsung berisi field settings
+/// tetap diterima agar upgrade tidak menghapus pengaturan user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConfigFile {
+    version: u32,
+    settings: Config,
+}
+
+fn parse_config(content: &str) -> Result<Config, String> {
+    let value: serde_json::Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
+    if value.get("version").is_some() || value.get("settings").is_some() {
+        let file: ConfigFile = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        if file.version != CONFIG_FILE_VERSION {
+            return Err(format!("versi config tidak didukung: {}", file.version));
+        }
+        return Ok(file.settings);
+    }
+    serde_json::from_value(value).map_err(|e| e.to_string())
 }
 
 fn default_rpc_port() -> u16 {
@@ -339,7 +366,10 @@ impl Config {
         let mut h = Self::normalize_host(host);
         while !h.is_empty() {
             let p = Self::cookies_file_for_host(&h);
-            if p.exists() {
+            // Jangan memakai cookies.txt keluaran versi lama: format lama
+            // menulis semua cookie sebagai domain-wide + Secure=FALSE.
+            // Lebih aman memaksa browser mengirim ulang metadata yang benar.
+            if Self::is_current_cookie_file(&p) {
                 return Some(p);
             }
             // Buang label kiri: "a.b.c" → "b.c"; berhenti di "c"
@@ -374,6 +404,12 @@ impl Config {
         Self::config_dir().join(format!("cookies_{safe}.txt"))
     }
 
+    fn is_current_cookie_file(path: &Path) -> bool {
+        fs::read_to_string(path)
+            .ok()
+            .is_some_and(|text| text.lines().any(|line| line.trim() == COOKIE_FILE_HEADER))
+    }
+
     /// Snapshot config saat pertama kali dipanggil (proses berumur pendek =
     /// native host / IPC client boleh memakainya langsung).
     ///
@@ -392,7 +428,7 @@ impl Config {
             let path = Self::config_file();
             if path.exists() {
                 match fs::read_to_string(&path) {
-                    Ok(content) => match serde_json::from_str(&content) {
+                    Ok(content) => match parse_config(&content) {
                         Ok(cfg) => cfg,
                         Err(e) => {
                             // Jangan diam-diam reset config user — log dan lanjut default
@@ -413,23 +449,53 @@ impl Config {
         })
     }
 
-    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let dir = Self::config_dir();
-        fs::create_dir_all(&dir)?;
-        let json = serde_json::to_string_pretty(self)?;
-        // Tulis atomik (tmp + rename) supaya config tidak korup kalau crash
-        let path = Self::config_file();
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, json)?;
-        // v2.10.0 (B1): config.json bisa memuat `proxy_url` berisi kredensial
-        // (http://user:pass@host:port) — samakan perlakuannya dengan
-        // session.json/cookie/rpc.secret yang sudah 0600.
+    /// Tulis file secara atomik dengan mode yang ditentukan sejak file dibuat.
+    /// Temp file unik + `create_new` mencegah dua proses menimpa temp bersama.
+    pub(crate) fn write_atomic_with_mode(
+        path: &Path,
+        bytes: &[u8],
+        mode: u32,
+    ) -> std::io::Result<()> {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("state");
+        let temp = parent.join(format!(".{name}.tmp-{}", uuid::Uuid::new_v4().simple()));
+
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(mode);
         }
-        fs::rename(&tmp, &path)?;
+
+        let result = (|| {
+            let mut file = options.open(&temp)?;
+            use std::io::Write;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temp, path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        result
+    }
+
+    /// Tulis file privat secara atomik dengan mode 0600 sejak file dibuat.
+    /// Ini mencegah jendela singkat `proxy_url`/URL token terbaca sebelum chmod.
+    pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        Self::write_atomic_with_mode(path, bytes, 0o600)
+    }
+
+    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let file = ConfigFile {
+            version: CONFIG_FILE_VERSION,
+            settings: self.clone(),
+        };
+        let json = serde_json::to_string_pretty(&file)?;
+        Self::write_private_atomic(&Self::config_file(), json.as_bytes())?;
         Ok(())
     }
 }
@@ -582,6 +648,45 @@ mod tests {
         assert!(c.auto_resume); // K5: default lanjutkan restore otomatis
     }
 
+    #[test]
+    fn private_atomic_write_replaces_file_without_fixed_temp() {
+        let dir = std::env::temp_dir().join(format!(
+            "fast-dm-private-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let path = dir.join("state.json");
+
+        Config::write_private_atomic(&path, br#"{"version":1}"#).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"version":1}"#);
+        Config::write_private_atomic(&path, br#"{"version":2}"#).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"version":2}"#);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        let manifest = dir.join("manifest.json");
+        Config::write_atomic_with_mode(&manifest, b"{}", 0o644).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&manifest).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        }
+        assert!(fs::read_dir(&dir)
+            .unwrap()
+            .all(|entry| entry.unwrap().file_name() != ".state.json.tmp"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     // ── v2.3.0: path privat (K1/K3) ──
 
     #[test]
@@ -643,6 +748,27 @@ mod tests {
         assert_eq!(restored.download_dir, original.download_dir);
         assert_eq!(restored.max_connections, original.max_connections);
         assert_eq!(restored.verify_tls, original.verify_tls);
+    }
+
+    #[test]
+    fn config_file_parser_accepts_versioned_and_legacy_shapes() {
+        let original = Config::default();
+        let wrapped = serde_json::to_string(&ConfigFile {
+            version: CONFIG_FILE_VERSION,
+            settings: original.clone(),
+        })
+        .unwrap();
+        assert_eq!(parse_config(&wrapped).unwrap().rpc_port, original.rpc_port);
+
+        let legacy = serde_json::to_string(&original).unwrap();
+        assert_eq!(parse_config(&legacy).unwrap().rpc_port, original.rpc_port);
+    }
+
+    #[test]
+    fn config_file_parser_rejects_unknown_version() {
+        let json = r#"{"version":99,"settings":{}}"#;
+        let error = parse_config(json).unwrap_err();
+        assert!(error.contains("versi config tidak didukung"));
     }
 
     #[test]

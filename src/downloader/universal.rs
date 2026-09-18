@@ -2,7 +2,8 @@ use super::types::*;
 use crate::config::Config;
 use crate::downloader::aria2::conn_per_server;
 use crate::downloader::youtube::{
-    cookie_args, merge_output_format, network_args, output_template, quality_args, run_ytdlp,
+    cookie_args, merge_output_format, network_args, output_template, quality_args,
+    run_ytdlp_with_stdin, ytdlp_proxy_args, PrivateFileGuard, YTDLP_BATCH_FILE_STDIN,
 };
 use std::process::Command;
 use std::sync::Arc;
@@ -19,6 +20,9 @@ pub enum Outcome {
     /// yt-dlp tidak terinstall — status Error sudah di-set, JANGAN fallback
     /// (pesan "install yt-dlp" lebih jelas daripada error aria2).
     MissingTool,
+    /// Config privat yt-dlp gagal dibuat — status Error sudah di-set, JANGAN
+    /// fallback dengan menurunkan proxy/kredensial ke jalur yang berbeda.
+    ConfigurationError,
 }
 
 /// Unduh URL non-YouTube via yt-dlp sebagai "resolver universal" (gaya IDM):
@@ -84,6 +88,21 @@ pub async fn download(
         return Outcome::MissingTool;
     }
 
+    let (proxy_args, proxy_file) = match ytdlp_proxy_args(config) {
+        Ok(value) => value,
+        Err(msg) => {
+            let mut i = info.lock().await;
+            if !i.stop_requested() {
+                i.status = DownloadStatus::Error;
+                i.error_msg = msg;
+                i.speed = 0;
+                let _ = tx.send(DownloadEvent::Error(i.clone()));
+            }
+            return Outcome::ConfigurationError;
+        }
+    };
+    let _proxy_file = PrivateFileGuard::new(proxy_file);
+
     let mut cmd = vec!["yt-dlp".to_string()];
     cmd.extend(quality_args(quality.as_deref()));
     // v2.10.5 (perf): fragmen HLS/DASH paralel (lihat youtube.rs).
@@ -132,7 +151,9 @@ pub async fn download(
         cmd.extend(["--limit-rate".into(), config.max_overall_speed.clone()]);
     }
 
-    // v2.4.0 (D3): proxy juga untuk jalur resolver universal
+    // v2.4.0 (D3): proxy juga untuk jalur resolver universal. URL proxy
+    // berada di config privat; argv hanya membawa path config tersebut.
+    cmd.extend(proxy_args);
     cmd.extend(network_args(config));
     for (k, v) in &headers {
         let k = k.replace(['\r', '\n'], "");
@@ -142,9 +163,11 @@ pub async fn download(
             cmd.push(format!("{}:{}", k, v));
         }
     }
-    cmd.push(url);
+    // Jangan taruh signed URL di argv (`/proc/<pid>/cmdline`). yt-dlp membaca
+    // satu URL dari stdin lewat batch-file=-.
+    cmd.push(YTDLP_BATCH_FILE_STDIN.into());
 
-    let ok = run_ytdlp(cmd, info.clone(), tx.clone()).await;
+    let ok = run_ytdlp_with_stdin(cmd, info.clone(), tx.clone(), Some(url)).await;
 
     if ok {
         return Outcome::Completed;

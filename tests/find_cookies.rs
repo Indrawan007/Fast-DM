@@ -73,7 +73,14 @@ fn write_cookie_file(path: &Path) {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).unwrap();
     }
-    fs::write(path, "# Netscape HTTP Cookie File\n").unwrap();
+    fs::write(
+        path,
+        format!(
+            "# Netscape HTTP Cookie File\n{}\n",
+            fast_dm::config::COOKIE_FILE_HEADER
+        ),
+    )
+    .unwrap();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -195,6 +202,27 @@ fn exact_match_takes_priority_over_parent() {
         "host dengan subdomain berbeda harus pakai parent domain"
     );
 
+    cleanup_tempdir(&tmp);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ignores_legacy_cookie_file_without_format_marker() {
+    let tmp = make_tempdir();
+    let _env = EnvGuard::new(&tmp);
+
+    let path = cookie_path("legacy.example.com");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tFALSE\t0\tsid\tsecret\n",
+    )
+    .unwrap();
+
+    assert!(
+        Config::find_cookies_file("legacy.example.com").is_none(),
+        "jar lama tanpa marker tidak boleh dipakai ulang"
+    );
     cleanup_tempdir(&tmp);
 }
 

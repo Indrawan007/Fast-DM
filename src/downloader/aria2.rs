@@ -1,6 +1,7 @@
 use super::types::*;
 use crate::config::Config;
 use regex::Regex;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
@@ -94,12 +95,21 @@ pub async fn download(
     }
 
     // Re-check stop and publish Downloading under the same item lock.
-    let (cmd, input_file) = {
+    let (cmd, cleanup_files) = {
         let mut i = info.lock().await;
         if i.stop_requested() {
             return;
         }
-        let command = build_aria2_cmd(&i, config);
+        let command = match build_aria2_cmd(&i, config) {
+            Ok(command) => command,
+            Err(msg) => {
+                i.status = DownloadStatus::Error;
+                i.error_msg = msg;
+                i.speed = 0;
+                let _ = tx.send(DownloadEvent::Error(i.clone()));
+                return;
+            }
+        };
         i.status = DownloadStatus::Downloading;
         let _ = tx.send(DownloadEvent::Progress(i.clone()));
         command
@@ -110,13 +120,16 @@ pub async fn download(
     // Spawn aria2c — v2.3.1 (M1): async penuh, tanpa spawn_blocking
     run_aria2c(cmd, info.clone(), tx.clone()).await;
 
-    // Cleanup input file
-    if let Some(path) = input_file {
+    // Cleanup private input/config files even when aria2c fails to spawn.
+    for path in cleanup_files {
         let _ = std::fs::remove_file(path);
     }
 }
 
-fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option<String>) {
+fn build_aria2_cmd(
+    info: &DownloadInfo,
+    config: &Config,
+) -> Result<(Vec<String>, Vec<PathBuf>), String> {
     // Write URL to input file (handles long URLs)
     // v2.3.0 (K3): direktori privat (XDG_RUNTIME_DIR/config dir, 0700) +
     // file 0600 — URL bisa mengandung token; jangan lagi di /tmp publik.
@@ -126,11 +139,23 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
     // Hanya URL di input-file (untuk menangani URL panjang). Semua opsi lain
     // dikirim sebagai argumen CLI: nilai dengan spasi (path folder, nama file,
     // header) tidak salah di-parse oleh format input-file aria2.
-    let _ = std::fs::write(&input_path, format!("{}\n", info.url));
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&input_path, std::fs::Permissions::from_mode(0o600));
-    }
+    Config::write_private_atomic(&input_path, format!("{}\n", info.url).as_bytes())
+        .map_err(|_| "Gagal menyiapkan input aria2".to_string())?;
+    let mut cleanup_files = vec![input_path.clone()];
+
+    // Kredensial proxy dibaca aria2 dari config privat, bukan dari argv.
+    let proxy_path = if !config.proxy_url.trim().is_empty() {
+        let path = input_dir.join(format!("aria2-{}.conf", info.id));
+        let content = format!("all-proxy={}\n", config.proxy_url.trim());
+        if Config::write_private_atomic(&path, content.as_bytes()).is_err() {
+            let _ = std::fs::remove_file(&input_path);
+            return Err("Gagal menyiapkan konfigurasi proxy aria2".into());
+        }
+        cleanup_files.push(path.clone());
+        Some(path)
+    } else {
+        None
+    };
 
     let mut cmd = vec![
         "aria2c".into(),
@@ -189,6 +214,9 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         format!("--allow-overwrite={}", !config.auto_file_renaming),
         format!("--auto-file-renaming={}", config.auto_file_renaming),
     ];
+    if let Some(path) = proxy_path {
+        cmd.push(format!("--conf-path={}", path.display()));
+    }
 
     // Header kustom dari browser extension (mis. Referer) — strip \r\n anti injection.
     // Dikirim per argumen agar nilai dengan spasi aman.
@@ -216,14 +244,7 @@ fn build_aria2_cmd(info: &DownloadInfo, config: &Config) -> (Vec<String>, Option
         }
     }
 
-    // v2.4.0 (D3): proxy untuk semua protokol (http/https/ftp). Kredensial
-    // dikandung langsung di URL (http://user:pass@host:port) — tidak perlu
-    // --all-proxy-user/--all-proxy-password terpisah.
-    if !config.proxy_url.trim().is_empty() {
-        cmd.push(format!("--all-proxy={}", config.proxy_url.trim()));
-    }
-
-    (cmd, Some(input_path.to_string_lossy().to_string()))
+    Ok((cmd, cleanup_files))
 }
 
 /// v2.3.1 (M1): tokio::process penuh — pola lama (std::process di dalam
@@ -566,15 +587,21 @@ fn parse_aria2_size(s: &str) -> u64 {
 /// Cache satu client berdasarkan setelan jaringan. Clone Client berbagi pool;
 /// perubahan proxy/TLS mengganti cache, bukan menggunakan setelan startup lama.
 fn resolve_client(config: &Config) -> Result<reqwest::Client, String> {
-    type CachedClient = Option<(bool, String, reqwest::Client)>;
+    // Cache failure juga, bukan hanya client sukses. Tanpa ini setiap download
+    // mengulang builder yang pasti gagal (mis. proxy invalid), menambah latency
+    // dan spam log tanpa mengubah hasil.
+    type CachedClient = Option<(bool, String, Result<reqwest::Client, String>)>;
     static CACHE: std::sync::Mutex<CachedClient> = std::sync::Mutex::new(None);
     let proxy = config.proxy_url.trim();
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((verify_tls, cached_proxy, client)) = cache.as_ref() {
+    if let Some((verify_tls, cached_proxy, result)) = cache.as_ref() {
         if *verify_tls == config.verify_tls && cached_proxy == proxy {
-            return Ok(client.clone());
+            return result.clone();
         }
     }
+
+    let key = (config.verify_tls, proxy.to_string());
+
     let mut builder = reqwest::Client::builder()
         .user_agent(CHROME_UA)
         .danger_accept_invalid_certs(!config.verify_tls)
@@ -583,19 +610,28 @@ fn resolve_client(config: &Config) -> Result<reqwest::Client, String> {
         .no_proxy();
     if !proxy.is_empty() {
         if !crate::config::is_valid_proxy_url(proxy) {
-            return Err("Proxy resolver tidak valid — periksa Pengaturan".into());
+            let error = "Proxy resolver tidak valid — periksa Pengaturan".to_string();
+            *cache = Some((key.0, key.1, Err(error.clone())));
+            return Err(error);
         }
         // Jangan sertakan error reqwest/URL proxy: bisa memuat kredensial.
-        builder = builder.proxy(
-            reqwest::Proxy::all(proxy)
-                .map_err(|_| "Proxy resolver tidak valid — periksa Pengaturan".to_string())?,
-        );
+        let proxy_result = reqwest::Proxy::all(proxy)
+            .map_err(|_| "Proxy resolver tidak valid — periksa Pengaturan".to_string());
+        let proxy = match proxy_result {
+            Ok(proxy) => proxy,
+            Err(error) => {
+                *cache = Some((key.0, key.1, Err(error.clone())));
+                return Err(error);
+            }
+        };
+        builder = builder.proxy(proxy);
     }
-    let client = builder
+
+    let result = builder
         .build()
-        .map_err(|_| "Gagal membuat HTTP client resolver".to_string())?;
-    *cache = Some((config.verify_tls, proxy.to_string(), client.clone()));
-    Ok(client)
+        .map_err(|_| "Gagal membuat HTTP client resolver".to_string());
+    *cache = Some((key.0, key.1, result.clone()));
+    result
 }
 
 /// Resolve filename + ukuran + tolak HTML/non-2xx.
@@ -761,17 +797,19 @@ pub(crate) async fn resolve_filename(
 /// `pub(crate)`: v2.9.0 (B2.2) juga dipakai jalur RPC sebagai opsi per-URI
 /// `cookie` di `addUri` (daemon global tidak boleh menyentuh domain lain).
 pub(crate) fn cookie_header_for(url: &str) -> Option<String> {
-    let host = url::Url::parse(url)
-        .ok()?
-        .host_str()?
-        .trim_start_matches("www.")
-        .to_ascii_lowercase();
-    // File per-domain dulu (termasuk domain induk — file video sering ada di
-    // subdomain CDN, sedangkan cookies disimpan dengan host halaman);
-    // fallback ke cookies.txt lama (versi sebelumnya)
-    let path = Config::find_cookies_file(&host)
-        .unwrap_or_else(|| Config::config_dir().join("cookies.txt"));
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let request_path = if parsed.path().is_empty() {
+        "/"
+    } else {
+        parsed.path()
+    };
+    let path = Config::find_cookies_file(&host)?;
     let text = std::fs::read_to_string(&path).ok()?;
+    let now = chrono::Utc::now().timestamp();
     let mut pairs: Vec<String> = Vec::new();
 
     for line in text.lines() {
@@ -780,17 +818,52 @@ pub(crate) fn cookie_header_for(url: &str) -> Option<String> {
             continue;
         }
         let f: Vec<&str> = line.split('\t').collect();
-        if f.len() < 7 {
+        if f.len() != 7 {
             continue;
         }
-        let domain = f[0].trim_start_matches('.').to_ascii_lowercase();
-        // Cookie berlaku bila domain sama / subdomain dari domain cookie
-        if host == domain || host.ends_with(&format!(".{}", domain)) {
-            let name = f[5].trim();
-            let value = f[6].trim();
-            if !name.is_empty() {
-                pairs.push(format!("{}={}", name, value));
-            }
+
+        let raw_domain = f[0].trim().to_ascii_lowercase();
+        let domain = raw_domain.trim_start_matches('.');
+        if domain.is_empty() || !cookie_domain_matches_host(domain, &host) {
+            continue;
+        }
+        let include_subdomains = match f[1].trim().to_ascii_uppercase().as_str() {
+            "TRUE" => true,
+            "FALSE" => false,
+            _ => continue,
+        };
+        if !include_subdomains && host != domain {
+            continue;
+        }
+
+        let cookie_path = f[2].trim();
+        if !cookie_path.starts_with('/') || !cookie_path_matches(request_path, cookie_path) {
+            continue;
+        }
+        let secure = match f[3].trim().to_ascii_uppercase().as_str() {
+            "TRUE" => true,
+            "FALSE" => false,
+            _ => continue,
+        };
+        if secure && parsed.scheme() != "https" {
+            continue;
+        }
+        let expires = match f[4].trim().parse::<i64>() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if expires < 0 || (expires > 0 && expires <= now) {
+            continue;
+        }
+
+        let name = f[5].trim();
+        let value = f[6].trim();
+        if !valid_cookie_header_field(name, false) || !valid_cookie_header_field(value, true) {
+            continue;
+        }
+        pairs.push(format!("{}={}", name, value));
+        if pairs.len() >= 512 {
+            break;
         }
     }
 
@@ -799,6 +872,30 @@ pub(crate) fn cookie_header_for(url: &str) -> Option<String> {
     } else {
         Some(pairs.join("; "))
     }
+}
+
+fn cookie_domain_matches_host(cookie_domain: &str, host: &str) -> bool {
+    host == cookie_domain || host.ends_with(&format!(".{}", cookie_domain))
+}
+
+fn cookie_path_matches(request_path: &str, cookie_path: &str) -> bool {
+    if cookie_path == "/" || request_path == cookie_path {
+        return true;
+    }
+    request_path.starts_with(cookie_path)
+        && (cookie_path.ends_with('/')
+            || request_path
+                .as_bytes()
+                .get(cookie_path.len())
+                .is_some_and(|byte| *byte == b'/'))
+}
+
+fn valid_cookie_header_field(value: &str, is_value: bool) -> bool {
+    (!value.is_empty() || is_value)
+        && !value.chars().any(|ch| {
+            ch.is_control() || (!is_value && (ch == '=' || ch == ';' || ch.is_whitespace()))
+        })
+        && (!is_value || !value.contains(';'))
 }
 
 pub(crate) fn is_generic_filename(name: &str) -> bool {
@@ -933,6 +1030,53 @@ pub(crate) fn parse_content_disposition(cd: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cookie_scope_helpers_match_scheme_path_and_domain() {
+        assert!(cookie_domain_matches_host("example.com", "cdn.example.com"));
+        assert!(!cookie_domain_matches_host(
+            "example.com",
+            "example.com.evil"
+        ));
+        assert!(cookie_path_matches("/account/file", "/account"));
+        assert!(!cookie_path_matches("/accounting", "/account"));
+        assert!(valid_cookie_header_field("sid", false));
+        assert!(!valid_cookie_header_field("sid=other", false));
+        assert!(!valid_cookie_header_field("a;b", true));
+    }
+
+    #[test]
+    fn per_process_proxy_is_config_file_not_argv() {
+        let id = format!("proxy-{}", uuid::Uuid::new_v4().simple());
+        let item = DownloadInfo::new(
+            id,
+            "https://example.test/archive.zip".into(),
+            "archive.zip".into(),
+            "/tmp".into(),
+            Default::default(),
+            None,
+        );
+        let cfg = Config {
+            proxy_url: "http://user:secret@127.0.0.1:8080".into(),
+            ..Config::default()
+        };
+        let (args, cleanup) = build_aria2_cmd(&item, &cfg).unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains("--conf-path="));
+        assert!(!joined.contains("user:secret@"));
+        assert!(!joined.contains("secret"));
+        let proxy_file = cleanup
+            .iter()
+            .find(|path| path.extension().is_some_and(|ext| ext == "conf"))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(proxy_file).unwrap(),
+            "all-proxy=http://user:secret@127.0.0.1:8080\n"
+        );
+        for path in cleanup {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
     #[tokio::test]
     async fn stopped_download_does_not_spawn_or_become_error() {
         for status in [DownloadStatus::Paused, DownloadStatus::Cancelled] {
@@ -1011,6 +1155,11 @@ mod tests {
             ..Config::default()
         };
         let error = resolve_client(&cfg).unwrap_err();
+        let cached_error = resolve_client(&cfg).unwrap_err();
+        assert_eq!(
+            cached_error, error,
+            "builder failure is cached for the same key"
+        );
         assert!(!error.contains("secret"));
         assert!(!error.contains("user"));
         assert!(error.contains("Proxy"));
