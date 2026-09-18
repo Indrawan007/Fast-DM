@@ -847,6 +847,12 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   let url = null;
   let filename = null;
 
+  // v3.2.2: `videoMenu` dulu dipakai di bawah tanpa pernah dideklarasikan,
+  // sehingga handler async ini melempar ReferenceError untuk SEMUA item menu
+  // (link/video/gambar) — bukan hanya kasus blob:. Ditetapkan eksplisit dari
+  // menuItemId supaya cabang sniffer hanya jalan untuk menu video.
+  const videoMenu = info.menuItemId === "fastdm-download-video";
+
   switch (info.menuItemId) {
     case "fastdm-download-link":
       url = info.linkUrl;

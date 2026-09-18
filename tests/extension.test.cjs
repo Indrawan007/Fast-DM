@@ -266,6 +266,40 @@ test("context-menu blob video uses the latest sniffer candidate", async () => {
   await pending;
 });
 
+test("context-menu link and image items still download (videoMenu guard)", async () => {
+  // Regresi v3.2.2: `videoMenu` yang tidak terdefinisi membuat handler async
+  // melempar ReferenceError untuk SEMUA item menu, jadi link/gambar biasa pun
+  // tidak pernah terkirim. Test ini mengunci jalur non-video tetap hidup dan
+  // TIDAK memanggil sniffer (hanya menu video ber-URL blob: yang boleh).
+  for (const item of [
+    {
+      menuItemId: "fastdm-download-link",
+      linkUrl: "https://example.com/files/report.pdf",
+      pageUrl: "https://example.com/page",
+      expectUrl: "https://example.com/files/report.pdf",
+      expectName: "report.pdf",
+    },
+    {
+      menuItemId: "fastdm-download-image",
+      srcUrl: "https://cdn.example/pics/photo.jpg",
+      pageUrl: "https://example.com/gallery",
+      expectUrl: "https://cdn.example/pics/photo.jpg",
+      expectName: "photo.jpg",
+    },
+  ]) {
+    const b = background();
+    const pending = b.onContextMenu(item, { id: 7 });
+    await new Promise(setImmediate);
+    assert.equal(b.requests.length, 1, `${item.menuItemId} mengirim unduhan`);
+    assert.equal(b.requests[0].message.url, item.expectUrl);
+    assert.equal(b.requests[0].message.filename, item.expectName);
+    assert.equal(b.requests[0].message.headers.Referer, item.pageUrl);
+    b.requests[0].callback({ success: true });
+    await pending;
+    assert.equal(b.badges.at(-1), "⬇");
+  }
+});
+
 test("background forwards cookie scope metadata instead of flattening values", async () => {
   const cookie = {
     name: "SID",

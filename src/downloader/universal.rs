@@ -25,6 +25,21 @@ pub enum Outcome {
     ConfigurationError,
 }
 
+/// v3.2.2: tandai unduhan gagal karena tool downloader tidak terpasang.
+///
+/// Dipisah dari `download()` supaya bisa di-unit test tanpa men-spawn
+/// `yt-dlp --version`. Cabang `MissingTool` dulu menyetel `status = Error`
+/// tetapi membiarkan `error_msg` KOSONG — komentarnya menyebut `crate::pkg`,
+/// panggilannya tidak ada — sehingga GUI menampilkan kartu "GAGAL" tanpa teks
+/// apa pun dan retry supervisor mengulang kegagalan yang sama dalam diam.
+/// Pesan install mengikuti distro user (`pacman`/`apt`/`dnf`/…), sama seperti
+/// `youtube.rs` dan `aria2.rs` — satu sumber di `crate::pkg`.
+fn mark_missing_tool(info: &mut DownloadInfo, binary: &str, pkg: &str) {
+    info.status = DownloadStatus::Error;
+    info.error_msg = crate::pkg::missing_tool_msg(binary, pkg);
+    info.speed = 0;
+}
+
 /// Unduh URL non-YouTube via yt-dlp sebagai "resolver universal" (gaya IDM):
 /// yt-dlp mengenali 1800+ situs (TikTok, Instagram, Facebook, Twitter/X, Vimeo,
 /// Twitch, situs berita, HLS/m3u8, dll.) dan menangani login + kualitas.
@@ -81,9 +96,9 @@ pub async fn download(
         if i.stop_requested() {
             return Outcome::Failed;
         }
-        i.status = DownloadStatus::Error;
-        // Perintah install mengikuti distro user — lihat `crate::pkg`.
-        i.speed = 0;
+        // Pesan install mengikuti distro user — lihat `mark_missing_tool`.
+        mark_missing_tool(&mut i, "yt-dlp", "yt-dlp");
+
         let _ = tx.send(DownloadEvent::Error(i.clone()));
         return Outcome::MissingTool;
     }
@@ -191,4 +206,38 @@ pub async fn download(
     }
 
     Outcome::Failed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// v3.2.2: cabang "yt-dlp tidak terinstall" WAJIB meninggalkan pesan yang
+    /// bisa dibaca user. Dulu hanya `status = Error` dengan `error_msg` kosong
+    /// → GUI menampilkan kartu "GAGAL" tanpa teks apa pun, lalu retry
+    /// supervisor mengulang kegagalan yang sama dalam diam.
+    #[test]
+    fn missing_tool_leaves_a_readable_error_message() {
+        let mut info = DownloadInfo::new(
+            "dl_x".into(),
+            "https://example.com/page".into(),
+            "page".into(),
+            "/tmp".into(),
+            Default::default(),
+            None,
+        );
+        info.speed = 4096;
+        info.status = DownloadStatus::Downloading;
+
+        mark_missing_tool(&mut info, "yt-dlp", "yt-dlp");
+
+        assert_eq!(info.status, DownloadStatus::Error);
+        assert_eq!(info.speed, 0);
+        assert_eq!(
+            info.error_msg,
+            crate::pkg::missing_tool_msg("yt-dlp", "yt-dlp"),
+            "pesan harus datang dari crate::pkg — satu sumber dengan youtube.rs/aria2.rs"
+        );
+        assert!(info.error_msg.starts_with("yt-dlp tidak terinstall"));
+    }
 }

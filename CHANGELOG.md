@@ -3,6 +3,49 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.2.2] - 2026-09-18
+
+Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.
+
+### Fixed
+
+- **Context menu extension mati total** — `extension/background.js` memakai
+  variabel `videoMenu` (cabang fallback sniffer untuk URL `blob:`/MediaSource
+  yang ditambahkan v3.2.1) yang **tidak pernah dideklarasikan**. Handler
+  `chrome.contextMenus.onClicked` bersifat `async`, jadi `ReferenceError`-nya
+  menjadi unhandled rejection dan KETIGA item menu ("⚡ Unduh dengan Fast DM"
+  untuk link / video / gambar) gagal sebelum `sendDownload` dipanggil — bukan
+  hanya video ber-URL `blob:` seperti niat perbaikan awalnya. `videoMenu` kini
+  diturunkan eksplisit dari `info.menuItemId`. Regresi ini lolos
+  `tests/extension_lint.cjs` karena `node --check` hanya memvalidasi sintaks,
+  bukan resolusi identifier; yang menangkapnya test extension (dan CI job
+  `extension`/`arch`/`release` merah sejak v3.2.1).
+- **Pesan "yt-dlp tidak terinstall" hilang di resolver universal** —
+  `src/downloader/universal.rs` menyetel `status = Error` tetapi membiarkan
+  `error_msg` kosong (komentarnya menyebut `crate::pkg`, panggilannya tidak
+  ada). Di mesin tanpa yt-dlp, unduhan non-YouTube (TikTok, Instagram,
+  HLS/m3u8, halaman video) tampil sebagai kartu "GAGAL" **tanpa teks apa pun**,
+  lalu retry supervisor mengulang kegagalan yang sama dalam diam karena
+  `YTDLP_AVAILABLE` (`OnceLock`) sudah meng-cache `false`. CHANGELOG v3.2.0
+  mengklaim `universal.rs` ikut memanggil `pkg::missing_tool_msg` seperti
+  `aria2.rs` dan `youtube.rs` — klaim itu (dan bullet README "pesan 'tool tidak
+  terinstall' otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro")
+  kini benar untuk SEMUA jalur unduhan.
+
+### Tests
+
+- `tests/extension.test.cjs` — test `context-menu blob video uses the latest
+sniffer candidate` (gagal sejak v3.2.1) kembali hijau, plus test baru
+  `context-menu link and image items still download (videoMenu guard)` agar
+  cabang video-only tidak bisa lagi mematikan jalur menu non-video. Suite Node
+  kini 12/12.
+- `src/downloader/universal.rs` — modul `#[cfg(test)]` baru:
+  `missing_tool_leaves_a_readable_error_message` mengunci bahwa cabang
+  `MissingTool` mengisi `error_msg` dari `crate::pkg` (satu sumber dengan dua
+  jalur lain) dan men-set status/kecepatan dengan benar. Inti perilakunya
+  diekstrak ke helper `mark_missing_tool` supaya teruji tanpa men-spawn
+  `yt-dlp --version`.
+
 ## [3.2.1] - 2026-09-18
 
 ### Fixed
