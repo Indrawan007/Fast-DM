@@ -655,19 +655,6 @@ pub async fn download(
     run_ytdlp_with_stdin(cmd, info.clone(), tx.clone(), Some(url)).await;
 }
 
-/// v2.3.1 (M1): async penuh via tokio::process — lihat komentar
-/// `aria2::run_aria2c` untuk alasan lengkap (ticker cek status, wait paus
-/// terbatas + eskalasi SIGKILL, kill_on_drop, ChildLines anti-kehilangan-byte).
-/// `false` = tidak selesai normal (cancel/pause/error) — dipakai universal.rs
-/// untuk memutuskan fallback aria2.
-pub(crate) async fn run_ytdlp(
-    cmd: Vec<String>,
-    info: Arc<Mutex<DownloadInfo>>,
-    tx: mpsc::UnboundedSender<DownloadEvent>,
-) -> bool {
-    run_ytdlp_with_stdin(cmd, info, tx, None).await
-}
-
 /// Jalankan yt-dlp dengan URL melalui stdin, bukan argv. URL signed sering
 /// memuat kredensial sementara dan `/proc/<pid>/cmdline` dapat dibaca proses
 /// lain dengan UID yang sama. `--batch-file=-` membuat yt-dlp membaca satu
@@ -1016,10 +1003,11 @@ mod tests {
             item.status = status;
             let info = Arc::new(Mutex::new(item));
             let (tx, mut rx) = mpsc::unbounded_channel();
-            run_ytdlp(
+            run_ytdlp_with_stdin(
                 vec!["/nonexistent/fastdm-must-not-spawn".into()],
                 info.clone(),
                 tx,
+                None,
             )
             .await;
             assert_eq!(info.lock().await.status, status);
