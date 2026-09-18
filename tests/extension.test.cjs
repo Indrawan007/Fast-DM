@@ -118,6 +118,11 @@ function background(cookieJar = [], sniffedCandidates = []) {
   let onMessage;
   let onContextMenu;
   let onAlarm;
+  let onDownloadsCreated;
+  let onDownloadsChanged;
+  const cancelled = [];
+  const erased = [];
+  const downloaded = [];
   const event = { addListener() {} };
   const contextMenuEvent = {
     addListener(handler) {
@@ -133,7 +138,11 @@ function background(cookieJar = [], sniffedCandidates = []) {
     URL,
     setTimeout: () => 1,
     clearTimeout: () => {},
-    console: { log: (...args) => logs.push(args.join(" ")), error() {} },
+    console: {
+      log: (...args) => logs.push(args.join(" ")),
+      error() {},
+      debug() {},
+    },
     chrome: {
       runtime: {
         id: "a".repeat(32),
@@ -169,7 +178,34 @@ function background(cookieJar = [], sniffedCandidates = []) {
       // gagal dimuat dan SEMUA test badge error sebelum sempat berjalan.
       // API ini Chrome-only — extension memang hanya menarget Chromium
       // (manifest MV3 + `key`, setup-browser.sh: chrome/brave/edge).
-      downloads: { onCreated: event, onDeterminingFilename: event },
+      // v3.2.3 (A6): `onChanged` juga terdaftar di top level sekarang (jalur
+      // erase-on-interrupted), dan `cancel`/`erase`/`download` direkam agar
+      // urutan cancel→interrupted→erase bisa diuji.
+      downloads: {
+        onCreated: {
+          addListener(handler) {
+            onDownloadsCreated = handler;
+          },
+        },
+        onDeterminingFilename: event,
+        onChanged: {
+          addListener(handler) {
+            onDownloadsChanged = handler;
+          },
+        },
+        cancel: (id, cb) => {
+          cancelled.push(id);
+          cb?.();
+        },
+        erase: (opts, cb) => {
+          erased.push(opts.id);
+          cb?.();
+        },
+        download: (opts, cb) => {
+          downloaded.push(opts);
+          cb?.();
+        },
+      },
       contextMenus: { onClicked: contextMenuEvent },
       action: {
         setBadgeText: ({ text }) => badges.push(text),
@@ -188,6 +224,11 @@ function background(cookieJar = [], sniffedCandidates = []) {
     alarmCreates,
     alarmClears,
     context,
+    onDownloadsCreated,
+    onDownloadsChanged,
+    cancelled,
+    erased,
+    downloaded,
   };
 }
 
@@ -323,4 +364,106 @@ test("background forwards cookie scope metadata instead of flattening values", a
   assert.equal(b.requests[0].message.domain, "example.com");
   b.requests[0].callback({ success: true });
   assert.equal((await response).success, true);
+});
+
+// v3.2.3 (A6): unduhan yang di-intercept dibatalkan segera, tetapi `erase`
+// ditunda sampai Chrome melaporkan `interrupted` — memanggil erase di dalam
+// callback cancel ditolak Chrome karena item masih `in_progress`, sehingga
+// entri "dibatalkan" tertinggal di shelf unduhan browser.
+test("intercepted download is erased only after it reports interrupted", async () => {
+  const b = background();
+  const flushed = () => new Promise(setImmediate);
+  assert.equal(typeof b.onDownloadsCreated, "function");
+  assert.equal(typeof b.onDownloadsChanged, "function");
+
+  // Handler `onCreated` bersifat async dan menunggu balasan native host
+  // (mock `setTimeout` di VM tidak menjadwalkan apa pun), jadi JANGAN di-await
+  // di sini — panggil lalu flush microtask, sama seperti test lain di suite ini.
+  void b.onDownloadsCreated({
+    id: 42,
+    url: "https://example.com/movie.mp4",
+    finalUrl: "https://example.com/movie.mp4",
+    filename: "/home/user/Downloads/movie.mp4",
+    fileSize: 10_485_760,
+    mime: "video/mp4",
+    referrer: "https://example.com/watch",
+  });
+  await flushed();
+
+  assert.deepEqual(b.cancelled, [42], "cancel dipanggil saat intersep");
+  assert.equal(
+    b.erased.length,
+    0,
+    "erase TIDAK boleh langsung (item in_progress)",
+  );
+  assert.equal(b.requests.length, 1, "unduhan dikirim ke native host");
+
+  // Delta yang tidak relevan (masih berjalan) tidak boleh memicu erase.
+  b.onDownloadsChanged({ id: 42, state: { current: "in_progress" } });
+  assert.equal(b.erased.length, 0, "delta in_progress diabaikan");
+
+  b.onDownloadsChanged({ id: 42, state: { current: "interrupted" } });
+  assert.deepEqual(b.erased, [42], "erase setelah interrupted");
+
+  // Delta berikutnya untuk id yang sama tidak menghapus ulang.
+  b.onDownloadsChanged({ id: 42, state: { current: "interrupted" } });
+  assert.deepEqual(b.erased, [42], "erase hanya sekali per unduhan");
+
+  // Unduhan yang TIDAK kita batalkan tidak boleh ikut dihapus dari shelf.
+  b.onDownloadsChanged({ id: 99, state: { current: "interrupted" } });
+  assert.deepEqual(b.erased, [42], "unduhan lain tidak disentuh");
+
+  // Unduhan yang berakhir `complete` (bukan `interrupted`) tidak di-erase,
+  // tetapi entri pelacaknya tetap dilepas agar tidak menumpuk.
+  void b.onDownloadsCreated({
+    id: 43,
+    url: "https://example.com/other.mp4",
+    finalUrl: "https://example.com/other.mp4",
+    filename: "/home/user/Downloads/other.mp4",
+    fileSize: 10_485_760,
+    mime: "video/mp4",
+  });
+  await flushed();
+  assert.deepEqual(b.cancelled, [42, 43]);
+  b.onDownloadsChanged({ id: 43, state: { current: "complete" } });
+  assert.deepEqual(b.erased, [42], "complete tidak ikut di-erase");
+  b.onDownloadsChanged({ id: 43, state: { current: "interrupted" } });
+  assert.deepEqual(b.erased, [42], "entri sudah dilepas → tidak di-erase lagi");
+
+  b.requests[0].callback({ success: true });
+  await flushed();
+  assert.equal(b.badges.at(-1), "⬇");
+});
+
+// v3.2.3 (A7): jalur fallback memakai `saveAs: true` TANPA `filename` — Chrome
+// mengabaikan `filename` saat dialog "Simpan sebagai" terbuka, jadi mengirim
+// keduanya hanya menyesatkan pembaca kode.
+test("fallback download uses saveAs without a conflicting filename", async () => {
+  const b = background();
+  void b.onDownloadsCreated({
+    id: 7,
+    url: "https://example.com/big.iso",
+    finalUrl: "https://example.com/big.iso",
+    filename: "/home/user/Downloads/big.iso",
+    fileSize: 10_485_760,
+    mime: "application/x-iso9660-image",
+    referrer: "https://example.com/",
+  });
+  await new Promise(setImmediate);
+
+  assert.equal(b.requests.length, 1);
+  b.requests[0].callback({ success: false, error: "Ditolak" });
+  await new Promise(setImmediate);
+
+  assert.equal(b.downloaded.length, 1, "fallback memulai ulang unduhan");
+  // Objek dibuat di dalam konteks VM (prototipe berbeda), jadi bandingkan per
+  // field — `deepStrictEqual` menolak meskipun isinya identik.
+  assert.equal(b.downloaded[0].url, "https://example.com/big.iso");
+  assert.equal(b.downloaded[0].saveAs, true);
+  assert.equal(
+    "filename" in b.downloaded[0],
+    false,
+    "tanpa field filename yang akan diabaikan Chrome",
+  );
+  assert.deepEqual(Object.keys(b.downloaded[0]).sort(), ["saveAs", "url"]);
 });

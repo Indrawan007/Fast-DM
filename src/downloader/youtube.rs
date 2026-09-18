@@ -212,17 +212,23 @@ fn is_fresh_cookie_file(path: &std::path::Path) -> bool {
 }
 
 pub(crate) fn output_template(save_dir: &str, filename: &str) -> String {
+    // B6: escape '%' → '%%' — nilai --output yt-dlp adalah TEMPLATE, sehingga
+    // setiap '%' literal harus digandakan.
+    // v3.2.3 (A8): `save_dir` ikut di-escape. Sebelumnya hanya nama file yang
+    // di-escape, jadi folder unduhan bernama misalnya `50%_bonus` dibaca yt-dlp
+    // sebagai template (`%_b…` = kode template tak dikenal) dan unduhan gagal
+    // atau mendarat di path yang salah. Placeholder yang KITA inginkan
+    // (`%(title)s`, `%(ext)s`) ditambahkan SETELAH escaping, jadi tetap utuh.
+    let dir = save_dir.replace('%', "%%");
     let f = filename.trim();
     if f.is_empty() || f.starts_with("download_") {
-        return format!("{}/%(title)s.%(ext)s", save_dir);
+        return format!("{}/%(title)s.%(ext)s", dir);
     }
-    // B6: escape '%' → '%%' — nilai --output yt-dlp adalah template;
-    // nama file hasil decode URL yang mengandung '%' akan salah parse.
     let f = f.replace('%', "%%");
     if f.contains('.') {
-        return format!("{}/{}", save_dir, f);
+        return format!("{}/{}", dir, f);
     }
-    format!("{}/{}.%(ext)s", save_dir, f)
+    format!("{}/{}.%(ext)s", dir, f)
 }
 
 /// Mapping pilihan kualitas dari extension → argumen yt-dlp
@@ -1181,6 +1187,29 @@ mod tests {
             output_template("/tmp", "100%done.mp4"),
             "/tmp/100%%done.mp4"
         );
+    }
+
+    /// v3.2.3 (A8): '%' di DIREKTORI tujuan juga harus di-escape — sebelumnya
+    /// hanya nama file yang di-escape, sehingga folder seperti `50%_bonus`
+    /// dibaca yt-dlp sebagai kode template dan unduhan gagal/salah path.
+    #[test]
+    fn output_template_escapes_percent_in_save_dir() {
+        assert_eq!(
+            output_template("/home/u/50%_bonus", "video.mp4"),
+            "/home/u/50%%_bonus/video.mp4"
+        );
+        // Placeholder yang kita sengaja tambahkan tetap utuh (tidak ikut
+        // tergandakan), karena disisipkan setelah escaping.
+        assert_eq!(
+            output_template("/home/u/50%_bonus", "myvideo"),
+            "/home/u/50%%_bonus/myvideo.%(ext)s"
+        );
+        assert_eq!(
+            output_template("/home/u/100%", "download_1234"),
+            "/home/u/100%%/%(title)s.%(ext)s"
+        );
+        // Direktori biasa tidak berubah sama sekali.
+        assert_eq!(output_template("/tmp", "a.mkv"), "/tmp/a.mkv");
     }
 
     #[test]

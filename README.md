@@ -18,6 +18,36 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 - 🐧 **Multi-distro** — paket `.deb` (Debian/Ubuntu) **dan** `.pkg.tar.zst` (Arch/Manjaro/EndeavourOS); pesan "tool tidak terinstall" otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro
 
+## Perubahan v3.2.3
+
+Rilis perbaikan hasil audit kode menyeluruh — tidak ada fitur baru, tidak ada
+perubahan antarmuka.
+
+- 🍪 **Cookie login tidak lagi terhapus diam-diam** — unduhan yang cookie-nya
+  tidak cocok dengan URL request dulu menghapus `cookies_<host>.txt` milik
+  unduhan lain yang baru saja login. Sekarang tidak menulis apa pun.
+- 📋 **Clipboard monitor tidak mati permanen** — bila `xclip`/`wl-paste` belum
+  terpasang, monitor dulu berhenti selamanya; kini ia mencoba lagi tiap 2,5
+  detik sehingga memasang tool-nya kemudian langsung berfungsi tanpa restart.
+- 🧹 **Shelf unduhan browser bersih** — entri "dibatalkan" tidak lagi tertinggal:
+  penghapusan menunggu status `interrupted`, bukan dipanggil di dalam callback
+  `cancel` (yang ditolak Chrome karena item masih berjalan).
+- 📁 **Folder tujuan ber-`%`** (mis. `50%_bonus`) tidak lagi dibaca yt-dlp
+  sebagai kode template.
+- 🔒 **`quality` dari extension disaring di boundary IPC** — nilai cacat
+  diabaikan (unduhan tetap jalan dengan kualitas default), bukan diteruskan ke
+  `--format`.
+- 🧪 **CI punya penjaga baru** — `tools/check-undeclared.cjs` menangkap
+  identifier yang dipakai tanpa pernah dideklarasikan di extension. Ini kelas
+  bug yang membuat context menu mati total di v3.2.1 dan lolos dari
+  `node --check` (yang hanya memvalidasi sintaks).
+
+> **Catatan intersep:** Chrome hanya mengizinkan **satu** extension menangani
+> `chrome.downloads.onDeterminingFilename`. Bila Anda memasang download manager
+> lain yang memakai API itu, jalur intersep Fast-DM lewat API tersebut tidak
+> dipanggil — intersep tetap berjalan lewat `downloads.onCreated`, tetapi tanpa
+> penentuan nama file awal.
+
 ## Perubahan v3.2.0
 
 - 🐧 **Dukungan Arch Linux & turunannya** — `packaging/PKGBUILD` +

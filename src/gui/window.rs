@@ -362,10 +362,18 @@ pub fn build_window(
                     })
                     .await;
                 let Ok((tool, text)) = result else { continue };
-                cached_tool = Some(tool);
                 if tool.is_none() {
-                    break;
+                    // v3.2.3 (A3): dulu `break` — loop mati permanen begitu
+                    // xclip/wl-paste tidak ditemukan SEKALI. User yang memasang
+                    // tool-nya kemudian (lalu mengaktifkan toggle di Pengaturan)
+                    // tetap tidak mendapat banner sampai aplikasi di-restart,
+                    // padahal toggle-nya terlihat aktif. Sekarang: jangan cache
+                    // hasil "tidak ada", lewati tick ini, dan probe lagi pada
+                    // tick berikutnya (2,5 dtk — biaya `command -v` sepele dan
+                    // hanya terjadi selama fitur ini dinyalakan).
+                    continue;
                 }
+                cached_tool = Some(tool);
                 // Pengaturan bisa dimatikan ketika request masih berjalan.
                 if !en.get() {
                     ban_t.set_visible(false);

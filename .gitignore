@@ -11,6 +11,7 @@ target/
 .DS_Store
 .vscode/
 .idea/
+node_modules/
 # Secrets — JANGAN pernah commit
 extension_key.pem
 *.pem

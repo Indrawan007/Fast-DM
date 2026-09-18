@@ -3,6 +3,113 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.2.3] - 2026-09-18
+
+Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.
+Semua butir berasal dari audit kode menyeluruh (`AUDIT.md`).
+
+### Fixed
+
+- **Cookie login bisa terhapus diam-diam** — cabang "tidak ada cookie yang
+  cocok dengan URL request" di `ipc::write_cookies_txt` memanggil
+  `clear_cookie_file()`, padahal pemanggilnya hanya mencatat `tracing::warn!`
+  lalu **tetap melanjutkan unduhan**. Satu unduhan yang cookie-nya tersaring
+  habis (host/path/Secure tidak cocok) jadi menghapus `cookies_<host>.txt`
+  milik unduhan lain yang baru saja login; unduhan berikutnya dari host yang
+  sama kehilangan kredensial tanpa pesan apa pun. Cabang itu kini tidak
+  menulis apa pun — jar lama dibiarkan sampai writer berikutnya menggantinya
+  secara atomik atau `gc_stale_cookies` (>7 hari) membersihkannya.
+  Pencabutan kredensial tetap berjalan lewat jalur "extension mengirim array
+  kosong".
+- **Clipboard monitor mati permanen** — `src/gui/window.rs` memakai `break`
+  (bukan `continue`) saat `xclip`/`wl-paste` tidak ditemukan sekali saja.
+  User yang memasang tool-nya kemudian lalu mengaktifkan toggle di Pengaturan
+  tetap tidak mendapat banner sampai aplikasi di-restart, padahal toggle-nya
+  terlihat aktif. Sekarang tick dilewati dan probe diulang (2,5 dtk), dan
+  hasil "tidak ada tool" tidak lagi di-cache.
+- **Entri "dibatalkan" tertinggal di shelf unduhan browser** — extension
+  memanggil `chrome.downloads.erase()` di dalam callback
+  `chrome.downloads.cancel()`. Saat callback itu berjalan item masih
+  `in_progress` dan `erase` menolaknya. Penghapusan kini menunggu
+  `downloads.onChanged` melaporkan `interrupted`, hanya untuk id yang memang
+  kita batalkan, dan hanya sekali. Entri pelacak dilepas pada status terminal
+  apa pun (termasuk `complete`) supaya tidak menumpuk di service worker.
+- **`saveAs: true` + `filename` saling meniadakan** — jalur fallback
+  mengirim keduanya; Chrome mengabaikan `filename` saat dialog "Simpan
+  sebagai" terbuka. Yang dikirim sekarang hanya `{ url, saveAs: true }`.
+- **Folder tujuan ber-`%` merusak template yt-dlp** — `output_template()`
+  meng-escape `%` pada nama file (B6) tetapi menyisipkan `save_dir` apa
+  adanya, sehingga folder seperti `50%_bonus` dibaca sebagai kode template
+  dan unduhan gagal atau mendarat di path yang salah. Direktori kini
+  di-escape dengan aturan yang sama; placeholder yang kita inginkan
+  (`%(title)s`, `%(ext)s`) disisipkan setelah escaping sehingga tetap utuh.
+- **Cookie ber-`expires 0` ikut terkirim** — ekspresi
+  `expires < 0 || (expires > 0 && expires <= now)` di `cookie_header_for`
+  meloloskan `0`. Dalam format Netscape `0` berarti "session cookie" (umur
+  tidak diketahui) dan writer kita selalu menulis timestamp nyata, jadi `0`
+  hanya bisa datang dari file yang disunting manual atau alat lain. Aturan
+  kini fail-closed: `0` dan nilai negatif dianggap kedaluwarsa.
+- **`chrome.runtime.lastError` tak diperiksa** di callback
+  `cancel`/`erase`/`download` extension — Chrome menulis "Unchecked
+  runtime.lastError" ke console service worker. Semua callback itu kini
+  lewat satu helper yang mencatatnya.
+
+### Security
+
+- **`quality` dari IPC kini disaring di boundary** (`sanitize_quality`) —
+  satu-satunya string bebas dari extension yang sebelumnya sampai ke engine
+  tanpa penyaring (bandingkan `HEADER_ALLOWLIST` untuk header) dan berakhir
+  sebagai nilai `--format` yt-dlp. Whitelist `looks_like_format_id` sendiri
+  masih menerima `/ * [ ] ( ) > < ^ & | , = !`. Semua nilai yang benar-benar
+  dipakai extension (`best_mp4`, `2160p`…`360p`, `audio_best`, `audio_mp3`,
+  dan id format nyata seperti `137+140`) lolos apa adanya; nilai cacat
+  menjadi `None` sehingga unduhan **tetap jalan** dengan kualitas default.
+  Ini lapisan kedua — `quality_args` tetap satu-satunya pemetaan.
+
+### Changed
+
+- Buffer stderr per unduhan aktif diturunkan dari 16 KB/8 KB menjadi
+  8 KB/4 KB (`run_aria2c`). Yang dibutuhkan user adalah ekor log — baris
+  penyebab kegagalan ada di akhir, bukan 16 KB pertama.
+- `cargo test` di job CI utama kini memakai `--locked`, menyamai job
+  `arch`/`release` dan `packaging/build-deb.sh`. Sebelumnya drift
+  `Cargo.lock` baru ketahuan di langkah "Build release binary", setelah
+  seluruh tes selesai dijalankan.
+- `node_modules/` ditambahkan ke `.gitignore` (belum ada, padahal alat uji
+  extension sekarang memakai npm).
+
+### Added
+
+- **`tools/check-undeclared.cjs`** — pemeriksa identifier tak-terdeklarasi
+  untuk extension (acorn, dua lintasan AST) beserta
+  `package.json`/`package-lock.json` dan langkah CI `Check for undeclared
+identifiers`. Alasannya: regresi v3.2.2 (`videoMenu` dipakai tanpa pernah
+  dideklarasikan; handler `async` membuat `ReferenceError` menjadi unhandled
+  rejection sehingga KETIGA item context menu mati) **lolos**
+  `tests/extension_lint.cjs` karena `node --check` hanya memvalidasi sintaks,
+  bukan resolusi identifier. Alat ini diuji negatif: berkas dengan
+  `videoMenu` tak terdeklarasi menghasilkan exit code 1.
+- `Config::cookies_file_in_host` — pembentuk path cookie dengan direktori
+  parameterisasi, supaya perilaku "tidak ada cookie yang cocok" bisa diuji
+  tanpa menyentuh `~/.config` user nyata (pola yang sama dengan
+  `config_dir_from` / `rpc_secret_in`).
+
+### Tests
+
+- Suite Node: 12 → **14** test. Baru: `intercepted download is erased only
+after it reports interrupted` (A6) dan `fallback download uses saveAs
+without a conflicting filename` (A7).
+- Unit test Rust baru: `no_matching_cookie_does_not_wipe_the_jar` (A2),
+  `cookie_expiry_treats_zero_and_negative_as_expired` (A9),
+  `sanitize_quality_keeps_every_value_the_extension_sends` dan
+  `sanitize_quality_rejects_malformed_values` (A5),
+  `output_template_escapes_percent_in_save_dir` (A8).
+- **Catatan verifikasi:** unit test Rust di atas ditulis mengikuti pola test
+  yang sudah ada tetapi **belum dijalankan** — lingkungan pengerjaan tidak
+  memiliki `cargo`/`rustc` maupun `libgtk-4-dev`. Jalankan
+  `cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test --locked`
+  sebelum merge.
+
 ## [3.2.2] - 2026-09-18
 
 Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.

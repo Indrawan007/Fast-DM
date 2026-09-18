@@ -1,0 +1,14 @@
+{
+  "name": "fast-dm-extension-tools",
+  "version": "3.2.3",
+  "private": true,
+  "description": "Alat uji/lint untuk extension MV3 Fast-DM. BUKAN bagian aplikasi — aplikasi utamanya Rust (lihat Cargo.toml) dan tidak butuh npm untuk dibangun.",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test tests/extension.test.cjs",
+    "lint": "node tests/extension_lint.cjs && node tools/check-undeclared.cjs"
+  },
+  "devDependencies": {
+    "acorn": "8.18.0"
+  }
+}

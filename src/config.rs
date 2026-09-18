@@ -391,6 +391,14 @@ impl Config {
     }
 
     fn cookies_file_for_host(host: &str) -> PathBuf {
+        Self::cookies_file_in_host(&Self::config_dir(), host)
+    }
+
+    /// v3.2.3 (A2): inti pembentuk path `cookies_<host>.txt` dengan direktori
+    /// config parameterisasi — dipakai `ipc::write_cookies_txt_in` agar test
+    /// tidak menyentuh `~/.config` nyata, dan sanitasi nama host tetap SATU
+    /// sumber (tidak disalin di dua tempat).
+    pub(crate) fn cookies_file_in_host(dir: &Path, host: &str) -> PathBuf {
         let safe: String = host
             .chars()
             .map(|c| {
@@ -401,7 +409,7 @@ impl Config {
                 }
             })
             .collect();
-        Self::config_dir().join(format!("cookies_{safe}.txt"))
+        dir.join(format!("cookies_{safe}.txt"))
     }
 
     fn is_current_cookie_file(path: &Path) -> bool {

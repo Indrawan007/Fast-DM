@@ -661,6 +661,39 @@ function wasHandled(url) {
   return handledUrls.has(url);
 }
 
+// v3.2.3 (A6): callback API Chrome yang mengabaikan `chrome.runtime.lastError`
+// membuat Chrome menulis "Unchecked runtime.lastError" ke console service
+// worker. Semua callback best-effort (cancel/erase/download) lewat sini.
+function noteRuntimeError(context) {
+  if (chrome.runtime.lastError) {
+    console.debug("[FastDM]", context, chrome.runtime.lastError.message);
+  }
+}
+
+// v3.2.3 (A6): unduhan yang kita batalkan dihapus dari shelf Chrome lewat
+// `downloads.onChanged`, BUKAN di dalam callback `downloads.cancel`. Saat
+// callback cancel berjalan, item masih berstatus `in_progress` dan
+// `downloads.erase` menolaknya — entri "dibatalkan" tertinggal di shelf.
+// `erase` sekarang menunggu status benar-benar `interrupted`.
+const cancelThenErase = new Set();
+
+function cancelAndForget(id) {
+  cancelThenErase.add(id);
+  chrome.downloads.cancel(id, () => noteRuntimeError("cancel"));
+}
+
+chrome.downloads.onChanged.addListener((delta) => {
+  if (!cancelThenErase.has(delta.id)) return;
+  const state = delta.state?.current;
+  // Lepaskan entri pada status terminal APA PUN (bukan hanya `interrupted`)
+  // supaya `cancelThenErase` tidak menumpuk bila unduhan berakhir sebagai
+  // `complete` (mis. bytes-nya sudah habis saat cancel diproses).
+  if (state !== "interrupted" && state !== "complete") return;
+  cancelThenErase.delete(delta.id);
+  if (state !== "interrupted") return;
+  chrome.downloads.erase({ id: delta.id }, () => noteRuntimeError("erase"));
+});
+
 function basename(path) {
   if (!path) return null;
   const parts = path.replace(/\\/g, "/").split("/");
@@ -693,9 +726,7 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
 
   markHandled(url);
 
-  chrome.downloads.cancel(downloadItem.id, () => {
-    chrome.downloads.erase({ id: downloadItem.id });
-  });
+  cancelAndForget(downloadItem.id);
 
   const filename = basename(downloadItem.filename);
 
@@ -704,12 +735,13 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
 
   const result = await sendDownload(url, filename, headers).catch(() => null);
   if (!result || !result.success) {
-    // Fallback: restart download in Chrome normally
-    // (omit filename when unknown — Chrome rejects null for optional string args)
-    const opts = { url, saveAs: true };
-    if (filename) opts.filename = filename;
+    // Fallback: restart download in Chrome normally.
+    // v3.2.3 (A7): `saveAs: true` saja — `filename` diabaikan Chrome saat
+    // dialog "Simpan sebagai" terbuka, jadi mengirim keduanya hanya menyesatkan.
     markSelfInitiated(url);
-    chrome.downloads.download(opts);
+    chrome.downloads.download({ url, saveAs: true }, () =>
+      noteRuntimeError("download"),
+    );
   }
 });
 
@@ -731,19 +763,18 @@ chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
   if (!intercept) return keep();
 
   markHandled(url);
-  chrome.downloads.cancel(downloadItem.id, () => {
-    chrome.downloads.erase({ id: downloadItem.id });
-  });
+  cancelAndForget(downloadItem.id);
 
   const headers = {};
   if (downloadItem.referrer) headers["Referer"] = downloadItem.referrer;
 
   sendDownload(url, filename, headers).then((result) => {
     if (!result || !result.success) {
-      const opts = { url, saveAs: true };
-      if (filename) opts.filename = filename;
+      // v3.2.3 (A7): lihat catatan di `onCreated` — `saveAs: true` saja.
       markSelfInitiated(url);
-      chrome.downloads.download(opts);
+      chrome.downloads.download({ url, saveAs: true }, () =>
+        noteRuntimeError("download"),
+      );
     }
   });
 

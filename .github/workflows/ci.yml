@@ -68,7 +68,11 @@ jobs:
 
         # --no-fail-fast: jalankan semua, jangan stop di error pertama.
         # --nocapture: tampilkan println!() di test output untuk debugging.
-        run: cargo test --no-fail-fast -- --nocapture
+        # --locked (v3.2.3, C5): job arch/release dan packaging/build-deb.sh
+        # sudah memakainya; job utama ini belum, sehingga drift Cargo.lock
+        # baru ketahuan di langkah "Build release binary" — setelah seluruh
+        # tes selesai. Dengan --locked kegagalannya muncul di langkah pertama.
+        run: cargo test --locked --no-fail-fast -- --nocapture
 
       - name: Build release binary
         run: cargo build --release --locked
@@ -104,6 +108,17 @@ jobs:
 
       - name: Lint Chromium extension
         run: node tests/extension_lint.cjs
+
+      # v3.2.3 (C4): `node --check` (di extension_lint.cjs) hanya memvalidasi
+      # SINTAKS. Regresi v3.2.2 (`videoMenu` dipakai tanpa pernah dideklarasikan,
+      # handler async → ReferenceError jadi unhandled rejection → ketiga item
+      # context menu mati) lolos dari lint itu dan baru ketahuan dari test.
+      # Pemeriksa identifier ber-scope ini menutup kelas bug tersebut secara
+      # langsung: identifier yang tidak pernah dideklarasikan = merah.
+      - name: Check for undeclared identifiers
+        run: |
+          npm ci
+          node tools/check-undeclared.cjs
 
       - name: Zip extension
         run: |

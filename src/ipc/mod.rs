@@ -174,6 +174,48 @@ fn truncate_chars(s: &str, max: usize) -> String {
     s[..end].to_string()
 }
 
+/// Batas panjang nilai `quality`. Preset terpanjang kita `"audio_best"` = 10
+/// char; id format yt-dlp dibatasi 32 char oleh `looks_like_format_id`. 64
+/// memberi ruang longgar sekaligus menutup nilai tak terbatas.
+pub(crate) const MAX_QUALITY_LEN: usize = 64;
+
+/// v3.2.3 (A5): saring field `quality` yang datang dari IPC.
+///
+/// Ini **lapisan kedua**, bukan satu-satunya: pemetaan sesungguhnya ada di
+/// `youtube::quality_args`, dan nilai yang tidak dikenal sudah dipetakan ke
+/// selector default yang aman. Tetapi `quality` adalah satu-satunya string bebas
+/// dari extension yang sampai ke boundary ini tanpa penyaring sama sekali
+/// (bandingkan `HEADER_ALLOWLIST` untuk header), dan ia berakhir sebagai nilai
+/// `--format` yt-dlp. Whitelist `looks_like_format_id` sendiri masih menerima
+/// `/ * [ ] ( ) > < ^ & | , = !`, jadi penjaga murah di sini mempersempit
+/// permukaan tanpa mengubah satu pun nilai yang dipakai extension
+/// (`best_mp4`, `2160p`…`360p`, `audio_best`, `audio_mp3`, atau id format nyata).
+///
+/// Aturan: ada isi setelah trim, ≤ `MAX_QUALITY_LEN` byte, tanpa whitespace,
+/// control char, kutip, backslash, atau newline. Nilai yang ditolak
+/// dikembalikan sebagai `None` sehingga unduhan TETAP jalan dengan kualitas
+/// default — menolak seluruh unduhan akan lebih buruk daripada mengabaikan
+/// preferensi kualitas yang cacat.
+pub(crate) fn sanitize_quality(raw: Option<String>) -> Option<String> {
+    let value = raw?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_QUALITY_LEN {
+        return None;
+    }
+    let clean: String = trimmed
+        .chars()
+        .filter(|c| {
+            !c.is_control()
+                && !c.is_whitespace()
+                && !matches!(c, '"' | '\'' | '`' | '\\' | '\n' | '\r')
+        })
+        .collect();
+    if clean.is_empty() || clean != trimmed {
+        return None;
+    }
+    Some(clean)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum RequestLine {
     Eof,
@@ -414,7 +456,8 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
                     None,
                     true,
                     headers,
-                    msg.quality,
+                    // v3.2.3 (A5): disaring di boundary — lihat `sanitize_quality`.
+                    sanitize_quality(msg.quality),
                 )
                 .await;
 
@@ -524,6 +567,18 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
 /// metadata dari `chrome.cookies.getAll()` dipertahankan dan file ditulis
 /// atomik agar downloader tidak pernah membaca file setengah jadi.
 fn write_cookies_txt(cookies: &[BrowserCookie], request_url: &str) -> Result<(), String> {
+    write_cookies_txt_in(cookies, request_url, &Config::config_dir())
+}
+
+/// v3.2.3 (A2): inti `write_cookies_txt` dengan direktori config
+/// parameterisasi — sama seperti pola `config_dir_from`/`rpc_secret_in`, supaya
+/// perilaku "tidak ada cookie yang cocok" bisa di-unit test tanpa menyentuh
+/// `~/.config` user nyata.
+fn write_cookies_txt_in(
+    cookies: &[BrowserCookie],
+    request_url: &str,
+    config_dir: &std::path::Path,
+) -> Result<(), String> {
     const MAX_COOKIES: usize = 512;
     const SESSION_COOKIE_TTL: i64 = 24 * 3600;
 
@@ -553,7 +608,7 @@ fn write_cookies_txt(cookies: &[BrowserCookie], request_url: &str) -> Result<(),
         crate::config::COOKIE_FILE_HEADER
     );
     let mut count = 0usize;
-    let path = Config::cookies_file_for(file_host);
+    let path = Config::cookies_file_in_host(config_dir, file_host);
 
     if cookies.is_empty() {
         clear_cookie_file(&path)?;
@@ -628,7 +683,16 @@ fn write_cookies_txt(cookies: &[BrowserCookie], request_url: &str) -> Result<(),
     }
 
     if count == 0 {
-        clear_cookie_file(&path)?;
+        // v3.2.3 (A2): JANGAN hapus jar yang sudah ada. Dulu cabang ini
+        // memanggil `clear_cookie_file(&path)` — padahal pemanggilnya
+        // (`handle_message`) hanya mencatat `tracing::warn!` lalu TETAP
+        // melanjutkan unduhan. Akibatnya satu unduhan yang cookienya tersaring
+        // habis (host/path/Secure tidak cocok dengan URL request) menghapus
+        // `cookies_<host>.txt` milik unduhan lain yang baru saja login, dan
+        // unduhan berikutnya dari host yang sama kehilangan kredensial secara
+        // diam-diam. Tidak menulis apa pun adalah hasil yang benar di sini:
+        // jar lama dibiarkan sampai writer berikutnya menggantinya secara
+        // atomik, atau `Config::gc_stale_cookies` membersihkannya (>7 hari).
         return Err("no cookies matching request URL".into());
     }
 
@@ -989,5 +1053,96 @@ mod tests {
         assert_eq!(strip_control("a\x7fb"), "ab");
         // spasi BUKAN control char — harus tetap ada
         assert_eq!(strip_control("normal text 123"), "normal text 123");
+    }
+
+    /// v3.2.3 (A5): nilai `quality` yang benar-benar dipakai extension harus
+    /// lolos apa adanya — penjaga boundary tidak boleh mengubah perilaku.
+    #[test]
+    fn sanitize_quality_keeps_every_value_the_extension_sends() {
+        for preset in [
+            "best_mp4",
+            "2160p",
+            "1440p",
+            "1080p",
+            "720p",
+            "480p",
+            "360p",
+            "audio_best",
+            "audio_mp3",
+        ] {
+            assert_eq!(
+                sanitize_quality(Some(preset.to_string())).as_deref(),
+                Some(preset),
+                "preset dialog/overlay harus lolos"
+            );
+        }
+        // id format nyata dari `yt-dlp -J` (D6) — termasuk bentuk gabungan
+        assert_eq!(
+            sanitize_quality(Some("137+140".to_string())).as_deref(),
+            Some("137+140")
+        );
+        assert_eq!(
+            sanitize_quality(Some("bestvideo[height<=1080]".to_string())).as_deref(),
+            Some("bestvideo[height<=1080]")
+        );
+    }
+
+    /// v3.2.3 (A5): nilai cacat → `None` (unduhan tetap jalan dengan kualitas
+    /// default), bukan diteruskan ke `--format`.
+    #[test]
+    fn sanitize_quality_rejects_malformed_values() {
+        assert_eq!(sanitize_quality(None), None);
+        assert_eq!(sanitize_quality(Some(String::new())), None);
+        assert_eq!(sanitize_quality(Some("   ".to_string())), None);
+        // whitespace di tengah = dua argumen berbeda bagi mata user
+        assert_eq!(sanitize_quality(Some("best video".to_string())), None);
+        // kutip / backslash / control char
+        assert_eq!(sanitize_quality(Some("a\"b".to_string())), None);
+        assert_eq!(sanitize_quality(Some("a'b".to_string())), None);
+        assert_eq!(sanitize_quality(Some("a\\b".to_string())), None);
+        assert_eq!(sanitize_quality(Some("a\r\nb".to_string())), None);
+        // lebih dari MAX_QUALITY_LEN byte
+        assert_eq!(
+            sanitize_quality(Some("x".repeat(MAX_QUALITY_LEN + 1))),
+            None
+        );
+        assert_eq!(
+            sanitize_quality(Some("x".repeat(MAX_QUALITY_LEN))).as_deref(),
+            Some("x".repeat(MAX_QUALITY_LEN).as_str()),
+            "tepat di batas harus lolos"
+        );
+    }
+
+    /// v3.2.3 (A2): cabang "tidak ada cookie yang cocok" TIDAK boleh lagi
+    /// menghapus jar milik host itu. Test ini mengunci bahwa jar yang sudah
+    /// ada tetap utuh; pencabutan kredensial hanya terjadi lewat jalur
+    /// "client mengirim array kosong" (`cookies.is_empty()`), yang memang
+    /// niat eksplisit extension.
+    #[test]
+    fn no_matching_cookie_does_not_wipe_the_jar() {
+        // Simulasi: jar sudah ada untuk host lain; tulis untuk URL yang
+        // cookienya tersaring habis tidak boleh menyentuhnya.
+        let dir = std::env::temp_dir().join(format!("fastdm-a2-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let jar = dir.join("cookies_example.com.txt");
+        std::fs::write(&jar, "# Netscape HTTP Cookie File\n").unwrap();
+
+        // Cookie untuk host yang TIDAK cocok dengan URL request → count == 0
+        let cookies = vec![BrowserCookie {
+            name: "sid".into(),
+            value: "v".into(),
+            domain: "lain.com".into(),
+            path: "/".into(),
+            secure: false,
+            host_only: true,
+            expiration_date: None,
+        }];
+        let res = write_cookies_txt_in(&cookies, "https://example.com/a.zip", &dir);
+        assert!(res.is_err(), "harus melaporkan tidak ada cookie cocok");
+        assert!(
+            jar.exists(),
+            "jar yang sudah ada TIDAK boleh dihapus (regresi A2)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -315,10 +315,13 @@ async fn run_aria2c(
         while let Some(line) = lines.next_line().await {
             buf.push_str(&line);
             buf.push('\n');
-            // Batasi 16 KB (pertahankan yang terbaru) — log error bisa
-            // sangat panjang untuk download yang bermasalah
-            if buf.len() > 16 * 1024 {
-                let cut = buf.len() - 8 * 1024;
+            // Batasi 8 KB (pertahankan 4 KB terbaru) — log error bisa sangat
+            // panjang untuk download yang bermasalah, dan buffer ini hidup per
+            // unduhan aktif. v3.2.3 (B8): diturunkan dari 16 KB/8 KB; yang
+            // benar-benar dibutuhkan user adalah Ekor log (baris penyebab
+            // kegagalan ada di akhir), bukan 16 KB pertama.
+            if buf.len() > 8 * 1024 {
+                let cut = buf.len() - 4 * 1024;
                 let drop = buf[..cut].find('\n').map(|i| i + 1).unwrap_or(cut);
                 buf.drain(..drop);
             }
@@ -852,7 +855,7 @@ pub(crate) fn cookie_header_for(url: &str) -> Option<String> {
             Ok(value) => value,
             Err(_) => continue,
         };
-        if expires < 0 || (expires > 0 && expires <= now) {
+        if cookie_expired(expires, now) {
             continue;
         }
 
@@ -896,6 +899,22 @@ fn valid_cookie_header_field(value: &str, is_value: bool) -> bool {
             ch.is_control() || (!is_value && (ch == '=' || ch == ';' || ch.is_whitespace()))
         })
         && (!is_value || !value.contains(';'))
+}
+
+/// v3.2.3 (A9): apakah timestamp kedaluwarsa cookie Netscape sudah lewat.
+///
+/// Ekspresi lama `expires < 0 || (expires > 0 && expires <= now)` meloloskan
+/// `expires == 0`. Dalam format Netscape `0` berarti "session cookie" — umur
+/// sebenarnya tidak diketahui, dan writer kita (`ipc::write_cookies_txt`) selalu
+/// menulis timestamp nyata (TTL 24 jam untuk cookie sesi), jadi `0` hanya bisa
+/// datang dari file yang disunting manual atau dihasilkan alat lain. Memilih
+/// **fail-closed**: `0` dan nilai negatif dianggap kedaluwarsa sehingga cookie
+/// yang umurnya tidak bisa dipastikan tidak pernah dikirim ke server.
+///
+/// Dipisah sebagai fungsi murni supaya aturannya bisa di-unit test tanpa
+/// menulis file cookie sungguhan.
+pub(crate) fn cookie_expired(expires: i64, now: i64) -> bool {
+    expires <= 0 || expires <= now
 }
 
 pub(crate) fn is_generic_filename(name: &str) -> bool {
@@ -1042,6 +1061,24 @@ mod tests {
         assert!(valid_cookie_header_field("sid", false));
         assert!(!valid_cookie_header_field("sid=other", false));
         assert!(!valid_cookie_header_field("a;b", true));
+    }
+
+    /// v3.2.3 (A9): `expires == 0` (session cookie Netscape) dan nilai negatif
+    /// harus dianggap kedaluwarsa — fail-closed. Ekspresi lama
+    /// `expires < 0 || (expires > 0 && expires <= now)` meloloskan `0`,
+    /// sehingga cookie berumur tak diketahui tetap dikirim ke server.
+    #[test]
+    fn cookie_expiry_treats_zero_and_negative_as_expired() {
+        let now = 1_800_000_000i64;
+        assert!(
+            cookie_expired(0, now),
+            "0 = session cookie → jangan dipakai"
+        );
+        assert!(cookie_expired(-1, now));
+        assert!(cookie_expired(now, now), "tepat sekarang = sudah lewat");
+        assert!(cookie_expired(now - 1, now));
+        assert!(!cookie_expired(now + 1, now));
+        assert!(!cookie_expired(i64::MAX, now));
     }
 
     #[test]
