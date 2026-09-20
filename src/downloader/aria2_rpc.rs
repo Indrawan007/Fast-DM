@@ -536,7 +536,15 @@ pub(crate) fn patch_from_status(v: &Value) -> Patch {
             .unwrap_or("")
             .to_string();
         if !msg.is_empty() || !code.is_empty() {
-            error = Some(format!("[{}] {}", code, msg).trim().to_string());
+            // v3.2.4: errorCode daemon = exit code aria2c (manual aria2) —
+            // beri terjemahan yang sama dengan jalur per-proses.
+            let why = code
+                .parse::<i32>()
+                .ok()
+                .and_then(aria2::describe_aria2_exit)
+                .map(|w| format!("{w} — "))
+                .unwrap_or_default();
+            error = Some(format!("[{}] {}{}", code, why, msg).trim().to_string());
         }
     }
     let first_file = v

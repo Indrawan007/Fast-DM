@@ -3,6 +3,29 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.2.4] - 2026-09-20
+
+Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.
+
+### Fixed
+
+- **File `.zip`/`.rar` dari file-host gagal "HTTP 403 — bukan file video"** —
+  pra-cek `resolve_filename` (GET `Range: bytes=0-0` via reqwest) menganggap
+  SEMUA status non-2xx sebagai bukti unduhan tidak mungkin, padahal banyak
+  CDN/file-host menolak _probe_ itu (anti-bot sidik jari TLS, hotlink
+  protection yang menolak `Range`, server tanpa dukungan `HEAD`) sementara
+  aria2 sendiri berhasil. Kini probe non-2xx dicoba ulang dengan `HEAD` tanpa
+  `Range`; bila masih gagal hanya **404/410** yang menghentikan unduhan
+  (`probe_verdict`, fungsi murni + test). Kode lain (401/403/405/416/429/5xx)
+  diserahkan ke aria2 dengan catatan status "Pra-cek HTTP … diabaikan".
+- **Pesan error menyebut "video" untuk file arsip** — teks pra-cek 404 dan HTML
+  tidak lagi berasumsi file video.
+- **`aria2c exit code: 22` tanpa penjelasan** — exit code aria2 (jalur
+  per-proses) dan `errorCode` daemon RPC kini diterjemahkan
+  (`describe_aria2_exit`: 22 → "server menolak permintaan (HTTP 403/401…)",
+  9 → "ruang disk tidak cukup", dst.) sehingga kegagalan yang sebenarnya
+  terbaca di UI.
+
 ## [3.2.3] - 2026-09-18
 
 Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.

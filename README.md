@@ -18,6 +18,16 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 - 🐧 **Multi-distro** — paket `.deb` (Debian/Ubuntu) **dan** `.pkg.tar.zst` (Arch/Manjaro/EndeavourOS); pesan "tool tidak terinstall" otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro
 
+## Perubahan v3.2.4
+
+- 📦 **Unduhan `.zip`/`.rar` dari file-host tidak lagi gagal "HTTP 403 — bukan
+  file video"** — pra-cek HTTP yang ditolak server (anti-bot / hotlink
+  protection / tanpa dukungan `Range`/`HEAD`) tidak lagi dianggap final; hanya
+  404/410 yang menghentikan unduhan, sisanya diserahkan ke aria2.
+- 💬 **Exit code aria2 diterjemahkan** — `aria2c gagal (exit 22): server
+menolak permintaan (HTTP 403/401…)` alih-alih angka mentah, di jalur
+  per-proses maupun daemon RPC.
+
 ## Perubahan v3.2.3
 
 Rilis perbaikan hasil audit kode menyeluruh — tidak ada fitur baru, tidak ada

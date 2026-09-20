@@ -445,7 +445,10 @@ async fn run_aria2c(
             format!("\n{}", err_detail.trim())
         };
         i.status = DownloadStatus::Error;
-        i.error_msg = format!("aria2c exit code: {}{}", exit_code, detail);
+        i.error_msg = match describe_aria2_exit(exit_code) {
+            Some(why) => format!("aria2c gagal (exit {exit_code}): {why}{detail}"),
+            None => format!("aria2c exit code: {exit_code}{detail}"),
+        };
         i.status_detail.clear();
         i.speed = 0;
         let _ = tx.send(DownloadEvent::Error(i.clone()));
@@ -692,12 +695,39 @@ pub(crate) async fn resolve_filename(
 
     // 0. Tolak halaman HTML / HTTP error — inilah penyebab "file .php" yang
     //    sebenarnya isi halaman web. Jangan pernah menyimpannya sebagai download.
-    if !resp.status().is_success() {
-        return Err(format!(
-            "Server menjawab HTTP {} — bukan file video (halaman error/protected).",
-            resp.status().as_u16()
-        ));
-    }
+    //
+    // v3.2.4: non-2xx pada PROBE bukan bukti unduhan akan gagal. Probe ini
+    // memakai client reqwest + `Range: bytes=0-0`; sejumlah file-host/CDN
+    // (anti-bot berbasis sidik jari TLS, hotlink-protection yang menolak
+    // Range, server yang tidak mengizinkan HEAD) menjawab 403/405/416/429
+    // untuk probe padahal aria2 — dengan cookie jar lengkap dan tanpa Range —
+    // berhasil. Dulu SEMUA non-2xx langsung Error terminal ("bukan file
+    // video", walau filenya .zip/.rar). Kini: coba ulang HEAD tanpa Range;
+    // bila masih gagal, hanya kode yang benar-benar terminal (404/410) yang
+    // menghentikan unduhan — sisanya diserahkan ke aria2, yang toh menolak
+    // non-2xx sendiri (exit 22/24) dengan pesan yang sebenarnya.
+    let resp = if resp.status().is_success() {
+        resp
+    } else {
+        let first = resp.status().as_u16();
+        let retry = match build_head().send().await {
+            Ok(r) if r.status().is_success() => Some(r),
+            _ => None,
+        };
+        match retry {
+            Some(r) => r,
+            None => match probe_verdict(first) {
+                ProbeVerdict::Fatal(msg) => return Err(msg),
+                ProbeVerdict::Proceed => {
+                    tracing::warn!("Pra-cek HTTP {} diabaikan — diserahkan ke aria2", first);
+                    let mut i = info.lock().await;
+                    i.status_detail =
+                        format!("Pra-cek HTTP {first} diabaikan — mencoba langsung lewat aria2…");
+                    return Ok(());
+                }
+            },
+        }
+    };
     let ct_raw = resp
         .headers()
         .get("content-type")
@@ -708,8 +738,9 @@ pub(crate) async fn resolve_filename(
     let is_html = ct == "text/html" || ct == "application/xhtml+xml" || ct.contains("text/html");
     if is_html {
         return Err(
-            "URL ini mengembalikan halaman web (HTML), bukan file video — posting/halaman situs \
-             (mis. *.php/*.html). Buka halaman video lalu klik tombol ⚡ Unduh di player."
+            "URL ini mengembalikan halaman web (HTML), bukan file — biasanya halaman login, \
+             halaman unduh berhitung-mundur, atau posting situs (mis. *.php/*.html). Buka \
+             halamannya di browser lalu klik tautan unduh langsungnya (atau ⚡ di player video)."
                 .to_string(),
         );
     }
@@ -793,6 +824,69 @@ pub(crate) async fn resolve_filename(
 
     tracing::info!("Final filename: {} (size: {})", i.filename, i.total_size);
     Ok(())
+}
+
+/// Keputusan pra-cek untuk status HTTP non-2xx (v3.2.4).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ProbeVerdict {
+    /// Sumber memang tidak ada — hentikan dengan pesan.
+    Fatal(String),
+    /// Bisa jadi hanya probe yang ditolak — biarkan aria2 mencoba.
+    Proceed,
+}
+
+/// Fungsi murni: hanya 404/410 yang dianggap bukti sumber tidak ada.
+/// 401/403/429/405/416/5xx sering hanya menolak *probe* (Range/HEAD/anti-bot)
+/// dan aria2 masih mungkin berhasil; kegagalan sesungguhnya akan dilaporkan
+/// aria2 lewat `describe_aria2_exit`.
+pub(crate) fn probe_verdict(status: u16) -> ProbeVerdict {
+    match status {
+        404 | 410 => ProbeVerdict::Fatal(format!(
+            "Server menjawab HTTP {status} — file tidak ditemukan (tautan mati/kedaluwarsa)."
+        )),
+        _ => ProbeVerdict::Proceed,
+    }
+}
+
+/// Terjemahan exit code aria2c (manual aria2, bagian EXIT STATUS) ke pesan
+/// yang bisa ditindaklanjuti user — dulu UI hanya menampilkan
+/// "aria2c exit code: 22" mentah.
+pub(crate) fn describe_aria2_exit(code: i32) -> Option<&'static str> {
+    Some(match code {
+        1 => "error tidak diketahui",
+        2 => "waktu habis (timeout)",
+        3 => "sumber tidak ditemukan (HTTP 404)",
+        4 => "aria2 menyerah — sumber tidak ditemukan berulang kali",
+        5 => "unduhan terlalu lambat (di bawah lowest-speed-limit)",
+        6 => "masalah jaringan",
+        7 => "unduhan belum selesai — proses dihentikan",
+        8 => "server tidak mendukung resume",
+        9 => "ruang disk tidak cukup",
+        10 => "panjang piece berbeda dari file .aria2 (resume tak cocok)",
+        11 => "file yang sama sedang diunduh",
+        12 => "torrent yang sama sedang diunduh",
+        13 => "file sudah ada",
+        14 => "gagal mengganti nama file",
+        15 => "gagal membuka file yang ada",
+        16 => "gagal membuat file baru / memotong file",
+        17 => "error I/O file",
+        18 => "gagal membuat direktori",
+        19 => "resolusi nama (DNS) gagal",
+        20 => "gagal mengurai metalink",
+        21 => "perintah FTP gagal",
+        22 => "server menolak permintaan (HTTP 403/401 atau header respons rusak)",
+        23 => "terlalu banyak redirect",
+        24 => "otorisasi HTTP gagal (401)",
+        25 => "gagal mengurai bencode",
+        26 => "torrent rusak",
+        27 => "URI magnet rusak",
+        28 => "opsi aria2 tidak sah",
+        29 => "server sibuk (HTTP 503) — coba lagi nanti",
+        30 => "permintaan RPC JSON rusak",
+        31 => "reserved",
+        32 => "checksum tidak cocok",
+        _ => return None,
+    })
 }
 
 /// Baca cookies.txt (Netscape) untuk domain URL → header "Cookie: ...".
@@ -1048,6 +1142,34 @@ pub(crate) fn parse_content_disposition(cd: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v3.2.4: 403 pada probe (Range/HEAD/anti-bot) bukan bukti file tidak
+    /// bisa diunduh — hanya 404/410 yang terminal. Regresi: .zip/.rar dari
+    /// file-host berproteksi hotlink dulu langsung "GAGAL — bukan file video".
+    #[test]
+    fn probe_verdict_only_fatal_for_not_found() {
+        for code in [401, 403, 405, 416, 429, 500, 502, 503] {
+            assert_eq!(probe_verdict(code), ProbeVerdict::Proceed, "HTTP {code}");
+        }
+        for code in [404, 410] {
+            match probe_verdict(code) {
+                ProbeVerdict::Fatal(msg) => {
+                    assert!(msg.contains(&code.to_string()));
+                    assert!(!msg.contains("video"), "pesan tidak boleh menyebut video");
+                }
+                ProbeVerdict::Proceed => panic!("HTTP {code} harus fatal"),
+            }
+        }
+    }
+
+    #[test]
+    fn aria2_exit_codes_are_described() {
+        assert!(describe_aria2_exit(22).unwrap().contains("403"));
+        assert!(describe_aria2_exit(9).unwrap().contains("disk"));
+        assert!(describe_aria2_exit(0).is_none());
+        assert!(describe_aria2_exit(-1).is_none());
+        assert!(describe_aria2_exit(99).is_none());
+    }
 
     #[test]
     fn cookie_scope_helpers_match_scheme_path_and_domain() {
