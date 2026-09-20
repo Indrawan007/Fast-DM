@@ -891,8 +891,7 @@ pub(crate) fn describe_aria2_exit(code: i32) -> Option<&'static str> {
 
 /// Baca cookies.txt (Netscape) untuk domain URL → header "Cookie: ...".
 /// Supaya resolve & aria2 memakai sesi login yang sama dengan browser.
-/// `pub(crate)`: v2.9.0 (B2.2) juga dipakai jalur RPC sebagai opsi per-URI
-/// `cookie` di `addUri` (daemon global tidak boleh menyentuh domain lain).
+/// Hanya untuk probe metadata; transfer memakai jar Netscape via --load-cookies.
 pub(crate) fn cookie_header_for(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") {

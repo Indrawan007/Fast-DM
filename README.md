@@ -18,6 +18,25 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 - 🐧 **Multi-distro** — paket `.deb` (Debian/Ubuntu) **dan** `.pkg.tar.zst` (Arch/Manjaro/EndeavourOS); pesan "tool tidak terinstall" otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro
 
+## Perubahan v3.2.5
+
+- **Perbaikan cookie login pada unduhan HTTP 403/401** — opsi RPC `cookie`
+  yang tidak didukung aria2 dihapus. Unduhan dengan jar cookie kini memakai
+  proses aria2 terpisah dengan `--load-cookies`, sehingga aturan domain,
+  path, Secure, dan kedaluwarsa tetap berlaku saat redirect. Unduhan tanpa
+  jar cookie tetap memakai daemon RPC. Untuk jalur cookie, pembagian limit
+  kecepatan dihitung saat proses dimulai, bukan diubah live oleh daemon.
+
+### Jika server masih mengembalikan HTTP 403
+
+Buka kembali halaman sumber, login bila diperlukan, lalu klik tautan unduh
+baru lewat extension Fast-DM agar cookie dan Referer dikirim ulang. Menempel
+URL saja tidak membawa sesi browser; tombol **Ulangi** juga tidak memperbarui
+link yang kedaluwarsa. Jangan membagikan cookie atau URL bertoken di laporan
+bug. Jika hanya browser yang berhasil (misalnya CAPTCHA/anti-bot atau tautan
+sekali pakai), nonaktifkan intersepsi extension sementara dan unduh melalui
+browser. Perbaikan ini tidak melewati pembatasan akses server.
+
 ## Perubahan v3.2.4
 
 - 📦 **Unduhan `.zip`/`.rar` dari file-host tidak lagi gagal "HTTP 403 — bukan

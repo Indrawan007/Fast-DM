@@ -319,3 +319,58 @@ fn case_insensitive_normalization() {
 fn find_cookies_skipped_on_non_linux() {
     eprintln!("find_cookies_file integration test di-skip di platform ini");
 }
+
+/// Cookie-dependent transfers must reach the CLI before any daemon/probe I/O.
+/// The CLI loads the scoped Netscape jar; RPC has no per-task cookie option.
+#[cfg(target_os = "linux")]
+#[test]
+fn rpc_cookie_download_falls_back_before_network_io() {
+    use fast_dm::downloader::aria2_rpc::{download, RpcOutcome};
+    use fast_dm::downloader::types::{DownloadInfo, DownloadStatus};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex as AsyncMutex};
+
+    let tmp = make_tempdir();
+    let _env = EnvGuard::new(&tmp);
+    write_cookie_file(&cookie_path("example.com"));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        // Test exact host and parent-domain lookup. Even an empty jar must
+        // use CLI: applicable cookies may be set during the redirect chain.
+        for host in ["example.com", "cdn.example.com"] {
+            let info = Arc::new(AsyncMutex::new(DownloadInfo::new(
+                "cookie-test".into(),
+                format!("https://{host}/private.zip"),
+                "private.zip".into(),
+                tmp.to_string_lossy().into_owned(),
+                HashMap::new(),
+                None,
+            )));
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                download(info.clone(), tx.clone(), &Config::default()),
+            )
+            .await
+            .expect("cookie fallback must not start a daemon or HTTP probe");
+            assert_eq!(outcome, RpcOutcome::Fallback);
+            assert_eq!(info.lock().await.status, DownloadStatus::Queued);
+            assert!(info.lock().await.rpc_gid.is_none());
+            assert!(rx.try_recv().is_err());
+
+            for status in [DownloadStatus::Paused, DownloadStatus::Cancelled] {
+                info.lock().await.status = status;
+                assert_eq!(
+                    download(info.clone(), tx.clone(), &Config::default()).await,
+                    RpcOutcome::Done
+                );
+                assert_eq!(info.lock().await.status, status);
+            }
+        }
+    });
+    cleanup_tempdir(&tmp);
+}

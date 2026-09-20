@@ -3,6 +3,22 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.2.5] - 2026-09-21
+
+### Fixed
+
+- **Cookie login hilang pada jalur daemon aria2 (HTTP 403/401)** — hapus
+  opsi `cookie` dari `addUri` karena bukan opsi per-task yang didukung.
+  Unduhan HTTP(S) dengan jar cookie dialihkan sebelum probe/daemon ke
+  proses aria2 terpisah dengan `--load-cookies`. Tidak menggantinya dengan
+  header Cookie mentah yang bisa bocor saat redirect lintas domain.
+  GID lama harus dihapus sebelum berpindah backend; jika pembersihan gagal,
+  transfer tidak dimulai untuk menghindari dua penulis file yang sama.
+- Test regresi untuk pemilihan backend dengan jar domain/subdomain,
+  pause/cancel, dan ketiadaan opsi cookie yang tidak didukung pada RPC.
+- Dokumentasikan pemulihan link/sesi browser serta batasan 403 anti-bot dan
+  limit kecepatan pada jalur per-proses.
+
 ## [3.2.4] - 2026-09-20
 
 Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.

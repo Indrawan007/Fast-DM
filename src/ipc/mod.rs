@@ -86,7 +86,7 @@ const MAX_REQUEST_LINE: usize = 1024 * 1024;
 ///    (`background.js`, `content.js`, `popup.js`). Cookie sudah punya jalur
 ///    sendiri yang lebih aman: field `cookies`+`domain` → file Netscape
 ///    per-domain 0600 (`write_cookies_txt`) → `--load-cookies`/`--cookies`/
-///    opsi per-URI `cookie`. Lewat header, cookie justru berakhir di argv
+///    proses aria2 terpisah. Lewat header, cookie justru berakhir di argv
 ///    proses (terbaca di `/proc/<pid>/cmdline`) dan — sebelum v2.10.0 — ikut
 ///    tertulis ke `session.json`.
 /// 2. **Kredensial tidak perlu menempuh jalur ini sama sekali**, jadi

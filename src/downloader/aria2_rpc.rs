@@ -15,8 +15,8 @@
 //!
 //! PERILAKU B2.2: http/https/ftp melewati pipeline `aria2.rs` (resolve
 //! filename + tolak HTML/non-2xx + pre-check disk) SEBELUM `addUri`, lalu
-//! cookie per-domain & header (mis. Referer) dikirim sebagai OPSI PER-URI
-//! (`cookie`/`header`) — daemon global tidak menyentuh domain lain. Bila
+//! header (mis. Referer) dikirim sebagai opsi per-URI. Unduhan dengan jar
+//! cookie memakai proses terpisah (--load-cookies), bukan daemon global. Bila
 //! daemon tak tersedia (mis. `rpc_port` bentrok) atau `addUri` ditolak
 //! SEBELUM unduhan berjalan, `download` return `RpcOutcome::Fallback` dan
 //! pemanggil boleh jatuh ke jalur per-proses lama.
@@ -42,7 +42,8 @@ pub enum RpcOutcome {
     /// Jalur RPC menangani unduhan sampai terminal — Completed/Error sudah
     /// dikirim, atau user pause/cancel. Pemanggil tidak perlu aksi lain.
     Done,
-    /// Daemon tak tersedia ATAU `addUri` ditolak, SEMUA sebelum unduhan
+    /// Cookie memerlukan proses terpisah, daemon tak tersedia, atau `addUri`
+    /// ditolak, SEMUA sebelum unduhan
     /// berjalan — pemanggil boleh fallback ke jalur per-proses.
     Fallback,
 }
@@ -250,7 +251,6 @@ pub(crate) fn daemon_args(port: u16, _secret: &str, cfg: &Config) -> Vec<String>
 pub(crate) fn adduri_options(
     save_dir: &str,
     filename: Option<&str>,
-    cookie: Option<&str>,
     headers: &HashMap<String, String>,
     cfg: &Config,
 ) -> Value {
@@ -265,11 +265,6 @@ pub(crate) fn adduri_options(
     o.insert("follow-torrent".into(), json!("false"));
     if let Some(f) = filename.filter(|f| !f.is_empty()) {
         o.insert("out".into(), json!(f));
-    }
-    // Cookie per-domain (walk-up dari file extension) — daemon global tidak
-    // boleh memakai cookie domain lain untuk URI ini.
-    if let Some(c) = cookie.map(str::trim).filter(|c| !c.is_empty()) {
-        o.insert("cookie".into(), json!(c));
     }
     // Header (mis. Referer) — strip \r\n anti injeksi, sama dengan jalur CLI.
     let hs: Vec<String> = headers
@@ -726,6 +721,32 @@ pub async fn download(
         (i.url.clone(), i.save_dir.clone())
     };
 
+    // aria2.addUri silently ignores the unsupported `cookie` option.
+    // `load-cookies` is startup-only; a raw Cookie header would leak across
+    // redirects. Use the isolated CLI cookie jar, preserving domain/path/Secure.
+    let has_cookie_jar = url::Url::parse(&url)
+        .ok()
+        .filter(|u| matches!(u.scheme(), "http" | "https"))
+        .and_then(|u| u.host_str().and_then(Config::find_cookies_file))
+        .is_some();
+    if has_cookie_jar {
+        let gid = info.lock().await.rpc_gid.clone();
+        if let Some(gid) = gid {
+            // Never leave a paused daemon task writing the same file later.
+            if let Err(e) = remove_gid(&gid, cfg).await {
+                fail(
+                    &info,
+                    &tx,
+                    format!("Gagal beralih ke unduhan dengan cookie: {e}"),
+                )
+                .await;
+                return RpcOutcome::Done;
+            }
+            info.lock().await.rpc_gid = None;
+        }
+        return RpcOutcome::Fallback;
+    }
+
     // B2.2: http/https/ftp — resolve filename + tolak halaman HTML +
     // pre-check disk (identik dengan pipeline per-proses; tanpa ini "file
     // .php" bisa masuk antrean RPC dan nama Content-Disposition/redirect
@@ -791,17 +812,13 @@ pub async fn download(
         tracing::debug!("changeGlobalOption (opsi tambahan) ditolak daemon: {e}");
     }
 
-    // B2.2: opsi per-URI — cookie per-domain + header (mis. Referer) +
+    // B2.2: opsi per-URI — header (mis. Referer) +
     // timeout/retry mengikuti Pengaturan.
-    let (out, cookie, headers) = {
+    let (out, headers) = {
         let i = info.lock().await;
-        (
-            Some(i.filename.clone()),
-            aria2::cookie_header_for(&url),
-            i.headers.clone(),
-        )
+        (Some(i.filename.clone()), i.headers.clone())
     };
-    let options = adduri_options(&save_dir, out.as_deref(), cookie.as_deref(), &headers, cfg);
+    let options = adduri_options(&save_dir, out.as_deref(), &headers, cfg);
 
     // pause-true dulu: hindari balapan "sudah jalan" sebelum tick pertama.
     // v2.9.1: pause/resume NATIVE — bila unduhan ini sebelumnya dijeda
@@ -1138,7 +1155,7 @@ mod tests {
 
     #[test]
     fn adduri_options_base_flags() {
-        let o = adduri_options("/dl", None, None, &HashMap::new(), &Config::default());
+        let o = adduri_options("/dl", None, &HashMap::new(), &Config::default());
         assert_eq!(o["dir"], "/dl");
         assert_eq!(o["pause"], "true");
         assert_eq!(o["continue"], "true");
@@ -1170,7 +1187,6 @@ mod tests {
         let o = adduri_options(
             "/dl",
             Some("a.torrent"),
-            None,
             &HashMap::new(),
             &Config::default(),
         );
@@ -1178,18 +1194,13 @@ mod tests {
     }
 
     #[test]
-    fn adduri_options_http_adds_out_cookie_header() {
+    fn adduri_options_http_adds_out_and_referer_without_cookie_option() {
         let mut headers = HashMap::new();
         headers.insert("Referer".to_string(), "https://site.com/page".to_string());
-        let o = adduri_options(
-            "/dl",
-            Some("video.mp4"),
-            Some("a=1; b=2"),
-            &headers,
-            &Config::default(),
-        );
+        let o = adduri_options("/dl", Some("video.mp4"), &headers, &Config::default());
         assert_eq!(o["out"], "video.mp4");
-        assert_eq!(o["cookie"], "a=1; b=2");
+        assert!(o.get("cookie").is_none());
+        assert!(o.get("load-cookies").is_none());
         assert_eq!(o["header"], json!(["Referer: https://site.com/page"]));
     }
 
@@ -1198,22 +1209,13 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("Evil\r\nX-Inject".to_string(), "y".to_string());
         headers.insert("Empty".to_string(), String::new());
-        let o = adduri_options("/dl", None, None, &headers, &Config::default());
+        let o = adduri_options("/dl", None, &headers, &Config::default());
         // CRLF di-strip per karakter — fragmen menyambung (perilaku sama dengan
         // jalur CLI): yang penting tidak ada CR/LF tersisa, sehingga header
         // baru tidak bisa disisipkan lewat nama header palsu.
         assert_eq!(o["header"], json!(["EvilX-Inject: y"]));
-        // Cookie kosong/whitespace saja tidak dikirim.
-        let o2 = adduri_options(
-            "/dl",
-            None,
-            Some("   "),
-            &HashMap::new(),
-            &Config::default(),
-        );
-        assert!(o2.get("cookie").is_none());
         // `out` kosong juga tidak dikirim.
-        let o3 = adduri_options("/dl", Some(""), None, &HashMap::new(), &Config::default());
+        let o3 = adduri_options("/dl", Some(""), &HashMap::new(), &Config::default());
         assert!(o3.get("out").is_none());
     }
 
@@ -1226,7 +1228,7 @@ mod tests {
             retry_wait: 7,
             ..Config::default()
         };
-        let o = adduri_options("/dl", None, None, &HashMap::new(), &cfg);
+        let o = adduri_options("/dl", None, &HashMap::new(), &cfg);
         assert_eq!(o["allow-overwrite"], "true");
         assert_eq!(o["timeout"], "60");
         assert_eq!(o["max-tries"], "9");
@@ -1244,7 +1246,7 @@ mod tests {
             max_connections: 8,
             ..Config::default()
         };
-        let o = adduri_options("/dl", None, None, &HashMap::new(), &cfg);
+        let o = adduri_options("/dl", None, &HashMap::new(), &cfg);
         assert_eq!(o["max-connection-per-server"], "8");
         assert_eq!(o["split"], "8");
         assert_eq!(o["auto-file-renaming"], "true");
@@ -1259,7 +1261,7 @@ mod tests {
             max_connections: 32,
             ..Config::default()
         };
-        let o = adduri_options("/dl", None, None, &HashMap::new(), &cfg);
+        let o = adduri_options("/dl", None, &HashMap::new(), &cfg);
         assert_eq!(o["max-connection-per-server"], "16");
         assert_eq!(o["split"], "32");
     }
@@ -1273,12 +1275,12 @@ mod tests {
             verify_tls: false,
             ..Config::default()
         };
-        let o = adduri_options("/dl", None, None, &HashMap::new(), &cfg);
+        let o = adduri_options("/dl", None, &HashMap::new(), &cfg);
         assert_eq!(o["all-proxy"], "socks5://127.0.0.1:1080");
         assert_eq!(o["check-certificate"], "false");
 
         // Default (tanpa proxy, TLS diverifikasi) tidak mengirim keduanya.
-        let d = adduri_options("/dl", None, None, &HashMap::new(), &Config::default());
+        let d = adduri_options("/dl", None, &HashMap::new(), &Config::default());
         assert!(d.get("all-proxy").is_none());
         assert!(d.get("check-certificate").is_none());
     }
