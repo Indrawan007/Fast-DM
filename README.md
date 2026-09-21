@@ -18,6 +18,18 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 - 🐧 **Multi-distro** — paket `.deb` (Debian/Ubuntu) **dan** `.pkg.tar.zst` (Arch/Manjaro/EndeavourOS); pesan "tool tidak terinstall" otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro
 
+## Perubahan v3.2.7
+
+- 🔁 **Link lama tidak lagi diunduh ulang (dan Fast DM tidak lagi terbuka
+  sendiri) setiap kali browser dibuka** — Chrome memancarkan
+  `downloads.onCreated` untuk setiap entri riwayat unduhan saat start, dan
+  extension memperlakukannya sebagai unduhan baru. Kini hanya unduhan yang
+  benar-benar `in_progress` yang di-intercept; entri riwayat (`complete` /
+  `interrupted`, termasuk sisa unduhan `.zip` yang gagal di v3.2.2) diabaikan.
+  Setelah memperbarui, **reload extension** di `chrome://extensions` atau
+  restart browser. Entri lama di `chrome://downloads` tidak dihapus otomatis —
+  bersihkan manual bila perlu.
+
 ## Perubahan v3.2.6
 
 - Extension kini mengirim User-Agent browser bersama cookie dan Referer untuk

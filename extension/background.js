@@ -722,8 +722,24 @@ function filenameHasInterceptedExt(filename) {
   return allExts.some((ext) => lower.endsWith(ext));
 }
 
+// v3.2.7: `onCreated` BUKAN hanya untuk unduhan baru. Saat browser start,
+// Chrome memuat riwayat unduhan dari disk dan memancarkan `onCreated` untuk
+// SETIAP entri lama — state-nya `complete` atau `interrupted`, bukan
+// `in_progress`. Tanpa guard ini entri riwayat diperlakukan seperti unduhan
+// baru: cancel (gagal, item sudah terminal → `onChanged` tidak pernah datang →
+// erase tidak pernah dipanggil → entri tetap ada), lalu `sendDownload` →
+// native host tidak menemukan socket → menyalakan GUI → URL lama diunduh
+// ulang. Diulang pada SETIAP start browser karena entrinya tidak pernah
+// hilang. Entri yang tertinggal berasal dari v3.2.2 (erase di dalam callback
+// cancel ditolak Chrome) dan dari jalur fallback `saveAs`.
+function isLiveDownload(downloadItem) {
+  return downloadItem.state === "in_progress";
+}
+
 chrome.downloads.onCreated.addListener(async (downloadItem) => {
   if (!config.enabled || !config.interceptDownloads) return;
+
+  if (!isLiveDownload(downloadItem)) return;
 
   const url = downloadItem.finalUrl || downloadItem.url;
   if (!url || url.startsWith("blob:") || url.startsWith("data:")) return;

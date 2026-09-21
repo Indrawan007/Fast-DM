@@ -380,6 +380,8 @@ test("intercepted download is erased only after it reports interrupted", async (
   // Handler `onCreated` bersifat async dan menunggu balasan native host
   // (mock `setTimeout` di VM tidak menjadwalkan apa pun), jadi JANGAN di-await
   // di sini — panggil lalu flush microtask, sama seperti test lain di suite ini.
+  // `state: "in_progress"` = unduhan BARU (bukan entri riwayat) — lihat test
+  // "history entries replayed by onCreated" untuk kebalikannya.
   void b.onDownloadsCreated({
     id: 42,
     url: "https://example.com/movie.mp4",
@@ -388,6 +390,7 @@ test("intercepted download is erased only after it reports interrupted", async (
     fileSize: 10_485_760,
     mime: "video/mp4",
     referrer: "https://example.com/watch",
+    state: "in_progress",
   });
   await flushed();
 
@@ -431,6 +434,7 @@ test("intercepted download is erased only after it reports interrupted", async (
     filename: "/home/user/Downloads/other.mp4",
     fileSize: 10_485_760,
     mime: "video/mp4",
+    state: "in_progress",
   });
   await flushed();
   assert.deepEqual(b.cancelled, [42, 43]);
@@ -457,6 +461,7 @@ test("fallback download uses saveAs without a conflicting filename", async () =>
     fileSize: 10_485_760,
     mime: "application/x-iso9660-image",
     referrer: "https://example.com/",
+    state: "in_progress",
   });
   await new Promise(setImmediate);
 
@@ -475,6 +480,83 @@ test("fallback download uses saveAs without a conflicting filename", async () =>
     "tanpa field filename yang akan diabaikan Chrome",
   );
   assert.deepEqual(Object.keys(b.downloaded[0]).sort(), ["saveAs", "url"]);
+});
+
+// v3.2.7: saat browser start, Chrome memuat riwayat unduhan dari disk dan
+// memancarkan `downloads.onCreated` untuk SETIAP entri lama (state `complete`
+// / `interrupted`) — bukan hanya unduhan baru. Tanpa pemeriksaan `state`,
+// handler intersep memperlakukan entri riwayat itu sebagai unduhan baru:
+// `sendNativeMessage` → native host menyalakan GUI → URL lama diunduh ulang
+// pada setiap start browser. Entri yang tertinggal berasal dari v3.2.2 (erase
+// di dalam callback cancel ditolak Chrome → entri "dibatalkan" tetap di
+// riwayat) dan dari jalur fallback `saveAs`.
+test("history entries replayed by onCreated at startup are not re-sent to Fast DM", async () => {
+  const b = background();
+  const flushed = () => new Promise(setImmediate);
+
+  // Entri v3.2.2: di-intercept + cancel, tetapi erase gagal → tertinggal.
+  void b.onDownloadsCreated({
+    id: 501,
+    url: "https://files.example/archive-01.zip",
+    finalUrl: "https://cdn.example/dl/archive-01.zip?token=old",
+    filename: "/home/user/Downloads/archive-01.zip",
+    fileSize: 52_428_800,
+    mime: "application/zip",
+    referrer: "https://files.example/folder",
+    state: "interrupted",
+    error: "USER_CANCELED",
+    exists: false,
+  });
+  // Entri fallback `saveAs` yang dulu selesai lewat Chrome.
+  void b.onDownloadsCreated({
+    id: 502,
+    url: "https://files.example/archive-02.zip",
+    finalUrl: "https://files.example/archive-02.zip",
+    filename: "/home/user/Downloads/archive-02.zip",
+    fileSize: 52_428_800,
+    mime: "application/zip",
+    state: "complete",
+    exists: true,
+  });
+  await flushed();
+
+  assert.equal(
+    b.requests.length,
+    0,
+    "entri riwayat TIDAK boleh dikirim ke native host (memicu GUI + unduh ulang)",
+  );
+  assert.deepEqual(b.cancelled, [], "tidak ada cancel untuk entri riwayat");
+  assert.deepEqual(b.downloaded, [], "tidak ada fallback untuk entri riwayat");
+  assert.deepEqual(b.badges, [], "tidak ada badge pending saat startup");
+
+  // Unduhan BARU untuk URL yang sama tetap di-intercept — pemeriksaan state
+  // tidak boleh mematikan intersepsi normal.
+  void b.onDownloadsCreated({
+    id: 503,
+    url: "https://files.example/archive-01.zip",
+    finalUrl: "https://cdn.example/dl/archive-01.zip?token=new",
+    filename: "/home/user/Downloads/archive-01.zip",
+    fileSize: 52_428_800,
+    mime: "application/zip",
+    referrer: "https://files.example/folder",
+    state: "in_progress",
+    exists: false,
+  });
+  await flushed();
+
+  assert.deepEqual(
+    b.cancelled,
+    [503],
+    "unduhan baru tetap dibatalkan di Chrome",
+  );
+  assert.equal(b.requests.length, 1, "unduhan baru tetap dikirim ke Fast DM");
+  assert.equal(
+    b.requests[0].message.url,
+    "https://cdn.example/dl/archive-01.zip?token=new",
+  );
+  b.requests[0].callback({ success: true });
+  await flushed();
+  assert.equal(b.badges.at(-1), "⬇");
 });
 
 for (const variant of ["browser", "explicit", "no-navigator"]) {

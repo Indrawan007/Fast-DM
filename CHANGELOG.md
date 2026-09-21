@@ -3,6 +3,49 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.2.7] - 2026-09-21
+
+Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.
+
+### Fixed
+
+- **Link lama (termasuk yang dulu gagal) diunduh ulang dan Fast DM ikut
+  terbuka sendiri pada setiap start browser** — Chrome memancarkan
+  `chrome.downloads.onCreated` bukan hanya untuk unduhan baru, tetapi juga
+  untuk **setiap entri riwayat unduhan** yang dimuat dari disk saat browser
+  start (state `complete`/`interrupted`). Handler intersep di
+  `extension/background.js` tidak memeriksa `downloadItem.state`, sehingga
+  entri riwayat ber-ekstensi `.zip`/`.rar`/dll. diperlakukan seperti unduhan
+  baru: `cancel` (tidak berefek, item sudah terminal — `onChanged` tidak
+  pernah datang, `erase` tidak pernah dipanggil, entri tetap ada), lalu
+  `sendDownload` → native host tidak menemukan socket GUI → **menyalakan Fast
+  DM** → URL lama masuk antrean dan diunduh ulang. Karena entrinya tidak
+  pernah hilang dari riwayat, siklus ini terulang pada **setiap** start
+  browser. Entri yang memicu berasal dari v3.2.2: saat itu `erase` dipanggil
+  di dalam callback `cancel` dan ditolak Chrome (diperbaiki v3.2.3), sehingga
+  setiap unduhan `.zip` yang di-intercept — termasuk yang lalu gagal "HTTP 403"
+  (diperbaiki v3.2.4) — meninggalkan entri `interrupted` di riwayat; jalur
+  fallback `saveAs` juga meninggalkan entri serupa. `onCreated` kini
+  **hanya memproses item `in_progress`** (`isLiveDownload`); entri riwayat
+  diabaikan tanpa cancel, tanpa fallback, tanpa badge. Unduhan baru untuk
+  URL yang sama tetap di-intercept seperti biasa.
+- Entri riwayat lama yang sudah telanjur ada TIDAK dihapus otomatis — extension
+  tidak bisa membedakannya dari unduhan yang dibatalkan user sendiri. Bila
+  ingin membersihkan shelf, hapus lewat `chrome://downloads` → "Hapus semua".
+  Setelah memperbarui, **reload extension** (`chrome://extensions`) atau
+  restart browser agar service worker baru dimuat.
+
+### Tests
+
+- `tests/extension.test.cjs` — test baru `history entries replayed by
+onCreated at startup are not re-sent to Fast DM`: memutar ulang entri
+  `interrupted` (USER_CANCELED, jejak v3.2.2) dan `complete` (jejak fallback
+  `saveAs`) lalu memastikan **tidak ada** `sendNativeMessage`, `cancel`,
+  `download`, maupun badge; unduhan `in_progress` untuk URL yang sama tetap
+  di-intercept. Fixture `onCreated` pada test lama kini menyertakan
+  `state: "in_progress"` seperti objek `DownloadItem` Chrome yang sebenarnya.
+  Suite Node: 17 → **18** test.
+
 ## [3.2.6] - 2026-09-21
 
 ### Fixed
