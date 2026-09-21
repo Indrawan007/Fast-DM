@@ -485,11 +485,25 @@ async function sendDownload(
     }
   }
 
+  // Keep the browser identity alongside its cookies. Some sessions are tied
+  // to User-Agent; the downloader's hardcoded fallback may not match it.
+  // Clone so callers' headers stay unchanged; preserve explicit UA overrides.
+  const requestHeaders = { ...headers };
+  if (
+    !Object.keys(requestHeaders).some(
+      (key) => key.toLowerCase() === "user-agent",
+    ) &&
+    typeof navigator !== "undefined" &&
+    navigator.userAgent
+  ) {
+    requestHeaders["User-Agent"] = navigator.userAgent;
+  }
+
   const message = {
     action: "download",
     url: url,
     filename: filename,
-    headers: headers,
+    headers: requestHeaders,
     extension_id: chrome.runtime.id,
   };
 

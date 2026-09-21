@@ -3,6 +3,18 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.2.6] - 2026-09-21
+
+### Fixed
+
+- Extension meneruskan User-Agent browser bersama cookie dan Referer, bukan
+  membiarkan backend memakai fallback hardcoded untuk semua unduhan. Ini
+  mengurangi perbedaan identitas pada situs yang mengikat sesi ke User-Agent;
+  bukan jaminan melewati penolakan HTTP 403 atau proteksi anti-bot.
+- Header User-Agent eksplisit dipertahankan tanpa duplikasi beda kapitalisasi,
+  dan objek header pemanggil tidak dimutasi. Test mencakup intersepsi browser,
+  override, serta lingkungan tanpa navigator.
+
 ## [3.2.5] - 2026-09-21
 
 ### Fixed

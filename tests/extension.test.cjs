@@ -136,6 +136,7 @@ function background(cookieJar = [], sniffedCandidates = []) {
   };
   const context = vm.createContext({
     URL,
+    navigator: { userAgent: "FastDM-Test-Browser/150.0" },
     setTimeout: () => 1,
     clearTimeout: () => {},
     console: {
@@ -397,6 +398,14 @@ test("intercepted download is erased only after it reports interrupted", async (
     "erase TIDAK boleh langsung (item in_progress)",
   );
   assert.equal(b.requests.length, 1, "unduhan dikirim ke native host");
+  assert.equal(
+    b.requests[0].message.headers["User-Agent"],
+    "FastDM-Test-Browser/150.0",
+  );
+  assert.equal(
+    b.requests[0].message.headers.Referer,
+    "https://example.com/watch",
+  );
 
   // Delta yang tidak relevan (masih berjalan) tidak boleh memicu erase.
   b.onDownloadsChanged({ id: 42, state: { current: "in_progress" } });
@@ -467,3 +476,44 @@ test("fallback download uses saveAs without a conflicting filename", async () =>
   );
   assert.deepEqual(Object.keys(b.downloaded[0]).sort(), ["saveAs", "url"]);
 });
+
+for (const variant of ["browser", "explicit", "no-navigator"]) {
+  test(`download forwards User-Agent safely: ${variant}`, async () => {
+    const b = background();
+    const headers = { Referer: "https://example.com/post/1" };
+    if (variant === "explicit") headers["uSeR-aGeNt"] = "ExplicitBrowser/1.0";
+    if (variant === "no-navigator") delete b.context.navigator;
+    const original = { ...headers };
+    const response = new Promise((resolve) =>
+      b.onMessage(
+        { action: "download", url: "https://example.com/file.zip", headers },
+        {},
+        resolve,
+      ),
+    );
+    await new Promise(setImmediate);
+    const sent = b.requests[0].message.headers;
+    const uaKeys = Object.keys(sent).filter(
+      (key) => key.toLowerCase() === "user-agent",
+    );
+    assert.equal(sent.Referer, headers.Referer);
+    assert.deepEqual(headers, original, "caller headers must not be mutated");
+    if (variant === "no-navigator") {
+      assert.equal(uaKeys.length, 0);
+    } else {
+      assert.equal(
+        uaKeys.length,
+        1,
+        "must not send duplicate User-Agent headers",
+      );
+      assert.equal(
+        sent[uaKeys[0]],
+        variant === "explicit"
+          ? "ExplicitBrowser/1.0"
+          : "FastDM-Test-Browser/150.0",
+      );
+    }
+    b.requests[0].callback({ success: true });
+    assert.equal((await response).success, true);
+  });
+}

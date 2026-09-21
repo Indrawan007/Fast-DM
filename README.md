@@ -18,6 +18,16 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 - 🐧 **Multi-distro** — paket `.deb` (Debian/Ubuntu) **dan** `.pkg.tar.zst` (Arch/Manjaro/EndeavourOS); pesan "tool tidak terinstall" otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro
 
+## Perubahan v3.2.6
+
+- Extension kini mengirim User-Agent browser bersama cookie dan Referer untuk
+  mengurangi perbedaan sesi browser versus downloader. Header eksplisit tetap
+  dihormati. Setelah memperbarui aplikasi, **reload extension** di halaman
+  pengelolaan ekstensi browser dan mulai unduhan baru dari halaman sumber;
+  item lama tidak otomatis mendapat User-Agent terbaru.
+- Perubahan ini tidak meniru sidik jari TLS browser atau menyelesaikan CAPTCHA.
+  Jika server masih menolak aria2, gunakan browser dengan intersepsi dimatikan.
+
 ## Perubahan v3.2.5
 
 - **Perbaikan cookie login pada unduhan HTTP 403/401** — opsi RPC `cookie`
