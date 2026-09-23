@@ -31,22 +31,35 @@ optdepends=(
   'xclip: monitor clipboard di sesi X11'
   'wl-clipboard: monitor clipboard di sesi Wayland'
   'chrome: browser untuk extension Native Messaging'
-)
-makedepends=('cargo' 'rust')
+)makedepends=('cargo' 'rust')
+# Arch mengaktifkan lto+debug+CFLAGS di /etc/makepkg.conf. cargo build
+# --release di job CI yang sama (tanpa flag itu) lolos, lalu makepkg gagal
+# di build() dengan exit 4: -flto / RUSTFLAGS debug memecahkan link crate
+# campur Rust/C (ring, gtk-sys). Rust LTO tetap jalan lewat Cargo.toml
+# [profile.release]; yang dimatikan hanya LTO C/C++ milik makepkg.
+options=('!buildflags' '!lto' '!debug')
 source=("$pkgname-$pkgver.tar.gz")
 # Checksum diisi pembuat tarball lokal; paket ini dibangun dari working tree,
 # bukan dari rilis upstream, jadi SKIP (sama pola-nya dengan build lokal lain).
 sha256sums=('SKIP')
+# Jaring kedua di samping options=(!buildflags !lto !debug): bila makepkg
+# atau environment induk tetap mengekspor flag, buang sebelum cargo jalan
+# supaya invokasi ini sama dengan `cargo build` yang sudah lolos di CI.
+unset_makepkg_rust_flags() {
+  unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS DEBUG_RUSTFLAGS \
+    CFLAGS CXXFLAGS LDFLAGS CPPFLAGS
+}
 build() {
   cd "$srcdir/$pkgname-$pkgver"
+  unset_makepkg_rust_flags
   # --locked: pakai Cargo.lock apa adanya — sama seperti CI (ci.yml),
   # release.yml, dan packaging/build-deb.sh. LTO / codegen-units / strip /
-  # panic=abort sudah diatur Cargo.toml [profile.release], jadi CFLAGS/RUSTFLAGS
-  # dari makepkg.conf tidak perlu diubah di sini.
+  # panic=abort sudah diatur Cargo.toml [profile.release].
   cargo build --release --locked --target-dir "$srcdir/target"
 }
 check() {
   cd "$srcdir/$pkgname-$pkgver"
+  unset_makepkg_rust_flags
   # Unit test + integration test Rust. --target-dir sama dengan build()
   # supaya artefak test tidak dikompilasi ulang dari nol.
   cargo test --locked --target-dir "$srcdir/target"

@@ -3,6 +3,41 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.2.8] - 2026-09-23
+
+Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.
+
+### Fixed
+
+- **CI job extension merah sejak v3.2.3** — langkah `Check for undeclared
+identifiers` menjalankan `node tools/check-undeclared.cjs`, tetapi berkas
+  itu tidak pernah ada di repo (`MODULE_NOT_FOUND`, exit 1). Pemeriksa
+  ber-scope (acorn, dua lintasan: kumpulkan binding, lalu selesaikan referensi)
+  ditambahkan beserta self-test yang menolak fixture `videoMenu` tak
+  terdeklarasi — kelas bug yang mematikan context menu di v3.2.2 dan lolos
+  `node --check`.
+- **`cargo audit` merah sejak v3.2.1** — `rustls` 0.23.42
+  (RUSTSEC-2026-0285, pesan handshake TLS 1.3 di batas enkripsi yang salah)
+  dan `h2` 0.4.15 (RUSTSEC-2026-0258, DATA frame kosong tak terbatas).
+  Lockfile dinaikkan ke `rustls` 0.23.45, `rustls-webpki` 0.103.15 (syarat
+  `^0.103.14` dari rustls baru), dan `h2` 0.4.19. Tidak ada perubahan
+  `Cargo.toml`: ketiganya dependensi transitif reqwest. `chacha20` 0.10.1
+  yang di-yank ikut dinaikkan ke 0.10.2 supaya `cargo deny` (`yanked = "deny"`)
+  tidak gagal di langkah berikutnya.
+- **Paket Arch gagal `makepkg` (exit 4) sejak job itu ditambahkan di v3.2.0**
+  — `/etc/makepkg.conf` mengaktifkan `lto` dan `debug`. `cargo build` di job
+  yang sama, tanpa flag itu, lolos; di dalam `build()` link crate campur
+  Rust/C (`ring`, `gtk-sys`) ditolak. PKGBUILD kini memakai
+  `options=('!buildflags' '!lto' '!debug')` dan membuang `RUSTFLAGS`/`CFLAGS`
+  sebelum cargo, sehingga invokasi sama dengan build yang sudah hijau. LTO
+  Rust di `Cargo.toml` `[profile.release]` tidak diubah.
+
+### Tests
+
+- `tools/check-undeclared.cjs` menjalankan self-test sebelum memindai
+  `extension/*.js`: `videoMenu` tak terdeklarasi wajib dilaporkan, binding
+  yang sah (`const`, `var` ter-hoist, `chrome`, shorthand, label) tidak.
+
 ## [3.2.7] - 2026-09-21
 
 Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.
