@@ -151,18 +151,27 @@ fn desktop_to_browser(desktop: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn cookie_args(url: &str) -> Vec<String> {
-    // B7: cookies per-domain dari extension (fresh < COOKIE_FRESH_SECS = 24 jam,
-    // disamakan dengan TTL yang ditulis ipc::write_cookies_txt — lihat catatan
-    // di konstanta itu) → pakai file itu.
+    // B7: cookies per-domain dari extension (fresh < 24 jam, disamakan dengan
+    // TTL yang ditulis ipc::write_cookies_txt) → pakai file itu.
     // Pencarian naik ke domain induk (sub.example.com → example.com) karena
     // extension menyimpan cookies memakai host halaman, sedangkan file video
     // kadang ada di subdomain CDN yang berbeda.
+    // M7: normalisasi host (lowercase + strip www.) sebelum lookup — sebelumnya
+    // host mentah bisa "WWW.Example.COM" sehingga lookup gagal padahal file ada.
     if let Some(host) = url::Url::parse(url)
         .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
     {
-        if let Some(cookies_file) = Config::find_cookies_file(&host) {
-            if is_fresh_cookie_file(&cookies_file) {
+        let normalized = host.trim_start_matches("www.").to_string();
+        if let Some(cookies_file) = Config::find_fresh_cookies_file(&normalized) {
+            return vec![
+                "--cookies".into(),
+                cookies_file.to_string_lossy().to_string(),
+            ];
+        }
+        // Fallback coba host asli bila normalisasi tidak cocok (defensif)
+        if normalized != host {
+            if let Some(cookies_file) = Config::find_fresh_cookies_file(&host) {
                 return vec![
                     "--cookies".into(),
                     cookies_file.to_string_lossy().to_string(),
@@ -179,36 +188,14 @@ pub(crate) fn cookie_args(url: &str) -> Vec<String> {
     vec![]
 }
 
-/// Cookie file ada (isi bukan hanya header) dan belum kedaluwarsa.
-///
-/// v2.9.3: ambang disamakan dengan TTL yang benar-benar ditulis
-/// `ipc::write_cookies_txt` (24 jam). Sebelumnya 2 jam — file yang masih
-/// berlaku menurut isinya sudah dianggap basi, sehingga yt-dlp jatuh ke
-/// `--cookies-from-browser` yang justru sering gagal saat browser berjalan
-/// (database profil terkunci) → unduhan login-protected gagal tanpa sebab
-/// yang jelas bagi user. GC 7 hari di `Config::gc_stale_cookies` tetap jadi
-/// jaring pengaman terakhir.
-const COOKIE_FRESH_SECS: u64 = 24 * 3600;
-
 /// Bagian murni dari `is_fresh_cookie_file` (bisa di-unit test tanpa filesystem).
 /// Header Netscape = 29 byte; > 30 berarti minimal ada satu baris cookie.
+/// Wrapper Config::COOKIE_FRESH_SECS supaya test tetap lokal tanpa IO.
 fn cookie_file_is_fresh(len: u64, age_secs: u64) -> bool {
-    len > 30 && age_secs < COOKIE_FRESH_SECS
+    len > 30 && age_secs < Config::COOKIE_FRESH_SECS
 }
 fn is_fresh_cookie_file(path: &std::path::Path) -> bool {
-    match std::fs::metadata(path) {
-        Ok(meta) => {
-            // mtime tidak terbaca → anggap basi (jangan pakai cookie ragu).
-            let age = meta
-                .modified()
-                .ok()
-                .and_then(|m| m.elapsed().ok())
-                .map(|e| e.as_secs())
-                .unwrap_or(u64::MAX);
-            cookie_file_is_fresh(meta.len(), age)
-        }
-        Err(_) => false,
-    }
+    Config::is_fresh_cookie_file(path)
 }
 
 pub(crate) fn output_template(save_dir: &str, filename: &str) -> String {

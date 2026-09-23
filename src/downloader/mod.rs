@@ -209,6 +209,9 @@ impl DownloadEngine {
     /// Simpan config ke disk + apply live (berlaku untuk download baru)
     pub async fn update_config(&self, cfg: Config) -> Result<(), String> {
         // Validasi input sebelum disimpan — nilai invalid bikin aria2 gagal start
+        if !crate::config::is_valid_download_dir(&cfg.download_dir) {
+            return Err("Folder unduhan harus path absolut tanpa '..'".into());
+        }
         if cfg.max_connections == 0 || cfg.max_connections > 32 {
             return Err("Koneksi harus 1–32".into());
         }
@@ -217,6 +220,9 @@ impl DownloadEngine {
         }
         if cfg.timeout == 0 {
             return Err("Timeout harus > 0".into());
+        }
+        if cfg.rpc_port == 0 {
+            return Err("RPC port harus > 0 (default 6800)".into());
         }
         if cfg.max_overall_speed != "0" && !is_valid_speed_limit(&cfg.max_overall_speed) {
             return Err("Speed limit tidak valid (contoh: 0, 512K, 2M)".into());
@@ -248,13 +254,20 @@ impl DownloadEngine {
         quality: Option<String>,
     ) -> String {
         let id = format!("dl_{}", &Uuid::new_v4().to_string()[..8]);
-        let save = match save_dir {
+        let mut save = match save_dir {
             Some(d) => d.to_string(),
             None => self.config.read().await.download_dir.clone(),
         };
+        // K6: validasi save_dir — jika invalid, fallback ke download_dir config.
+        if !crate::config::is_valid_download_dir(&save) {
+            tracing::warn!("save_dir invalid '{}', fallback ke config download_dir", save);
+            save = self.config.read().await.download_dir.clone();
+        }
 
-        // Ensure save dir exists
-        let _ = std::fs::create_dir_all(&save);
+        // Ensure save dir exists — M5: log bila gagal, jangan diam
+        if let Err(e) = std::fs::create_dir_all(&save) {
+            tracing::warn!("Gagal membuat folder '{}': {}", save, e);
+        }
 
         let fname = filename
             .map(sanitize_filename)
@@ -1339,10 +1352,13 @@ fn load_session() -> Vec<DownloadInfo> {
                 // M5: jangan buang riwayat diam-diam — singkirkan file rusak
                 // supaya (a) user bisa recovery manual, (b) flush berikutnya
                 // tidak terus-menerus membaca ulang sampah.
+                // L: pakai millis + random agar tidak tabrakan.
+                let rnd: String = uuid::Uuid::new_v4().simple().to_string()[..4].to_string();
                 let backup = format!(
-                    "{}.corrupt-{}",
+                    "{}.corrupt-{}-{}",
                     path.display(),
-                    chrono::Utc::now().timestamp()
+                    chrono::Utc::now().timestamp_millis(),
+                    rnd
                 );
                 tracing::warn!(
                     "session.json tidak bisa dibaca — dipindah ke {backup} untuk recovery manual"
@@ -1476,9 +1492,10 @@ async fn flush_session(
 
 /// Validasi format --max-overall-download-limit aria2: angka, atau angka + K/M/G (opsional)
 /// contoh: "0", "512K", "2M", "10G"
+/// M1: tolak spasi di tengah ("512 K") — aria2 tidak menerima spasi internal.
 pub(crate) fn is_valid_speed_limit(s: &str) -> bool {
     let s = s.trim();
-    if s.is_empty() {
+    if s.is_empty() || s.chars().any(|c| c.is_whitespace()) {
         return false;
     }
     let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
@@ -1498,7 +1515,14 @@ pub fn sanitize_filename(name: &str) -> String {
     let cleaned = cleaned.trim_matches(|c: char| c == '.' || c == ' ');
 
     if cleaned.is_empty() {
-        format!("download_{}", chrono::Utc::now().timestamp())
+        // K8: timestamp detik rawan tabrakan bila dua nama invalid di detik sama.
+        // Pakai millis + 4 char random agar unik.
+        let rnd: String = uuid::Uuid::new_v4().simple().to_string()[..4].to_string();
+        format!(
+            "download_{}_{}",
+            chrono::Utc::now().timestamp_millis(),
+            rnd
+        )
     } else if cleaned.len() > 200 {
         // v2.10.5 (bugfix): pertahankan ekstensi saat memotong. Potongan mentah
         // 200 char bisa membuang ".mp4"/".zip"/".mkv" di ujung nama panjang
@@ -1585,7 +1609,13 @@ pub fn extract_filename_from_url(url: &str) -> String {
         }
     }
 
-    format!("download_{}", chrono::Utc::now().timestamp())
+    // K9: sama seperti sanitize_filename — hindari tabrakan detik.
+    let rnd: String = uuid::Uuid::new_v4().simple().to_string()[..4].to_string();
+    format!(
+        "download_{}_{}",
+        chrono::Utc::now().timestamp_millis(),
+        rnd
+    )
 }
 
 #[cfg(test)]

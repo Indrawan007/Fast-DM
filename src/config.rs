@@ -67,14 +67,61 @@ struct ConfigFile {
 
 fn parse_config(content: &str) -> Result<Config, String> {
     let value: serde_json::Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
-    if value.get("version").is_some() || value.get("settings").is_some() {
+    let mut cfg = if value.get("version").is_some() || value.get("settings").is_some() {
         let file: ConfigFile = serde_json::from_value(value).map_err(|e| e.to_string())?;
         if file.version != CONFIG_FILE_VERSION {
             return Err(format!("versi config tidak didukung: {}", file.version));
         }
-        return Ok(file.settings);
+        file.settings
+    } else {
+        serde_json::from_value(value).map_err(|e| e.to_string())?
+    };
+    // K10: validasi di level load — config hasil edit manual yang invalid
+    // jangan sampai membuat aria2 gagal start tanpa pesan. Fallback ke default
+    // untuk field yang rusak, supaya app tetap bisa jalan.
+    if !is_valid_download_dir(&cfg.download_dir) {
+        tracing::warn!(
+            "download_dir invalid '{}', fallback ke default",
+            cfg.download_dir
+        );
+        cfg.download_dir = Config::default().download_dir;
     }
-    serde_json::from_value(value).map_err(|e| e.to_string())
+    if cfg.max_connections == 0 || cfg.max_connections > 32 {
+        cfg.max_connections = Config::default().max_connections;
+    }
+    if cfg.max_concurrent == 0 || cfg.max_concurrent > 10 {
+        cfg.max_concurrent = Config::default().max_concurrent;
+    }
+    if cfg.timeout == 0 {
+        cfg.timeout = Config::default().timeout;
+    }
+    if cfg.rpc_port == 0 {
+        cfg.rpc_port = Config::default().rpc_port;
+    }
+    if !cfg.proxy_url.trim().is_empty() && !is_valid_proxy_url(&cfg.proxy_url) {
+        tracing::warn!("proxy_url invalid '{}', dihapus", cfg.proxy_url);
+        cfg.proxy_url.clear();
+    }
+    if !cfg.max_overall_speed.trim().is_empty()
+        && cfg.max_overall_speed != "0"
+        && !is_valid_speed_limit_cfg(&cfg.max_overall_speed)
+    {
+        cfg.max_overall_speed = "0".into();
+    }
+    Ok(cfg)
+}
+
+fn is_valid_speed_limit_cfg(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.chars().any(|c| c.is_whitespace()) {
+        return false;
+    }
+    let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let num_ok = !num.is_empty() && num.parse::<u64>().is_ok();
+    if !unit.is_empty() && !matches!(unit.to_ascii_uppercase().as_str(), "K" | "M" | "G") {
+        return false;
+    }
+    num_ok
 }
 
 fn default_rpc_port() -> u16 {
@@ -174,6 +221,12 @@ impl Config {
         let p = dir.join("rpc.secret");
         if let Some(s) = Self::read_rpc_secret(&p) {
             return s;
+        }
+        // File ada tapi invalid (kosong/kepanjangan) → hapus agar bisa diganti fresh.
+        // Tanpa ini secret tidak stabil: tiap start menghasilkan fresh berbeda
+        // sementara file invalid tetap di disk.
+        if p.exists() {
+            let _ = fs::remove_file(&p);
         }
         let fresh = uuid::Uuid::new_v4().simple().to_string()[..16].to_string();
         if fs::create_dir_all(dir).is_err() {
@@ -398,6 +451,7 @@ impl Config {
     /// config parameterisasi — dipakai `ipc::write_cookies_txt_in` agar test
     /// tidak menyentuh `~/.config` nyata, dan sanitasi nama host tetap SATU
     /// sumber (tidak disalin di dua tempat).
+    /// L: batasi panjang nama host aman agar tidak melebihi batas filesystem.
     pub(crate) fn cookies_file_in_host(dir: &Path, host: &str) -> PathBuf {
         let safe: String = host
             .chars()
@@ -409,13 +463,50 @@ impl Config {
                 }
             })
             .collect();
-        dir.join(format!("cookies_{safe}.txt"))
+        // Potong di 200 char agar nama file tidak terlalu panjang (batas umum 255)
+        let truncated = if safe.len() > 200 {
+            safe[..200].to_string()
+        } else {
+            safe
+        };
+        dir.join(format!("cookies_{truncated}.txt"))
     }
 
     fn is_current_cookie_file(path: &Path) -> bool {
         fs::read_to_string(path)
             .ok()
             .is_some_and(|text| text.lines().any(|line| line.trim() == COOKIE_FILE_HEADER))
+    }
+
+    /// TTL cookie yang ditulis extension (24 jam) — dipakai yt-dlp & aria2.
+    pub const COOKIE_FRESH_SECS: u64 = 24 * 3600;
+
+    /// Apakah file cookie masih fresh (isi bukan hanya header + umur < 24 jam).
+    /// Dipakai jalur aria2 & yt-dlp agar cookie basi tidak memaksa fallback
+    /// ke per-proses atau mem-bypass daemon tanpa alasan.
+    pub fn is_fresh_cookie_file(path: &Path) -> bool {
+        match fs::metadata(path) {
+            Ok(meta) => {
+                let age = meta
+                    .modified()
+                    .ok()
+                    .and_then(|m| m.elapsed().ok())
+                    .map(|e| e.as_secs())
+                    .unwrap_or(u64::MAX);
+                meta.len() > 30 && age < Self::COOKIE_FRESH_SECS
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Cari file cookie yang fresh — wrapper `find_cookies_file` + freshness.
+    pub fn find_fresh_cookies_file(host: &str) -> Option<PathBuf> {
+        let p = Self::find_cookies_file(host)?;
+        if Self::is_fresh_cookie_file(&p) {
+            Some(p)
+        } else {
+            None
+        }
     }
 
     /// Snapshot config saat pertama kali dipanggil (proses berumur pendek =
@@ -439,8 +530,25 @@ impl Config {
                     Ok(content) => match parse_config(&content) {
                         Ok(cfg) => cfg,
                         Err(e) => {
-                            // Jangan diam-diam reset config user — log dan lanjut default
-                            tracing::warn!("Config rusak/tidak cocok ({e}), pakai default");
+                            // v3.2.9-fix: backup file corrupt agar user bisa recovery,
+                            // jangan diam-diam timpa dengan default.
+                            // M8: pakai millis + random agar tidak tabrakan bila dua
+                            // corrupt dalam detik sama.
+                            let rnd: String =
+                                uuid::Uuid::new_v4().simple().to_string()[..4].to_string();
+                            let backup = path.with_extension(format!(
+                                "corrupt-{}-{}.json",
+                                chrono::Utc::now().timestamp_millis(),
+                                rnd
+                            ));
+                            // Coba copy, kalau gagal coba rename; best-effort.
+                            if fs::copy(&path, &backup).is_err() {
+                                let _ = fs::rename(&path, &backup);
+                            }
+                            tracing::warn!(
+                                "Config rusak/tidak cocok ({e}), backup ke {} lalu pakai default",
+                                backup.display()
+                            );
                             Config::default()
                         }
                     },
@@ -514,7 +622,7 @@ impl Config {
 /// (Port opsional — socks server bisa pakai default 1080.)
 pub fn is_valid_proxy_url(s: &str) -> bool {
     let s = s.trim();
-    if s.is_empty() {
+    if s.is_empty() || s.len() > 2048 {
         return false;
     }
     match url::Url::parse(s) {
@@ -526,6 +634,36 @@ pub fn is_valid_proxy_url(s: &str) -> bool {
         }
         Err(_) => false,
     }
+}
+
+/// v3.2.9-fix K6: validasi folder unduhan — harus absolute, tidak kosong,
+/// tidak mengandung control char, dan tidak mengandung komponen `..`.
+/// Dipakai `update_config` dan `add_download` agar path aneh tidak membuat
+/// aria2 gagal dengan pesan tidak jelas atau menulis ke lokasi tak terduga.
+/// M6: tolak root "/" dan "/tmp" (terlalu berbahaya) serta path sangat pendek.
+pub fn is_valid_download_dir(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 4096 {
+        return false;
+    }
+    if s.chars().any(|c| c.is_control()) {
+        return false;
+    }
+    let p = Path::new(s);
+    if !p.is_absolute() {
+        return false;
+    }
+    // Tolak root dan /tmp langsung — user pasti tidak ingin download ke sana.
+    if s == "/" || s == "/tmp" {
+        return false;
+    }
+    // Tolak `..` sebagai komponen — meski absolute, bisa mengelabui user.
+    for comp in p.components() {
+        if matches!(comp, std::path::Component::ParentDir) {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]

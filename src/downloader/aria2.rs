@@ -238,10 +238,10 @@ fn build_aria2_cmd(
 
     // Cookies dari browser extension (Netscape format, file per-domain,
     // termasuk domain induk) — aria2 otomatis hanya memakai cookie yang
-    // cocok dengan domain target
+    // cocok dengan domain target. v3.2.9-fix: hanya fresh (24 jam).
     if let Ok(u) = url::Url::parse(&info.url) {
         if let Some(host) = u.host_str() {
-            if let Some(cookies) = Config::find_cookies_file(host) {
+            if let Some(cookies) = Config::find_fresh_cookies_file(host) {
                 cmd.push(format!("--load-cookies={}", cookies.display()));
             }
         }
@@ -932,7 +932,7 @@ pub(crate) fn cookie_header_for(url: &str) -> Option<String> {
     } else {
         parsed.path()
     };
-    let path = Config::find_cookies_file(&host)?;
+    let path = Config::find_fresh_cookies_file(&host)?;
     let text = std::fs::read_to_string(&path).ok()?;
     let now = chrono::Utc::now().timestamp();
     let mut pairs: Vec<String> = Vec::new();
@@ -1122,9 +1122,15 @@ pub(crate) fn unique_filename(name: &str, exists: impl Fn(&str) -> bool) -> Stri
             return candidate;
         }
     }
-    // 999 kandidat terpakai (praktis mustahil) — fallback timestamp tetap
-    // menjaga ekstensi asli, jangan pernah menghasilkan nama tanpa ekstensi.
-    format!("{stem} ({}){ext}", chrono::Utc::now().timestamp_millis())
+    // 999 kandidat terpakai (praktis mustahil) — fallback timestamp + random
+    // agar tidak tabrakan bila dua unduhan memanggil di ms yang sama (K7).
+    // Tetap jaga ekstensi asli, jangan pernah menghasilkan nama tanpa ekstensi.
+    let rnd: String = uuid::Uuid::new_v4().simple().to_string()[..6].to_string();
+    format!(
+        "{stem} ({}-{}){ext}",
+        chrono::Utc::now().timestamp_millis(),
+        rnd
+    )
 }
 
 fn content_type_to_ext(ct: &str) -> Option<&'static str> {

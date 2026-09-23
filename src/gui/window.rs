@@ -337,7 +337,7 @@ pub fn build_window(
         let rt_clip = rt.clone();
         let weak_window = window.downgrade();
         glib::spawn_future_local(async move {
-            let mut cached_tool: Option<Option<&'static str>> = None;
+            let mut cached_tool: Option<&'static str> = None;
             loop {
                 glib::timeout_future(std::time::Duration::from_millis(2500)).await;
                 if weak_window.upgrade().is_none() {
@@ -351,36 +351,36 @@ pub fn build_window(
                 let result = rt_clip
                     .spawn(async move {
                         let tool = match cached_tool {
-                            Some(tool) => tool,
+                            Some(t) => Some(t),
                             None => clipboard_probe().await,
                         };
                         let text = match tool {
-                            Some(tool) => clipboard_text(tool).await,
+                            Some(t) => clipboard_text(t).await,
                             None => None,
                         };
                         (tool, text)
                     })
                     .await;
                 let Ok((tool, text)) = result else { continue };
-                if tool.is_none() {
-                    // v3.2.3 (A3): dulu `break` — loop mati permanen begitu
-                    // xclip/wl-paste tidak ditemukan SEKALI. User yang memasang
-                    // tool-nya kemudian (lalu mengaktifkan toggle di Pengaturan)
-                    // tetap tidak mendapat banner sampai aplikasi di-restart,
-                    // padahal toggle-nya terlihat aktif. Sekarang: jangan cache
-                    // hasil "tidak ada", lewati tick ini, dan probe lagi pada
-                    // tick berikutnya (2,5 dtk — biaya `command -v` sepele dan
-                    // hanya terjadi selama fitur ini dinyalakan).
+                if let Some(t) = tool {
+                    cached_tool = Some(t);
+                } else {
+                    // v3.2.3 (A3) fix v2: jangan cache None — probe lagi next tick.
+                    cached_tool = None;
                     continue;
                 }
-                cached_tool = Some(tool);
                 // Pengaturan bisa dimatikan ketika request masih berjalan.
                 if !en.get() {
                     ban_t.set_visible(false);
                     *pend_t.borrow_mut() = None;
                     continue;
                 }
-                let Some(txt) = text else { continue };
+                // M3: jika tool ada tapi text None = tool hilang/timeout → re-probe next tick
+                let Some(txt) = text else {
+                    // Jika clipboard_text gagal (tool hilang), kosongkan cache agar probe ulang
+                    cached_tool = None;
+                    continue;
+                };
                 if txt == *last_t.borrow() {
                     continue;
                 }
@@ -1168,7 +1168,8 @@ where
     content.set_margin_start(20);
     content.set_margin_end(20);
 
-    // ── C1: folder unduhan + tombol "Pilih Folder…" ──
+    // ── C1: folder unduhan + tombol "Pilih Folder…" + K6 validasi ──
+    let folder_box = GtkBox::new(Orientation::Vertical, 4);
     let folder_row = GtkBox::new(Orientation::Horizontal, 8);
     let folder_entry = Entry::new();
     folder_entry.set_text(&cur.download_dir);
@@ -1200,7 +1201,14 @@ where
 
     folder_row.append(&folder_entry);
     folder_row.append(&browse_btn);
-    content.append(&settings_row("Folder unduhan", &folder_row));
+    let folder_error = Label::new(Some(""));
+    folder_error.add_css_class("error-label");
+    folder_error.set_halign(gtk4::Align::Start);
+    folder_error.set_wrap(true);
+    folder_error.set_visible(false);
+    folder_box.append(&folder_row);
+    folder_box.append(&folder_error);
+    content.append(&settings_row("Folder unduhan", &folder_box));
 
     let conn_spin = gtk4::SpinButton::with_range(1.0, 32.0, 1.0);
     conn_spin.set_value(cur.max_connections as f64);
@@ -1240,13 +1248,22 @@ where
 
     // ── v2.4.0 (D3): proxy untuk semua engine (aria2 --all-proxy ·
     // yt-dlp --proxy). Kredensial boleh di dalam URL proxy.
+    // M2: validasi inline proxy seperti speed & folder.
+    let proxy_box = GtkBox::new(Orientation::Vertical, 4);
     let proxy_entry = Entry::new();
     proxy_entry.set_text(&cur.proxy_url);
     proxy_entry.set_placeholder_text(Some(
         "http://127.0.0.1:8080 · socks5://host:1080 — kosong = tanpa proxy",
     ));
     proxy_entry.set_hexpand(true);
-    content.append(&settings_row("Proxy", &proxy_entry));
+    let proxy_error = Label::new(Some(""));
+    proxy_error.add_css_class("error-label");
+    proxy_error.set_halign(gtk4::Align::Start);
+    proxy_error.set_wrap(true);
+    proxy_error.set_visible(false);
+    proxy_box.append(&proxy_entry);
+    proxy_box.append(&proxy_error);
+    content.append(&settings_row("Proxy", &proxy_box));
 
     // v2.4.0 (D1): toggle deteksi clipboard
     let clip_chk = gtk4::CheckButton::with_label(
@@ -1286,10 +1303,22 @@ where
     });
 
     // A2: validasi INLINE sebelum dialog ditutup — user tahu field mana yang salah
+    // K6: validasi folder unduhan juga inline. M2: proxy inline.
     let dialog_weak = dialog.downgrade();
     let speed_entry_save = speed_entry.clone();
     let speed_error_save = speed_error.clone();
+    let folder_entry_save = folder_entry.clone();
+    let folder_error_save = folder_error.clone();
+    let proxy_entry_save = proxy_entry.clone();
+    let proxy_error_save = proxy_error.clone();
     save_btn.connect_clicked(move |_| {
+        let dir = folder_entry_save.text().trim().to_string();
+        if !dir.is_empty() && !crate::config::is_valid_download_dir(&dir) {
+            folder_error_save.set_text("Folder harus path absolut tanpa '..' (contoh: /home/user/Downloads)");
+            folder_error_save.set_visible(true);
+            return;
+        }
+        folder_error_save.set_visible(false);
         let speed = speed_entry_save.text().trim().to_string();
         if !speed.is_empty() && !crate::downloader::is_valid_speed_limit(&speed) {
             speed_error_save.set_text("Format tidak valid — gunakan: 0, 512K, 2M, 10G");
@@ -1297,6 +1326,13 @@ where
             return; // dialog tetap terbuka
         }
         speed_error_save.set_visible(false);
+        let proxy = proxy_entry_save.text().trim().to_string();
+        if !proxy.is_empty() && !crate::config::is_valid_proxy_url(&proxy) {
+            proxy_error_save.set_text("Proxy tidak valid — contoh: http://127.0.0.1:8080, socks5://host:1080");
+            proxy_error_save.set_visible(true);
+            return;
+        }
+        proxy_error_save.set_visible(false);
         if let Some(d) = dialog_weak.upgrade() {
             d.response(gtk4::ResponseType::Ok);
         }
@@ -1306,6 +1342,14 @@ where
     let speed_error_hide = speed_error.clone();
     speed_entry.connect_changed(move |_| {
         speed_error_hide.set_visible(false);
+    });
+    let folder_error_hide = folder_error.clone();
+    folder_entry.connect_changed(move |_| {
+        folder_error_hide.set_visible(false);
+    });
+    let proxy_error_hide = proxy_error.clone();
+    proxy_entry.connect_changed(move |_| {
+        proxy_error_hide.set_visible(false);
     });
 
     btn_box.append(&cancel_btn);
