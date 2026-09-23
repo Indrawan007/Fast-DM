@@ -208,9 +208,12 @@ fn build_aria2_cmd(
         "--continue=true".into(),
         // Konfigurasi auto_file_renaming sebelumnya diabaikan (hardcoded
         // false) — file tabrakan SELALU ditimpa. Sekarang dihormati:
-        // default true → tabrakan menjadi "file (1).ext". allow-overwrite
-        // harus berlawanan: kalau overwrite=true, aria2 menimpa SEBELUM
-        // sempat auto-rename.
+        // default true → tabrakan menjadi "file (1).ext" — bentuk itu dipilih
+        // SENDIRI oleh Fast-DM di `resolve_filename` (`unique_filename`,
+        // v3.2.9) SEBELUM aria2 jalan; `--auto-file-renaming` di sini tinggal
+        // jaring pengaman bila ada proses lain yang membuat file di antara
+        // pre-check dan start. allow-overwrite harus berlawanan: kalau
+        // overwrite=true, aria2 menimpa SEBELUM sempat auto-rename.
         format!("--allow-overwrite={}", !config.auto_file_renaming),
         format!("--auto-file-renaming={}", config.auto_file_renaming),
     ];
@@ -822,6 +825,32 @@ pub(crate) async fn resolve_filename(
         }
     }
 
+    // 5. v3.2.9: resolusi tabrakan gaya browser SEBELUM backend berjalan.
+    //    Tanpa langkah ini aria2 (`--auto-file-renaming`) yang memutuskan
+    //    sendiri dan menyisipkan ".1"/".2" di antara stem dan ekstensi —
+    //    unduhan ulang `eee.mp4` menjadi `eee.1.mp4`, `eee.2.mp4`, dst.,
+    //    nama rusak berantai titik sementara GUI tetap menampilkan nama lama.
+    //    Lihat `unique_filename` untuk detailnya.
+    //
+    //    Pengecualian: file yang BERDAMPINGAN dengan control file `.aria2`
+    //    adalah unduhan kita sendiri yang berhenti di tengah (pause/crash) —
+    //    itu target RESUME, bukan tabrakan; mengganti namanya akan
+    //    meninggalkan parsial + memulai ulang dari nol.
+    //    `auto_file_renaming` mati → nama dipertahankan; backend sudah
+    //    diberi allow-overwrite=true sehingga file lama ditimpa.
+    if config.auto_file_renaming {
+        let dir = i.save_dir.clone();
+        let chosen = unique_filename(&i.filename, |candidate| {
+            let target = std::path::Path::new(&dir).join(candidate);
+            target.exists()
+                && !std::path::Path::new(&format!("{}.aria2", target.display())).exists()
+        });
+        if chosen != i.filename {
+            tracing::info!("Tabrakan nama: {} → {}", i.filename, chosen);
+            i.filename = chosen;
+        }
+    }
+
     tracing::info!("Final filename: {} (size: {})", i.filename, i.total_size);
     Ok(())
 }
@@ -1047,6 +1076,55 @@ pub(crate) fn is_generic_filename(name: &str) -> bool {
         return true;
     }
     false
+}
+
+/// v3.2.9: nama bebas tabrakan gaya browser — `eee.mp4` → `eee (1).mp4` →
+/// `eee (2).mp4` → …
+///
+/// Sebelum ini Fast-DM TIDAK punya resolusi tabrakan sendiri: setiap unduhan
+/// diberi `--out=<nama>` lalu diserahkan penuh ke `--auto-file-renaming`
+/// aria2. Skema aria2 menyisipkan titik + angka DI ANTARA stem dan ekstensi
+/// (manual aria2: "a dot and a number appended after the name, but before the
+/// file extension") sehingga unduhan ulang `eee.mp4` menjadi `eee.1.mp4`,
+/// `eee.2.mp4`, dst. — nama terlihat rusak berantai titik sebelum `.mp4`
+/// (keluhan user: "eee.eee.eee.mp4"), dan GUI tetap menampilkan nama lama
+/// karena sinkronisasi nama dari backend hanya terjadi untuk nama generic.
+/// Komentar di `build_aria2_cmd` bahkan mengklaim hasilnya "file (1).ext" —
+/// bentuk yang tidak pernah dibuat aria2.
+///
+/// Kini Fast-DM memilih namanya sendiri SEBELUM backend berjalan (dipanggil
+/// dari `resolve_filename`, satu choke-point jalur per-proses & daemon RPC):
+/// UI, `session.json`, dan file di disk selalu memakai SATU nama yang sama.
+/// Sufiks counter memakai spasi + kurung gaya browser (`eee (1).mp4`) yang
+/// tidak mungkin dibaca sebagai ekstensi ganda.
+///
+/// Fungsi murni (predikat `exists` disuntikkan) supaya bisa di-unit test
+/// tanpa menyentuh filesystem. `name` dijamin sudah disanitasi
+/// (`sanitize_filename`: tanpa '/', tanpa titik di ujung).
+pub(crate) fn unique_filename(name: &str, exists: impl Fn(&str) -> bool) -> String {
+    if !exists(name) {
+        return name.to_string();
+    }
+    // Semantik ekstensi std::path: ".bashrc" TIDAK punya ekstensi (stem-nya
+    // ".bashrc" utuh) — sama dengan cara browser memperlakukan dotfile, dan
+    // ekstensi majemuk dipotong di titik terakhir ("archive.tar.gz" →
+    // "archive.tar (1).gz", perilaku Chrome).
+    let path = std::path::Path::new(name);
+    let ext_len = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.len() + 1) // +1 untuk titik pemisah
+        .unwrap_or(0);
+    let (stem, ext) = name.split_at(name.len() - ext_len);
+    for n in 1..1000u32 {
+        let candidate = format!("{stem} ({n}){ext}");
+        if !exists(&candidate) {
+            return candidate;
+        }
+    }
+    // 999 kandidat terpakai (praktis mustahil) — fallback timestamp tetap
+    // menjaga ekstensi asli, jangan pernah menghasilkan nama tanpa ekstensi.
+    format!("{stem} ({}){ext}", chrono::Utc::now().timestamp_millis())
 }
 
 fn content_type_to_ext(ct: &str) -> Option<&'static str> {
@@ -1577,6 +1655,77 @@ mod tests {
                 name
             );
         }
+    }
+
+    // ── unique_filename (v3.2.9: resolusi tabrakan gaya browser) ──
+
+    #[test]
+    fn unique_filename_keeps_free_name_untouched() {
+        assert_eq!(unique_filename("eee.mp4", |_| false), "eee.mp4");
+        assert_eq!(unique_filename("eee", |_| false), "eee");
+    }
+
+    #[test]
+    fn unique_filename_uses_browser_style_counter_not_dotted_number() {
+        // Regresi keluhan user "eee.eee.eee.mp4": unduhan ulang file yang sama
+        // tidak boleh lagi memakai skema aria2 yang menyisipkan ".1"/".2" di
+        // antara stem dan ekstensi (eee.1.mp4 — terlihat seperti ekstensi
+        // berantai). Sufiks counter memakai spasi+kurung gaya browser.
+        let taken = ["eee.mp4"];
+        assert_eq!(
+            unique_filename("eee.mp4", |n| taken.contains(&n)),
+            "eee (1).mp4"
+        );
+        let taken = ["eee.mp4", "eee (1).mp4", "eee (2).mp4"];
+        assert_eq!(
+            unique_filename("eee.mp4", |n| taken.contains(&n)),
+            "eee (3).mp4"
+        );
+    }
+
+    #[test]
+    fn unique_filename_sequence_never_corrupts_the_extension() {
+        // Simulasi tiga unduhan ulang file yang sama: setiap nama baru lahir
+        // dari nama ASLI + counter, dan semuanya tetap berakhiran ".mp4"
+        // tunggal — tidak pernah "eee.eee.mp4" apalagi "eee.eee.eee.mp4".
+        let mut occupied: Vec<String> = Vec::new();
+        for expected in ["eee.mp4", "eee (1).mp4", "eee (2).mp4"] {
+            let chosen = unique_filename("eee.mp4", |n| occupied.iter().any(|o| o == n));
+            assert_eq!(chosen, expected);
+            assert!(chosen.ends_with(".mp4"), "ekstensi hilang: {chosen}");
+            assert!(!chosen.contains("eee.eee"), "stem ganda: {chosen}");
+            occupied.push(chosen);
+        }
+    }
+
+    #[test]
+    fn unique_filename_handles_compound_extensions_and_dotfiles() {
+        // Ekstensi majemuk dipotong di titik terakhir (perilaku Chrome).
+        let taken = ["archive.tar.gz"];
+        assert_eq!(
+            unique_filename("archive.tar.gz", |n| taken.contains(&n)),
+            "archive.tar (1).gz"
+        );
+        // Dotfile TIDAK dianggap berekstensi (semantik std::path) — counter
+        // appended di akhir tanpa menciptakan ekstensi palsu.
+        let taken = [".bashrc"];
+        assert_eq!(
+            unique_filename(".bashrc", |n| taken.contains(&n)),
+            ".bashrc (1)"
+        );
+        // Nama tanpa ekstensi tetap tanpa ekstensi.
+        let taken = ["eee"];
+        assert_eq!(unique_filename("eee", |n| taken.contains(&n)), "eee (1)");
+    }
+
+    #[test]
+    fn unique_filename_fallback_keeps_extension_when_exhausted() {
+        // 999 kandidat terpakai (praktis mustahil) — fallback timestamp tetap
+        // mempertahankan ekstensi asli.
+        let chosen = unique_filename("eee.mp4", |_| true);
+        assert!(chosen.starts_with("eee ("), "got: {chosen}");
+        assert!(chosen.ends_with(".mp4"), "got: {chosen}");
+        assert_ne!(chosen, "eee.mp4");
     }
 
     // ── content_type_to_ext ──

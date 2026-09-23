@@ -3,6 +3,50 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.2.9] - 2026-09-23
+
+Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.
+
+### Fixed
+
+- **Unduhan ulang membuat nama file rusak berantai titik (keluhan
+  "eee.eee.eee.mp4")** — Fast-DM tidak punya resolusi tabrakan nama sendiri:
+  setiap unduhan diberi `--out=<nama>` lalu diserahkan penuh ke
+  `--auto-file-renaming` aria2. Skema aria2 menyisipkan titik + angka DI
+  ANTARA stem dan ekstensi (manual aria2: "a dot and a number appended after
+  the name, but before the file extension"), sehingga mengunduh ulang
+  `eee.mp4` menghasilkan `eee.1.mp4`, `eee.2.mp4`, dst. — nama terlihat
+  seperti ekstensi berantai sebelum `.mp4`, dan GUI tetap menampilkan nama
+  lama karena sinkronisasi nama dari backend hanya terjadi untuk nama
+  generic. Komentar kode bahkan mengklaim hasilnya "file (1).ext" — bentuk
+  yang tidak pernah dibuat aria2.
+  - Kini Fast-DM memilih nama bebas tabrakan SENDIRI di `resolve_filename`
+    (satu choke-point jalur per-proses & daemon RPC) lewat
+    `unique_filename`: `eee.mp4` → `eee (1).mp4` → `eee (2).mp4` (gaya
+    browser — spasi + kurung, mustahil terbaca sebagai ekstensi ganda).
+    UI, `session.json`, dan file di disk selalu satu nama yang sama.
+  - File yang berdampingan dengan control file `.aria2` TIDAK diganti
+    namanya — itu unduhan kita sendiri yang berhenti di tengah dan harus
+    di-resume, bukan tabrakan.
+  - Setelan `auto_file_renaming` mati → perilaku lama dipertahankan
+    (allow-overwrite=true, file lama ditimpa).
+  - `--auto-file-renaming`/opsi RPC setara tetap dikirim sebagai jaring
+    pengaman bila proses lain membuat file di antara pre-check dan start.
+
+### Tests
+
+- `unique_filename_*` (5 test murni): nama bebas tidak diubah, counter gaya
+  browser, tiga unduhan ulang beruntun tidak pernah merusak ekstensi
+  (regresi "eee.eee.eee.mp4"), ekstensi majemuk & dotfile, fallback tetap
+  mempertahankan ekstensi.
+
+### Changed
+
+- Versi 3.2.9 disinkronkan di `Cargo.toml`, `Cargo.lock`,
+  `extension/manifest.json`, dan `package(-lock).json` (dijaga
+  `tests/version_sync.rs`). Setelah memperbarui extension, **reload** di
+  `chrome://extensions`.
+
 ## [3.2.8] - 2026-09-23
 
 Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.

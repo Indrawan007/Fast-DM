@@ -297,7 +297,10 @@ pub(crate) fn adduri_options(
         "split".into(),
         json!(cfg.max_connections.max(1).to_string()),
     );
-    // Auto-rename (default ON) → JANGAN overwrite: tabrakan jadi "file (1).ext".
+    // Auto-rename (default ON) → JANGAN overwrite: tabrakan jadi "file (1).ext"
+    // — bentuk itu dipilih sendiri oleh `resolve_filename` (`unique_filename`,
+    // v3.2.9) SEBELUM `addUri`; opsi auto-file-renaming ini tinggal jaring
+    // pengaman bila file lain muncul di antara pre-check dan start daemon.
     o.insert(
         "allow-overwrite".into(),
         json!((!cfg.auto_file_renaming).to_string()),

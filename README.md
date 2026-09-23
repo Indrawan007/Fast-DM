@@ -18,6 +18,20 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 - 🐧 **Multi-distro** — paket `.deb` (Debian/Ubuntu) **dan** `.pkg.tar.zst` (Arch/Manjaro/EndeavourOS); pesan "tool tidak terinstall" otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro
 
+## Perubahan v3.2.9
+
+- **Unduhan ulang tidak lagi merusak nama file (keluhan "eee.eee.eee.mp4")**
+  — sebelumnya tabrakan nama diserahkan penuh ke `--auto-file-renaming`
+  aria2, yang menyisipkan `.1`/`.2` di antara nama dan ekstensi
+  (`eee.mp4` → `eee.1.mp4` → `eee.2.mp4`), sementara GUI tetap menampilkan
+  nama lama. Kini Fast-DM memilih nama bebas tabrakan sendiri bergaya
+  browser SEBELUM unduhan jalan: `eee.mp4` → `eee (1).mp4` → `eee (2).mp4`
+  — ekstensi `.mp4` selalu tunggal dan utuh. File yang sedang dijeda
+  (control file `.aria2`) tetap di-resume dengan nama aslinya; mematikan
+  setelan auto-rename di Pengaturan mengembalikan perilaku timpa
+  (overwrite). Setelah memperbarui extension, **reload** di
+  `chrome://extensions`.
+
 ## Perubahan v3.2.8
 
 - CI kembali hijau: pemeriksa identifier extension (`tools/check-undeclared.cjs`)
