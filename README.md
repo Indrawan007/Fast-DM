@@ -18,6 +18,24 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 - 🐧 **Multi-distro** — paket `.deb` (Debian/Ubuntu) **dan** `.pkg.tar.zst` (Arch/Manjaro/EndeavourOS); pesan "tool tidak terinstall" otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro
 
+## Perubahan v3.2.10
+
+Perbaikan audit dikerjakan dalam empat tahap. Tahap 1 memperkuat fondasi build
+dan rilis:
+
+- `PKGBUILD` kembali valid, kebijakan lisensi menerima
+  `CDLA-Permissive-2.0`, dan cache Cargo tidak lagi mencoba workspace
+  `target` yang belum ada.
+- Paket `.deb` selalu menyimpan payload sebagai `root:root`, bukan UID runner
+  pembangun.
+- HTTP resolver hanya memakai Rustls; backend `native-tls`/OpenSSL yang tidak
+  disengaja dinonaktifkan.
+- Workflow memakai action berbasis Node 24 dan workflow rilis kini wajib lolos
+  format, audit, cargo-deny, Clippy, seluruh test, lint extension, serta
+  pemeriksa identifier sebelum artefak dipublikasikan.
+- Regression test `release_hygiene.test.cjs` mengunci aturan CI/packaging di
+  atas agar tidak kembali rusak.
+
 ## Perubahan v3.2.9
 
 - **Unduhan ulang tidak lagi merusak nama file (keluhan "eee.eee.eee.mp4")**
@@ -34,11 +52,13 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 
 ## Perubahan v3.2.8
 
-- CI kembali hijau: pemeriksa identifier extension (`tools/check-undeclared.cjs`)
-  yang hilang sejak v3.2.3 ada lagi, `cargo audit` tidak lagi gagal pada
-  `rustls`/`h2`, dan paket Arch tidak lagi mati di `makepkg` karena flag
-  LTO/debug. Tidak ada perubahan cara mengunduh. Setelah memperbarui extension,
-  **reload** di `chrome://extensions`.
+- Pemeriksa identifier extension (`tools/check-undeclared.cjs`) yang hilang
+  sejak v3.2.3 ditambahkan kembali, advisory `rustls`/`h2` diperbarui, dan
+  konflik flag LTO/debug paket Arch diperbaiki. **Koreksi v3.2.10:** klaim lama
+  bahwa CI sudah kembali hijau tidak tepat; keseluruhan workflow saat itu masih
+  gagal karena syntax `PKGBUILD` dan kebijakan lisensi `webpki-roots`. Dua
+  blocker tersisa itu baru diperbaiki di v3.2.10. Tidak ada perubahan cara
+  mengunduh pada v3.2.8.
 
 ## Perubahan v3.2.7
 

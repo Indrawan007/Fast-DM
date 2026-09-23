@@ -3,6 +3,50 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.2.10] - 2026-09-23
+
+Perbaikan hasil audit menyeluruh, dikerjakan dalam empat tahap. Bagian ini
+mencatat tahap 1: CI, dependensi, packaging, dan jalur rilis.
+
+### Fixed
+
+- `packaging/PKGBUILD` tidak lagi memiliki token `)makedepends` pada satu
+  baris; berkas kembali bisa di-source oleh `makepkg`.
+- `cargo deny` menerima lisensi permisif `CDLA-Permissive-2.0` yang dipakai
+  `webpki-roots`, sehingga gerbang dependency policy tidak memblokir seluruh
+  test/build setelahnya.
+- Paket Debian dibangun dengan `dpkg-deb --root-owner-group`; payload yang
+  dibangun runner UID 1001 tidak lagi terpasang sebagai milik user biasa.
+- `reqwest` memakai `default-features = false` bersama `rustls-tls`, sehingga
+  backend default `native-tls`/OpenSSL yang tidak disengaja tidak ikut dibangun.
+- Konfigurasi `rust-cache` tidak lagi memperlakukan direktori `target` sebagai
+  workspace kedua yang belum ada.
+- `cd` di fungsi PKGBUILD kini diperiksa dan `build-arch.sh` tidak lagi
+  mem-parsing output `ls`.
+
+### CI / Release
+
+- `actions/checkout` dan `actions/setup-node` dinaikkan ke v5;
+  `actions/upload-artifact` dinaikkan ke v6. Seluruhnya memakai runtime Node
+  24, bukan action Node 20 yang sudah deprecated.
+- Workflow rilis sekarang menjalankan `cargo audit`, `cargo deny`, Clippy
+  blocking, seluruh test, lint extension, dan `check-undeclared` **sebelum**
+  memublikasikan artefak. Kepemilikan isi `.deb` juga diverifikasi numerik
+  sebagai `0/0`.
+- Ditambahkan `tests/release_hygiene.test.cjs` untuk mengunci syntax
+  PKGBUILD, root ownership, backend TLS, versi action, cache, dan seluruh gate
+  rilis.
+
+### Documentation
+
+- Klaim historis README v3.2.8 bahwa "CI kembali hijau" dikoreksi. Perbaikan
+  v3.2.8 memang menutup beberapa kegagalan, tetapi full workflow masih merah
+  karena syntax PKGBUILD dan lisensi `webpki-roots`; keduanya baru ditutup di
+  v3.2.10.
+- Versi 3.2.10 disinkronkan di `Cargo.toml`, entri `fast-dm` pada
+  `Cargo.lock`, `extension/manifest.json`, `package.json`, dan
+  `package-lock.json`.
+
 ## [3.2.9] - 2026-09-23
 
 Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.
@@ -50,6 +94,9 @@ Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.
 ## [3.2.8] - 2026-09-23
 
 Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.
+
+> **Koreksi v3.2.10:** perbaikan di bawah belum membuat keseluruhan CI hijau;
+> workflow masih gagal pada syntax PKGBUILD dan lisensi `webpki-roots`.
 
 ### Fixed
 

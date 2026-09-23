@@ -1,3 +1,5 @@
+# shellcheck shell=bash disable=SC2034,SC2154
+# Variabel metadata dan srcdir/pkgdir dibaca/disuntikkan oleh makepkg.
 # Maintainer: FastDM Contributors
 # PKGBUILD Fast-DM — paket pacman untuk Arch Linux & turunannya
 # (Manjaro, EndeavourOS, Garuda, CachyOS, …).
@@ -51,7 +53,7 @@ unset_makepkg_rust_flags() {
     CFLAGS CXXFLAGS LDFLAGS CPPFLAGS
 }
 build() {
-  cd "$srcdir/$pkgname-$pkgver"
+  cd "$srcdir/$pkgname-$pkgver" || return 1
   unset_makepkg_rust_flags
   # --locked: pakai Cargo.lock apa adanya — sama seperti CI (ci.yml),
   # release.yml, dan packaging/build-deb.sh. LTO / codegen-units / strip /
@@ -59,7 +61,7 @@ build() {
   cargo build --release --locked --target-dir "$srcdir/target"
 }
 check() {
-  cd "$srcdir/$pkgname-$pkgver"
+  cd "$srcdir/$pkgname-$pkgver" || return 1
   unset_makepkg_rust_flags
   # Unit test + integration test Rust. --target-dir sama dengan build()
   # supaya artefak test tidak dikompilasi ulang dari nol.

@@ -63,9 +63,12 @@ makepkg -f --noconfirm
 
 # 4. Kumpulkan artefak ke build/ (sejajar dengan .deb).
 cp "$STAGE"/*.pkg.tar.* "$ROOT/build/"
-PKGFILE=$(ls -1 "$ROOT"/build/*"$VER-$PKGREL"*.pkg.tar.* 2>/dev/null | head -1)
+# Jangan parse output `ls`: glob Bash mempertahankan nama dengan spasi dan
+# `-f` membedakan glob yang tidak cocok dari artefak sungguhan.
+PKGFILES=("$ROOT"/build/*"$VER-$PKGREL"*.pkg.tar.*)
+PKGFILE="${PKGFILES[0]}"
 
-if [ -n "$PKGFILE" ]; then
+if [ -f "$PKGFILE" ]; then
   echo "✓ $PKGFILE"
   echo "  Install: sudo pacman -U $(basename "$PKGFILE")"
 else
