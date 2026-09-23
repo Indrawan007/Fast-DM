@@ -41,6 +41,7 @@ test("reqwest hanya mengaktifkan backend rustls", () => {
   assert.match(reqwest, /"rustls-tls"/);
   assert.match(reqwest, /"charset"/);
   assert.match(reqwest, /"http2"/);
+  assert.match(reqwest, /"system-proxy"/);
   assert.doesNotMatch(reqwest, /"native-tls"/);
 
   const lock = read("Cargo.lock");
