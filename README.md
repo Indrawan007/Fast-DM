@@ -18,6 +18,14 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 - 🐧 **Multi-distro** — paket `.deb` (Debian/Ubuntu) **dan** `.pkg.tar.zst` (Arch/Manjaro/EndeavourOS); pesan "tool tidak terinstall" otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro
 
+## Perubahan v3.2.8
+
+- CI kembali hijau: pemeriksa identifier extension (`tools/check-undeclared.cjs`)
+  yang hilang sejak v3.2.3 ada lagi, `cargo audit` tidak lagi gagal pada
+  `rustls`/`h2`, dan paket Arch tidak lagi mati di `makepkg` karena flag
+  LTO/debug. Tidak ada perubahan cara mengunduh. Setelah memperbarui extension,
+  **reload** di `chrome://extensions`.
+
 ## Perubahan v3.2.7
 
 - 🔁 **Link lama tidak lagi diunduh ulang (dan Fast DM tidak lagi terbuka
