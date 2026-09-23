@@ -438,16 +438,19 @@ async fn ensure_daemon(cfg: &Config) -> Result<Rpc, String> {
     }
     let mut daemon_config = None;
     if !child_alive {
-        // v3.2.8-fix: deteksi port bentrok SEBELUM spawn — jangan buang 6 dtk
-        // wait_ready untuk kasus "port 6800 dipakai daemon asing". Sebelumnya
-        // tiap unduhan pertama membayar 6 dtk spawn→probe gagal→fallback,
-        // unduhan berikutnya dalam 60 dtk baru gated (cepat fallback). Dampak:
-        // download 1 lambat, download 2 cepat — terasa "kadang berhasil kadang
-        // gagal" terutama bagi user yang menjalankan aria2 manual/transmission.
-        // Cek bind singkat ke 127.0.0.1:port — bila AddrInUse, langsung gate.
-        if let Ok(listener) = std::net::TcpListener::bind(format!("127.0.0.1:{}", cfg.rpc_port)) {
-            drop(listener);
-        } else {
+        // v3.2.9-fix: deteksi port bentrok TANPA TOCTOU bind. Sebelumnya
+        // `TcpListener::bind` lalu drop = race: port dilepas lalu direbut
+        // proses lain sebelum spawn. Sekarang coba connect: jika port sudah
+        // terbuka (daemon asing) dan probe kita gagal, langsung gate tanpa
+        // buang 6 dtk wait_ready. Jika connect gagal, port bebas -> spawn.
+        let port_in_use = tokio::time::timeout(
+            Duration::from_millis(200),
+            tokio::net::TcpStream::connect(format!("127.0.0.1:{}", cfg.rpc_port)),
+        )
+        .await
+        .is_ok_and(|r| r.is_ok());
+        if port_in_use {
+            // Kita sudah probe dan gagal (di atas), tapi port terbuka = daemon asing
             drop(guard);
             let until = now_ms().saturating_add(DAEMON_RETRY_MS);
             DAEMON_UNAVAILABLE_UNTIL.store(until, Ordering::Relaxed);
@@ -695,14 +698,12 @@ pub(crate) async fn shutdown_daemon(gids: &[String], cfg: &Config) -> Result<(),
     }
 
     if !reachable {
-        // Tanpa GID tidak ada pekerjaan RPC yang perlu dipertahankan. Jika ada
-        // GID, jangan menganggapnya stale hanya karena probe dua detik gagal:
-        // simpan GID agar start berikutnya masih bisa mencoba unpause.
-        return if gids.is_empty() {
-            Ok(())
-        } else {
-            Err("daemon tidak merespons forcePauseAll".into())
-        };
+        // M4: daemon sudah tidak merespons — GID tidak bisa di-resume lagi,
+        // biarkan snapshot dibersihkan (addUri baru akan resume via .aria2
+        // control file bila ada). Mengembalikan Err sebelumnya membuat GID
+        // basi dipertahankan di session.json dan next start membayar unpause
+        // gagal + fallback.
+        return Ok(());
     }
 
     // Untuk daemon yatim/reuse kita tidak memiliki Child handle. Konfirmasi
@@ -748,10 +749,12 @@ pub async fn download(
     // aria2.addUri silently ignores the unsupported `cookie` option.
     // `load-cookies` is startup-only; a raw Cookie header would leak across
     // redirects. Use the isolated CLI cookie jar, preserving domain/path/Secure.
+    // v3.2.9-fix: cek freshness (24 jam) — file basi tidak boleh memaksa
+    // fallback ke per-proses; sebelumnya has_cookie_jar hanya cek exist.
     let has_cookie_jar = url::Url::parse(&url)
         .ok()
         .filter(|u| matches!(u.scheme(), "http" | "https"))
-        .and_then(|u| u.host_str().and_then(Config::find_cookies_file))
+        .and_then(|u| u.host_str().and_then(Config::find_fresh_cookies_file))
         .is_some();
     if has_cookie_jar {
         let gid = info.lock().await.rpc_gid.clone();

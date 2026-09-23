@@ -18,6 +18,11 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 - 🐧 **Multi-distro** — paket `.deb` (Debian/Ubuntu) **dan** `.pkg.tar.zst` (Arch/Manjaro/EndeavourOS); pesan "tool tidak terinstall" otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro
 
+## Perubahan v3.3.0
+
+- **Audit 22 bug (K1-K11 kritis, M1-M8 medium, L1-L5 low)** — perbaikan menyeluruh hasil audit kode:
+  - Cookie freshness 24h konsisten di semua jalur (aria2, youtube, RPC), clipboard re-probe saat tool hilang, TOCTOU port race dihilangkan, rpc_secret invalid dibersihkan, backup config/session pakai millis+random anti-tabrakan, save_dir divalidasi (absolute, tanpa `..`, tolak `/` & `/tmp`) dengan inline error di Pengaturan, proxy inline validation, speed limit tolak spasi internal, shutdown daemon tidak simpan GID basi, filename fallback anti-collision millis+random, proxy length limit, cookies filename truncate. Setelah memperbarui, **reload** extension di `chrome://extensions`.
+
 ## Perubahan v3.2.9
 
 - **Unduhan ulang tidak lagi merusak nama file (keluhan "eee.eee.eee.mp4")**
