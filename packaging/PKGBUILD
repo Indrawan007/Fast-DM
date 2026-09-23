@@ -31,7 +31,8 @@ optdepends=(
   'xclip: monitor clipboard di sesi X11'
   'wl-clipboard: monitor clipboard di sesi Wayland'
   'chrome: browser untuk extension Native Messaging'
-)makedepends=('cargo' 'rust')
+)
+makedepends=('cargo' 'rust')
 # Arch mengaktifkan lto+debug+CFLAGS di /etc/makepkg.conf. cargo build
 # --release di job CI yang sama (tanpa flag itu) lolos, lalu makepkg gagal
 # di build() dengan exit 4: -flto / RUSTFLAGS debug memecahkan link crate
