@@ -68,11 +68,16 @@ pub async fn download(
     };
 
     // B10: spawn_blocking — jangan blokir thread executor tokio menunggu proses.
-    // Hasil di-cache per-sesi: spawn "yt-dlp --version" (~50–100 ms) tidak
-    // perlu diulang untuk setiap download.
+    // v3.2.8-fix: hasil NEGATIF tidak lagi di-cache permanen. Dulu `OnceLock`
+    // menyimpan `false` selamanya — user yang memasang yt-dlp setelah unduhan
+    // pertama gagal tetap melihat "yt-dlp tidak terinstall" sampai aplikasi
+    // di-restart, terasa seperti "kadang berhasil kadang gagal" tergantung
+    // urutan install vs. start app. Sekarang hanya keberhasilan yang di-cache;
+    // kegagalan di-probe ulang tiap percobaan (biaya ~50–100 ms, dapat
+    // diabaikan) sehingga instalasi baru langsung terdeteksi tanpa restart.
     static YTDLP_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let available = if let Some(cached) = YTDLP_AVAILABLE.get() {
-        *cached
+    let available = if let Some(true) = YTDLP_AVAILABLE.get().copied() {
+        true
     } else {
         let avail = tokio::task::spawn_blocking(|| {
             Command::new("yt-dlp")
@@ -85,7 +90,9 @@ pub async fn download(
         })
         .await
         .unwrap_or(false);
-        let _ = YTDLP_AVAILABLE.set(avail);
+        if avail {
+            let _ = YTDLP_AVAILABLE.set(true);
+        }
         avail
     };
 

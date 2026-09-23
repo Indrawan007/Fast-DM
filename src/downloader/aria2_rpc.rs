@@ -435,6 +435,24 @@ async fn ensure_daemon(cfg: &Config) -> Result<Rpc, String> {
     }
     let mut daemon_config = None;
     if !child_alive {
+        // v3.2.8-fix: deteksi port bentrok SEBELUM spawn — jangan buang 6 dtk
+        // wait_ready untuk kasus "port 6800 dipakai daemon asing". Sebelumnya
+        // tiap unduhan pertama membayar 6 dtk spawn→probe gagal→fallback,
+        // unduhan berikutnya dalam 60 dtk baru gated (cepat fallback). Dampak:
+        // download 1 lambat, download 2 cepat — terasa "kadang berhasil kadang
+        // gagal" terutama bagi user yang menjalankan aria2 manual/transmission.
+        // Cek bind singkat ke 127.0.0.1:port — bila AddrInUse, langsung gate.
+        if let Ok(listener) = std::net::TcpListener::bind(format!("127.0.0.1:{}", cfg.rpc_port)) {
+            drop(listener);
+        } else {
+            drop(guard);
+            let until = now_ms().saturating_add(DAEMON_RETRY_MS);
+            DAEMON_UNAVAILABLE_UNTIL.store(until, Ordering::Relaxed);
+            return Err(format!(
+                "daemon tidak siap dalam 6 dtk (port {} mungkin dipakai daemon asing — ubah rpc_port di config.json)",
+                cfg.rpc_port
+            ));
+        }
         // `rpc-secret` dibaca dari file 0600 lalu file dihapus setelah daemon
         // menjawab probe. Path saja yang masuk argv; secret tidak pernah ikut.
         let path = Config::aria2_input_dir().join(format!(
@@ -464,6 +482,9 @@ async fn ensure_daemon(cfg: &Config) -> Result<Rpc, String> {
                 drop(guard);
                 // v3.0.0: pesan digeneriskan — daemon kini hanya melayani
                 // http/https/ftp (dulu menyebut magnet).
+                // v3.2.8-fix: spawn gagal karena binary tidak ada TIDAK di-gate
+                // 60 dtk — bila user baru install aria2, unduhan berikutnya
+                // harus langsung coba lagi, bukan menunggu gate habis.
                 return Err(format!(
                     "aria2c gagal dijalankan: {e} (pastikan aria2 terpasang)"
                 ));

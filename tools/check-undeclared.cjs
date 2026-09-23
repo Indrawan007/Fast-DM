@@ -722,3 +722,5 @@ function main() {
       " berkas)",
   );
 }
+
+main();
