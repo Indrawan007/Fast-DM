@@ -3,6 +3,41 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.3.0] - 2026-09-24
+
+Rilis perbaikan hasil audit bug menyeluruh — 22 bug (K1-K11 kritis, M1-M8 medium, L1-L5 low).
+
+### Fixed
+
+- **K1 clipboard probe cache None** — `cached_tool = Some(None)` membuat monitor mati permanen setelah satu kegagalan — kini re-probe tiap tick.
+- **K2 TOCTOU port** — `TcpListener::bind` lalu drop race — ganti `TcpStream::connect` probe 200ms.
+- **K3 rpc_secret invalid** — file ada tapi kosong/kepanjangan → tiap start fresh berbeda — hapus file invalid dulu.
+- **K4 cookie freshness** — hanya cek exist, cookie basi memaksa fallback per-proses — kini `COOKIE_FRESH_SECS 24h` + `find_fresh_cookies_file` di aria2, youtube, aria2_rpc.
+- **K5 config corrupt backup** — langsung default tanpa backup — kini backup `corrupt-<millis>-<rand>.json`.
+- **K6 save_dir validation** — path `..`, relatif, control char, `/`, `/tmp` bikin aria2 gagal tanpa pesan — `is_valid_download_dir` + inline GUI error + fallback di `add_download`.
+- **K7 unique_filename collision ms** — tambah 6 char uuid random.
+- **K8 sanitize_filename fallback detik** — collision per detik — millis + 4 char random.
+- **K9 extract_filename_from_url fallback detik** — sama — millis + random.
+- **K10 config load validation** — field manual edit invalid lolos bikin daemon gagal start — fallback ke default + warn.
+- **K11 rpc_port 0** — tidak divalidasi — tolak 0.
+- **M1 speed limit spasi internal** — "512 K" lolos — tolak whitespace.
+- **M2 proxy inline validation** — hanya label tombol "Gagal Simpan" — tambah error label inline.
+- **M3 clipboard re-probe on failure** — tool hilang → keep failing — kosongkan cache bila text None.
+- **M4 shutdown_daemon stale GID** — daemon tidak merespons → GID basi dipertahankan — kini Ok & bersihkan GID (resume via .aria2 tetap jalan).
+- **M5 create_dir_all silent** — ignore error — log warn.
+- **M6 root/tmp rejection** — "/" & "/tmp" diterima — tolak eksplisit.
+- **M7 youtube cookie host normalization** — "WWW.Example.COM" gagal lookup — lowercase + strip www.
+- **M8 config backup collision detik** — millis + random.
+- **L1 cookies_file_in_host length** — nama host panjang >255 — truncate 200 char.
+- **L2 session.json backup collision detik** — millis + random.
+- **L3 speed validation circular** — helper `is_valid_speed_limit_cfg` tanpa dep circular.
+- **L4 proxy length limit** — tanpa batas → DoS arg — len>2048 tolak.
+- **L5 backup with_extension** — format jelas.
+
+### Changed
+
+- Versi 3.3.0 disinkronkan di `Cargo.toml`, `Cargo.lock`, `extension/manifest.json`, dan `package(-lock).json` (dijaga `tests/version_sync.rs`).
+
 ## [3.2.9] - 2026-09-23
 
 Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.

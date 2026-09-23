@@ -1,4 +1,4 @@
-# Audit Bug 22 — Fast-DM v3.2.9 → Fix
+# Audit Bug 22 — Fast-DM v3.2.9 → v3.3.0 Fix
 
 Format: K = Kritis, M = Medium, L = Low. Semua diperbaiki di branch `arena/01a0d06a-fast-dm`.
 
