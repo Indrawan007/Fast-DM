@@ -49,5 +49,8 @@ cp packaging/fast-dm.desktop "$PKG/usr/share/applications/fast-dm.desktop"
 cp extension/icons/icon128.png \
    "$PKG/usr/share/icons/hicolor/128x128/apps/io.github.fastdm.FastDownloadManager.png"
 
-dpkg-deb --build "$PKG"
+# GitHub runner membangun sebagai uid 1001. Tanpa --root-owner-group, uid itu
+# tersimpan di arsip dan binary /opt/fast-dm dapat dimiliki user biasa setelah
+# instalasi. Normalisasi seluruh payload paket ke root:root.
+dpkg-deb --root-owner-group --build "$PKG"
 echo "✓ $PKG.deb"
