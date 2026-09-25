@@ -529,6 +529,9 @@ pub(crate) struct Patch {
     pub speed: u64,
     pub first_file: Option<String>,
     pub error: Option<String>,
+    /// v3.3.2: `errorCode` daemon (= exit code aria2c) — untuk
+    /// `aria2::is_access_denied_exit`.
+    pub error_code: Option<i32>,
 }
 
 fn field_u64(v: &Value, key: &str) -> u64 {
@@ -546,12 +549,14 @@ pub(crate) fn patch_from_status(v: &Value) -> Patch {
         .unwrap_or("")
         .to_ascii_lowercase();
     let mut error = None;
+    let mut error_code = None;
     if status == "error" || status == "removed" {
         let code = v
             .get("errorCode")
             .and_then(|c| c.as_str())
             .unwrap_or("")
             .to_string();
+        error_code = code.parse::<i32>().ok();
         let msg = v
             .get("errorMessage")
             .and_then(|m| m.as_str())
@@ -588,6 +593,7 @@ pub(crate) fn patch_from_status(v: &Value) -> Patch {
         speed: field_u64(v, "downloadSpeed"),
         first_file,
         error,
+        error_code,
     }
 }
 
@@ -1082,6 +1088,7 @@ pub async fn download(
                 // task benar-benar mati → GID tak bisa di-resume.
                 i.rpc_gid = None;
                 i.status = DownloadStatus::Error;
+                i.access_denied = p.error_code.is_some_and(aria2::is_access_denied_exit);
                 i.error_msg = p
                     .error
                     .unwrap_or_else(|| "aria2: download berhenti (error)".into());
@@ -1505,6 +1512,14 @@ mod tests {
         let err = json!({"status": "error", "errorCode": "5", "errorMessage": "Broken pipe"});
 
         let p = patch_from_status(&err);
+        assert_eq!(p.error_code, Some(5));
         assert!(p.error.unwrap().contains("Broken pipe"));
+
+        // v3.3.2: 403 dari server → errorCode 22 dibawa terpisah dari pesan.
+        let denied = json!({"status": "error", "errorCode": "22", "errorMessage": "status=403"});
+        let p = patch_from_status(&denied);
+        assert_eq!(p.error_code, Some(22));
+        assert!(p.error_code.is_some_and(aria2::is_access_denied_exit));
+        assert!(patch_from_status(&st).error_code.is_none());
     }
 }

@@ -736,6 +736,47 @@ function isLiveDownload(downloadItem) {
   return downloadItem.state === "in_progress";
 }
 
+// v3.3.2: serahkan kembali ke browser bila server MENOLAK Fast-DM.
+// Unduhan yang kita cegat sudah dibatalkan di browser, lalu diterima Fast-DM
+// (`success: true`) — tetapi hasil sebenarnya baru diketahui setelah aria2
+// menghubungi server. File-host dengan anti-bot/hotlink-protection, sesi yang
+// terikat sidik jari TLS browser, atau tautan bertanda tangan sering menjawab
+// HTTP 403 (aria2 exit 22) atau halaman HTML hanya untuk Fast-DM. Dulu unduhan
+// itu berakhir "GAGAL" dan user kehilangan unduhannya sama sekali. Sekarang
+// extension bertanya ke Fast-DM (aksi `handback`) sampai hasilnya jelas; bila
+// ditolak, browser mengunduhnya sendiri seperti biasa.
+const HANDBACK_POLL_MS = 2_000;
+const HANDBACK_MAX_MS = 120_000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function watchForHandback(id, url) {
+  if (typeof id !== "string" || !id) return false;
+  const deadline = Date.now() + HANDBACK_MAX_MS;
+  while (Date.now() < deadline) {
+    await sleep(HANDBACK_POLL_MS);
+    let resp;
+    try {
+      resp = await sendToNative({ action: "handback", id });
+    } catch (e) {
+      return false; // Fast-DM ditutup / host tak tersedia — jangan tebak.
+    }
+    if (!resp || !resp.success) return false;
+    if (resp.message === "pending") continue;
+    if (resp.message !== "handback") return false;
+    // Fast-DM sudah menandai itemnya "Diserahkan ke browser" secara atomik;
+    // unduhan berikut berasal dari kita sendiri dan tidak boleh dicegat lagi.
+    // Nama file dibiarkan ditentukan browser (Content-Disposition asli).
+    markSelfInitiated(url);
+    chrome.downloads.download({ url }, () => noteRuntimeError("handback"));
+    showBadge("↩", "#f9e2af");
+    return true;
+  }
+  return false;
+}
+
 chrome.downloads.onCreated.addListener(async (downloadItem) => {
   if (!config.enabled || !config.interceptDownloads) return;
 
@@ -764,7 +805,9 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
   if (downloadItem.referrer) headers["Referer"] = downloadItem.referrer;
 
   const result = await sendDownload(url, filename, headers).catch(() => null);
-  if (!result || !result.success) {
+  if (result && result.success) {
+    void watchForHandback(result.id, url);
+  } else {
     // Fallback: restart download in Chrome normally.
     // v3.2.3 (A7): `saveAs: true` saja — `filename` diabaikan Chrome saat
     // dialog "Simpan sebagai" terbuka, jadi mengirim keduanya hanya menyesatkan.
@@ -799,7 +842,9 @@ chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
   if (downloadItem.referrer) headers["Referer"] = downloadItem.referrer;
 
   sendDownload(url, filename, headers).then((result) => {
-    if (!result || !result.success) {
+    if (result && result.success) {
+      void watchForHandback(result.id, url);
+    } else {
       // v3.2.3 (A7): lihat catatan di `onCreated` — `saveAs: true` saja.
       markSelfInitiated(url);
       chrome.downloads.download({ url, saveAs: true }, () =>

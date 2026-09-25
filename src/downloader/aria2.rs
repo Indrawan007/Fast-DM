@@ -485,6 +485,7 @@ async fn run_aria2c(
             format!("\n{}", err_detail.trim())
         };
         i.status = DownloadStatus::Error;
+        i.access_denied = is_access_denied_exit(exit_code);
         i.error_msg = match describe_aria2_exit(exit_code) {
             Some(why) => format!("aria2c gagal (exit {exit_code}): {why}{detail}"),
             None => format!("aria2c exit code: {exit_code}{detail}"),
@@ -852,6 +853,11 @@ pub(crate) async fn resolve_filename(
     let ct = ct_raw.split(';').next().unwrap_or("").trim().to_lowercase();
     let is_html = ct == "text/html" || ct == "application/xhtml+xml" || ct.contains("text/html");
     if is_html {
+        // v3.3.2: browser menganggap URL ini file (ia sendiri memulai
+        // unduhannya), tetapi request Fast-DM mendapat halaman HTML —
+        // biasanya karena sesi/anti-bot. Tandai agar bisa diserahkan kembali
+        // ke browser dan tidak di-retry otomatis.
+        info.lock().await.access_denied = true;
         return Err(
             "URL ini mengembalikan halaman web (HTML), bukan file — biasanya halaman login, \
              halaman unduh berhitung-mundur, atau posting situs (mis. *.php/*.html). Buka \
@@ -963,6 +969,14 @@ pub(crate) fn probe_verdict(status: u16) -> ProbeVerdict {
         )),
         _ => ProbeVerdict::Proceed,
     }
+}
+
+/// v3.3.2: exit code aria2 yang berarti server MENOLAK request kita (bukan
+/// gangguan jaringan sementara): 22 = respons HTTP tak terduga (403/429/…),
+/// 24 = otorisasi HTTP gagal (401). Mengulang request yang identik tidak
+/// akan mengubah jawaban server — lihat `DownloadInfo::access_denied`.
+pub(crate) fn is_access_denied_exit(code: i32) -> bool {
+    matches!(code, 22 | 24)
 }
 
 /// Terjemahan exit code aria2c (manual aria2, bagian EXIT STATUS) ke pesan
@@ -1397,6 +1411,15 @@ mod tests {
                 }
                 ProbeVerdict::Proceed => panic!("HTTP {code} harus fatal"),
             }
+        }
+    }
+
+    #[test]
+    fn access_denied_exit_codes_are_only_server_rejections() {
+        assert!(is_access_denied_exit(22));
+        assert!(is_access_denied_exit(24));
+        for transient in [0, 1, 2, 3, 5, 6, 7, 9, 19, 28, 29] {
+            assert!(!is_access_denied_exit(transient), "exit {transient}");
         }
     }
 
