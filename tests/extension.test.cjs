@@ -9,7 +9,7 @@ function source(file) {
   return readFileSync(join(__dirname, "..", "extension", file), "utf8");
 }
 
-function popup() {
+function popup(pingResponse = { success: true }) {
   class Element {
     constructor() {
       this.children = [];
@@ -35,7 +35,7 @@ function popup() {
     lastError: null,
     sendMessage(message, callback) {
       if (message.action === "download") callbacks.push(callback);
-      else if (message.action === "ping") callback({ success: true });
+      else if (message.action === "ping") callback(pingResponse);
       else if (message.action === "getConfig") callback({});
     },
   };
@@ -69,6 +69,8 @@ function popup() {
   return {
     button: elements.get("video-list").children[0].children[1],
     feedback: elements.get("action-feedback"),
+    status: elements.get("status-dot"),
+    statusText: elements.get("status-text"),
     callbacks,
     runtime,
     timers,
@@ -108,6 +110,18 @@ for (const failure of ["rejected", "missing", "transport"]) {
     assert.equal(p.callbacks.length, 2);
   });
 }
+
+// v3.3.3: native host TIDAK lagi menyalakan Fast-DM untuk `ping` — popup yang
+// dibuka saat aplikasi mati kini benar-benar menerima `success: false` dan
+// harus menampilkannya, bukan "Terhubung ✓" hasil cold start tak diminta.
+test("popup reports Fast DM as not running when ping fails", () => {
+  const p = popup({ success: false, error: "Fast DM tidak berjalan (socket)" });
+  assert.equal(p.status.className, "status-dot disconnected");
+  assert.equal(
+    p.statusText.textContent,
+    "Fast DM tidak berjalan. Jalankan: fast-dm",
+  );
+});
 
 function background(cookieJar = [], sniffedCandidates = []) {
   const badges = [];

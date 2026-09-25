@@ -127,6 +127,14 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
             match forward_to_gui(&socket_path, &msg) {
                 Ok(resp) => resp,
                 Err(e) => {
+                    // v3.3.3: hanya permintaan yang MEMBUAT unduhan boleh
+                    // menyalakan Fast-DM. Pertanyaan/kendali (`ping`, `list`,
+                    // `handback`, `pause`, `resume`, `cancel`) dijawab apa
+                    // adanya — "tidak berjalan" — tanpa side effect. Lihat
+                    // `gui_unavailable_response`.
+                    if let Some(resp) = gui_unavailable_response(&msg.action, &e) {
+                        return resp;
+                    }
                     // Launch GUI dengan setsid agar TIDAK jadi child dari browser.
                     // Jangan paksa GDK_BACKEND=x11 — pada sesi Wayland-only GUI tidak bisa start.
                     use std::os::unix::process::CommandExt;
@@ -183,6 +191,40 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
             }
         }
     }
+}
+
+/// Respons untuk aksi yang TIDAK boleh menyalakan Fast-DM saat socket GUI
+/// belum ada; `None` berarti aksi `download` — lanjutkan ke cold-start GUI.
+///
+/// Hanya `download` yang boleh menyalakan aplikasi: itulah satu-satunya pesan
+/// yang meminta Fast-DM melakukan sesuatu, dan menyalakannya memang
+/// satu-satunya cara agar unduhan yang sudah dicegat extension tidak hilang.
+/// Aksi lain bertanya atau mengendalikan proses yang SUDAH ada (`ping`,
+/// `list`, `pause`, `resume`, `cancel`, `handback`) atau ditangani native host
+/// sendiri (`register`) — kalau socketnya tidak ada, jawaban yang benar adalah
+/// "tidak berjalan", bukan aplikasi yang terbuka sendiri.
+///
+/// Sebelum v3.3.3 SEMUA aksi yang gagal diteruskan menyalakan GUI, dengan dua
+/// akibat yang terlihat user:
+///
+/// * popup mengirim `ping` setiap kali dibuka (`checkConnection` di
+///   `popup.js`), jadi sekadar membuka popup cukup untuk membuka Fast-DM —
+///   dan status "Fast DM tidak berjalan" praktis tak pernah tampil karena
+///   poll socket berhasil setelah cold start;
+/// * extension mem-poll `handback` 2 detik sekali hingga 120 detik
+///   (`watchForHandback`), sehingga setelah user menutup Fast-DM aplikasi itu
+///   dinyalakan ulang puluhan kali, masing-masing menahan native host hingga
+///   ±15 detik menunggu socket.
+fn gui_unavailable_response(action: &str, err: &str) -> Option<NativeResponse> {
+    if matches!(action, "download") {
+        return None;
+    }
+    Some(NativeResponse {
+        success: false,
+        id: None,
+        message: None,
+        error: Some(format!("Fast DM tidak berjalan ({err})")),
+    })
 }
 
 /// Resolve path to GUI binary (not the native host wrapper)
@@ -279,7 +321,43 @@ fn parse_gui_response(line: &str) -> Result<NativeResponse, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_gui_response;
+    use super::{gui_unavailable_response, parse_gui_response};
+
+    /// Aksi non-`download` tidak boleh menyalakan GUI: responsnya harus gagal
+    /// eksplisit (fail-closed) dan tanpa `id`/`message` yang bisa dibaca
+    /// extension sebagai keberhasilan.
+    fn assert_launch_refused(action: &str) {
+        let resp = gui_unavailable_response(action, "no socket")
+            .unwrap_or_else(|| panic!("aksi `{action}` masih menyalakan GUI"));
+        assert!(!resp.success, "aksi `{action}`");
+        assert!(resp.id.is_none(), "aksi `{action}`");
+        assert!(resp.message.is_none(), "aksi `{action}`");
+        let error = resp.error.unwrap_or_default();
+        assert!(error.contains("tidak berjalan"), "aksi `{action}`: {error}");
+        assert!(error.contains("no socket"), "aksi `{action}`: {error}");
+    }
+
+    #[test]
+    fn only_download_requests_launch_the_gui() {
+        // Unduhan yang dicegat extension tidak boleh hilang: kalau Fast-DM
+        // belum jalan, `download` memang harus menyalakannya — tidak ada
+        // respons gagal, pemanggil melanjutkan ke cold-start GUI.
+        assert!(gui_unavailable_response("download", "no socket").is_none());
+
+        // Popup mengirim `ping` setiap kali dibuka, dan `handback` di-poll
+        // 2 detik sekali selama 2 menit: keduanya tidak boleh membuka
+        // aplikasi. `register` ditangani native host sendiri, dan aksi tak
+        // dikenal tidak pernah boleh menyalakan apa pun.
+        assert_launch_refused("ping");
+        assert_launch_refused("list");
+        assert_launch_refused("handback");
+        assert_launch_refused("pause");
+        assert_launch_refused("resume");
+        assert_launch_refused("cancel");
+        assert_launch_refused("register");
+        assert_launch_refused("");
+        assert_launch_refused("downloads");
+    }
 
     #[test]
     fn gui_response_requires_explicit_success_boolean() {

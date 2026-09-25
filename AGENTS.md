@@ -1,7 +1,8 @@
 # AGENTS.md — Panduan AI/Contributor Fast-DM
 
-Version: 0.2.1 (0.2.0: disinkronkan dengan arsitektur kode nyata; 0.2.1:
-menambahkan aturan "tampilkan kode lama + kode baru" pada setiap perbaikan)
+Version: 0.2.2 (0.2.0: disinkronkan dengan arsitektur kode nyata; 0.2.1:
+menambahkan aturan "tampilkan kode lama + kode baru" pada setiap perbaikan;
+0.2.2: native host hanya men-spawn GUI untuk aksi `download` — v3.3.3)
 
 ## 1. Role & Objective
 
@@ -16,7 +17,8 @@ Browser (extension MV3: background/sniffer/content)
    │ chrome.runtime.sendNativeMessage (stdio, length-prefixed JSON)
    ▼
 fast-dm --native  ──1 baris JSON──►  Unix socket (Config::ipc_socket_path(),
-   │  (spawn GUI bila mati)          peer-cred uid, 0600)  ►  DownloadEngine (tokio)
+   │  (spawn GUI bila mati — hanya   peer-cred uid, 0600)  ►  DownloadEngine (tokio)
+   │   untuk aksi `download`)
                                         │ spawn_supervised: pilih backend per URL
                                         ▼
                           aria2c daemon RPC (http/ftp: limit global live,
@@ -36,8 +38,13 @@ fast-dm --native  ──1 baris JSON──►  Unix socket (Config::ipc_socket_p
   `adduri_options`), `youtube.rs` (argumen yt-dlp + runner), `universal.rs`
   (resolver non-YouTube + fallback), `mod.rs` (engine, antrian, sesi),
   `types.rs` (model).
-- `src/ipc/mod.rs` = server socket (download/ping/pause/resume/cancel/list/register).
-- `src/native_host/` = jembatan stdio ⇄ socket + setup manifest NMH multi-browser.
+- `src/ipc/mod.rs` = server socket
+  (download/ping/pause/resume/cancel/handback/list/register).
+- `src/native_host/` = jembatan stdio ⇄ socket + setup manifest NMH
+  multi-browser. GUI di-spawn HANYA untuk aksi `download` (v3.3.3,
+  `gui_unavailable_response`): aksi tanya/kendali (`ping`, `list`, `handback`,
+  `pause`/`resume`/`cancel`) dijawab `success: false` bila socket tidak ada —
+  pertanyaan status tidak boleh membuka aplikasi.
 - `src/gui/` = GTK4 window/dialog; state GUI disinkronkan via `mpsc::Unbounded<DownloadEvent>`.
 - `extension/` = MV3: `background.js` (intercept + native msg), `sniffer.js`
   (MAIN world, hook fetch/XHR), `content.js` (overlay ⚡), `popup.*`.

@@ -3,6 +3,35 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.3.3] - 2026-09-25
+
+Native messaging host tidak lagi menyalakan Fast-DM untuk pesan yang hanya
+bertanya: membuka popup extension — atau menutup Fast-DM saat extension masih
+memantau satu unduhan — tidak lagi membuat aplikasi terbuka sendiri.
+
+### Fixed
+
+- **Membuka popup extension menyalakan Fast-DM** — `popup.js` mengirim `ping`
+  setiap kali dibuka (`checkConnection`), sementara `handle_native_message`
+  (`src/native_host/mod.rs`) meneruskan SEMUA aksi ke socket GUI lalu
+  men-spawn GUI bila socket tidak ada. Cukup membuka popup untuk membuka
+  aplikasi, dan status "Fast DM tidak berjalan. Jalankan: fast-dm" praktis
+  tidak pernah tampil: native host menunggu socket hingga ±15 dtk setelah
+  cold start lalu membalas `success: true`, jadi popup melaporkan "Terhubung
+  ✓". Kini hanya `download` yang boleh menyalakan Fast-DM
+  (`gui_unavailable_response`); `ping`, `list`, `pause`, `resume`, `cancel`, dan
+  `handback` dijawab `success: false` + "Fast DM tidak berjalan" tanpa side
+  effect apa pun.
+- **Fast-DM dinyalakan ulang puluhan kali setelah user menutupnya** —
+  `watchForHandback` (v3.3.2) mem-poll aksi `handback` 2 detik sekali hingga
+  120 detik. Bila Fast-DM ditutup di tengah pengawasan itu, setiap poll
+  memicu spawn GUI + tunggu socket 15 dtk di native host (±60×). Dengan
+  guard yang sama, poll pertama kini langsung dijawab gagal dan extension
+  berhenti bertanya.
+- Perilaku `download` **tidak berubah**: unduhan yang dicegat extension tetap
+  menyalakan Fast-DM bila aplikasi belum jalan — itu memang satu-satunya cara
+  unduhan tersebut tidak hilang.
+
 ## [3.3.2] - 2026-09-25
 
 Unduhan dari browser yang ditolak server (HTTP 403 / halaman HTML) tidak lagi

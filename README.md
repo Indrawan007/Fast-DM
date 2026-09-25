@@ -18,6 +18,21 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 - 🐧 **Multi-distro** — paket `.deb` (Debian/Ubuntu) **dan** `.pkg.tar.zst` (Arch/Manjaro/EndeavourOS); pesan "tool tidak terinstall" otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro
 
+## Perubahan v3.3.3
+
+- **Fast-DM tidak lagi terbuka sendiri saat popup extension dibuka** — native
+  host dulu menyalakan GUI untuk SETIAP aksi yang gagal diteruskan ke socket,
+  termasuk `ping` yang dikirim popup setiap kali dibuka; status "Fast DM tidak
+  berjalan" pun hampir tak pernah tampil karena cold start selalu membuatnya
+  "terhubung". Kini hanya `download` yang boleh menyalakan aplikasi
+  (`gui_unavailable_response` di `src/native_host/mod.rs`); `ping`, `list`, `pause`,
+  `resume`, `cancel`, dan `handback` dijawab "Fast DM tidak berjalan" tanpa
+  side effect.
+- **Tidak ada lagi spawn berulang setelah Fast-DM ditutup** — poll `handback`
+  extension (2 dtk sekali, hingga 120 dtk) tidak lagi memicu cold start GUI
+  berkali-kali; poll pertama dijawab gagal dan extension berhenti bertanya.
+- Setelah memperbarui, **reload** extension di `chrome://extensions`.
+
 ## Perubahan v3.3.2
 
 - **Unduhan yang ditolak server kembali ke browser otomatis** — bila file-host menjawab HTTP 403/401 atau halaman HTML untuk Fast-DM (anti-bot, hotlink-protection, sesi terikat browser) sebelum satu byte pun diterima, unduhan yang dicegat extension diserahkan kembali ke browser dan diunduh di sana. Kartunya di Fast-DM ditandai "Diserahkan ke browser"; tidak ada lagi unduhan yang hilang.
