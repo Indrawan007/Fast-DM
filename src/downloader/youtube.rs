@@ -188,14 +188,15 @@ pub(crate) fn cookie_args(url: &str) -> Vec<String> {
     vec![]
 }
 
-/// Bagian murni dari `is_fresh_cookie_file` (bisa di-unit test tanpa filesystem).
-/// Header Netscape = 29 byte; > 30 berarti minimal ada satu baris cookie.
-/// Wrapper Config::COOKIE_FRESH_SECS supaya test tetap lokal tanpa IO.
+/// Bagian murni dari aturan freshness cookie — identik dengan boundary di
+/// `Config::is_fresh_cookie_file`, dipisah agar bisa di-unit test tanpa
+/// filesystem (AGENTS.md §4: unit test fungsi murni). Header Netscape = 29
+/// byte; > 30 berarti minimal ada satu baris cookie. Wrapper
+/// Config::COOKIE_FRESH_SECS supaya test tetap lokal tanpa IO.
+/// Hanya dipakai test — jangan dibangun di target non-test (dead_code).
+#[cfg(test)]
 fn cookie_file_is_fresh(len: u64, age_secs: u64) -> bool {
     len > 30 && age_secs < Config::COOKIE_FRESH_SECS
-}
-fn is_fresh_cookie_file(path: &std::path::Path) -> bool {
-    Config::is_fresh_cookie_file(path)
 }
 
 pub(crate) fn output_template(save_dir: &str, filename: &str) -> String {
