@@ -34,9 +34,78 @@ Rilis perbaikan hasil audit bug menyeluruh — 22 bug (K1-K11 kritis, M1-M8 medi
 - **L4 proxy length limit** — tanpa batas → DoS arg — len>2048 tolak.
 - **L5 backup with_extension** — format jelas.
 
+### Fixed (CI & packaging)
+
+- Seluruh perbaikan v3.2.10 (`deny.toml`/CDLA-Permissive-2.0, syntax
+  `PKGBUILD`, `dpkg-deb --root-owner-group`, `reqwest` default-features off,
+  action Node 24, gate rilis, `tests/release_hygiene.test.cjs`) **digabungkan
+  kembali** — squash merge v3.3.0 sempat menjatuhkannya sehingga `cargo deny`
+  dan `makepkg` di CI merah lagi.
+- **Dead code sisa refactor K4** — `youtube::is_fresh_cookie_file` kehilangan
+  satu-satunya pemanggil setelah `cookie_args` dipindah ke
+  `Config::find_fresh_cookies_file`, dan helper murninya
+  `cookie_file_is_fresh` jadi hanya dipakai `mod tests`. Keduanya
+  `dead_code` pada build lib, dan Clippy CI (`-D warnings`) mengubahnya
+  menjadi error yang memblokir seluruh job "Test & Build" — gagal selama ini
+  tidak terlihat karena `cargo deny` mati lebih dulu di step sebelumnya.
+  Wrapper dihapus; helper diberi `#[cfg(test)]`; test TTL kini juga memaku
+  `Config::COOKIE_FRESH_SECS` supaya tidak bisa menyimpang dari logika
+  produksi. Tidak ada perubahan perilaku.
+- **Kegagalan Clippy kini terbaca tanpa log runner** — CI menerbitkan ulang
+  diagnostik Clippy sebagai anotasi run bila gate-nya gagal. Sebelumnya
+  kegagalan hanya muncul sebagai "exit code 101", dan log runner GitHub tidak
+  selalu dapat diunduh, sehingga penyebabnya harus ditebak. Step diagnostik
+  ini tidak mengubah hasil gate.
+
 ### Changed
 
 - Versi 3.3.0 disinkronkan di `Cargo.toml`, `Cargo.lock`, `extension/manifest.json`, dan `package(-lock).json` (dijaga `tests/version_sync.rs`).
+
+## [3.2.10] - 2026-09-23
+
+Perbaikan hasil audit menyeluruh, dikerjakan dalam empat tahap. Bagian ini
+mencatat tahap 1: CI, dependensi, packaging, dan jalur rilis. (Entri ini
+ditulis di branch PR v3.2.10; squash merge v3.3.0 menjatuhkannya dari main
+dan kini digabungkan kembali ke riwayat changelog.)
+
+### Fixed
+
+- `packaging/PKGBUILD` tidak lagi memiliki token `)makedepends` pada satu
+  baris; berkas kembali bisa di-source oleh `makepkg`.
+- `cargo deny` menerima lisensi permisif `CDLA-Permissive-2.0` yang dipakai
+  `webpki-roots`, sehingga gerbang dependency policy tidak memblokir seluruh
+  test/build setelahnya.
+- Paket Debian dibangun dengan `dpkg-deb --root-owner-group`; payload yang
+  dibangun runner UID 1001 tidak lagi terpasang sebagai milik user biasa.
+- `reqwest` memakai `default-features = false` bersama `rustls-tls`, sehingga
+  backend default `native-tls`/OpenSSL yang tidak disengaja tidak ikut dibangun.
+- Konfigurasi `rust-cache` tidak lagi memperlakukan direktori `target` sebagai
+  workspace kedua yang belum ada.
+- `cd` di fungsi PKGBUILD kini diperiksa dan `build-arch.sh` tidak lagi
+  mem-parsing output `ls`.
+
+### CI / Release
+
+- `actions/checkout` dan `actions/setup-node` dinaikkan ke v5;
+  `actions/upload-artifact` dinaikkan ke v6. Seluruhnya memakai runtime Node
+  24, bukan action Node 20 yang sudah deprecated.
+- Workflow rilis sekarang menjalankan `cargo audit`, `cargo deny`, Clippy
+  blocking, seluruh test, lint extension, dan `check-undeclared` **sebelum**
+  memublikasikan artefak. Kepemilikan isi `.deb` juga diverifikasi numerik
+  sebagai `0/0`.
+- Ditambahkan `tests/release_hygiene.test.cjs` untuk mengunci syntax
+  PKGBUILD, root ownership, backend TLS, versi action, cache, dan seluruh gate
+  rilis.
+
+### Documentation
+
+- Klaim historis README v3.2.8 bahwa "CI kembali hijau" dikoreksi. Perbaikan
+  v3.2.8 memang menutup beberapa kegagalan, tetapi full workflow masih merah
+  karena syntax PKGBUILD dan lisensi `webpki-roots`; keduanya baru ditutup di
+  v3.2.10.
+- Versi 3.2.10 disinkronkan di `Cargo.toml`, entri `fast-dm` pada
+  `Cargo.lock`, `extension/manifest.json`, `package.json`, dan
+  `package-lock.json`.
 
 ## [3.2.9] - 2026-09-23
 

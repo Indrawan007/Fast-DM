@@ -16,7 +16,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install system dependencies
         run: |
@@ -30,9 +30,28 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+      # Tag rilis harus melewati gerbang yang sama dengan CI utama. Dulu tag
+      # bisa memublikasikan artefak walau audit/deny/clippy di CI merah.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Run cargo audit
+        run: cargo audit
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Run cargo deny
+        run: cargo deny check advisories bans licenses sources
+
+      - name: Clippy (blocking)
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Run tests
         run: cargo test --locked
@@ -40,15 +59,29 @@ jobs:
       - name: Build Debian package
         run: bash packaging/build-deb.sh
 
-      - uses: actions/setup-node@v4
+      - name: Verify .deb ownership
+        run: |
+          DEB=$(find build -maxdepth 1 -name '*.deb' -print -quit)
+          test -n "$DEB"
+          dpkg-deb --fsys-tarfile "$DEB" \
+            | tar --numeric-owner -tvf - \
+            | awk '$2 != "0/0" { print "non-root owner: " $0; bad=1 } END { exit bad }'
+
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
 
-      - name: Test browser extension
-        run: node --test tests/extension.test.cjs
+      - name: Install extension tooling
+        run: npm ci
+
+      - name: Test browser extension & release hygiene
+        run: node --test tests/*.test.cjs
 
       - name: Lint Chromium extension
         run: node tests/extension_lint.cjs
+
+      - name: Check for undeclared identifiers
+        run: node tools/check-undeclared.cjs
 
       - name: Build extension zip
         run: |
@@ -100,13 +133,13 @@ jobs:
             sudo \
             github-cli
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Run tests
         run: cargo test --locked
 
-      - name: Test browser extension
-        run: node --test tests/extension.test.cjs
+      - name: Test browser extension & release hygiene
+        run: node --test tests/*.test.cjs
 
       - name: Build Arch package
         run: |

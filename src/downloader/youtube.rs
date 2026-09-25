@@ -188,14 +188,16 @@ pub(crate) fn cookie_args(url: &str) -> Vec<String> {
     vec![]
 }
 
-/// Bagian murni dari `is_fresh_cookie_file` (bisa di-unit test tanpa filesystem).
+/// Bagian murni dari `Config::is_fresh_cookie_file`: ambang yang sama, tanpa
+/// filesystem, jadi bisa di-unit test tanpa menulis file cookie sungguhan.
 /// Header Netscape = 29 byte; > 30 berarti minimal ada satu baris cookie.
-/// Wrapper Config::COOKIE_FRESH_SECS supaya test tetap lokal tanpa IO.
+///
+/// `#[cfg(test)]` wajib: fungsi ini memang hanya dipakai `mod tests`. Tanpa
+/// gerbang itu build lib melaporkannya sebagai `dead_code`, dan Clippy CI
+/// (`-D warnings`) mengubahnya menjadi error yang memblokir seluruh job.
+#[cfg(test)]
 fn cookie_file_is_fresh(len: u64, age_secs: u64) -> bool {
     len > 30 && age_secs < Config::COOKIE_FRESH_SECS
-}
-fn is_fresh_cookie_file(path: &std::path::Path) -> bool {
-    Config::is_fresh_cookie_file(path)
 }
 
 pub(crate) fn output_template(save_dir: &str, filename: &str) -> String {
@@ -1044,6 +1046,9 @@ mod tests {
     fn cookie_file_fresh_matches_written_ttl() {
         // TTL yang ditulis ipc::write_cookies_txt = 24 jam → file berumur
         // 3 jam masih HARUS dipakai (dulu ditolak karena ambang 2 jam).
+        // Ambangnya dipaku dari Config (satu sumber) supaya helper test di
+        // atas tidak bisa diam-diam menyimpang dari logika produksi.
+        assert_eq!(Config::COOKIE_FRESH_SECS, 24 * 3600);
         assert!(cookie_file_is_fresh(200, 3 * 3600));
         assert!(cookie_file_is_fresh(200, 23 * 3600));
         assert!(!cookie_file_is_fresh(200, 25 * 3600));

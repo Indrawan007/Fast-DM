@@ -31,7 +31,8 @@ optdepends=(
   'xclip: monitor clipboard di sesi X11'
   'wl-clipboard: monitor clipboard di sesi Wayland'
   'chrome: browser untuk extension Native Messaging'
-)makedepends=('cargo' 'rust')
+)
+makedepends=('cargo' 'rust')
 # Arch mengaktifkan lto+debug+CFLAGS di /etc/makepkg.conf. cargo build
 # --release di job CI yang sama (tanpa flag itu) lolos, lalu makepkg gagal
 # di build() dengan exit 4: -flto / RUSTFLAGS debug memecahkan link crate
@@ -50,7 +51,7 @@ unset_makepkg_rust_flags() {
     CFLAGS CXXFLAGS LDFLAGS CPPFLAGS
 }
 build() {
-  cd "$srcdir/$pkgname-$pkgver"
+  cd "$srcdir/$pkgname-$pkgver" || return 1
   unset_makepkg_rust_flags
   # --locked: pakai Cargo.lock apa adanya — sama seperti CI (ci.yml),
   # release.yml, dan packaging/build-deb.sh. LTO / codegen-units / strip /
@@ -58,7 +59,7 @@ build() {
   cargo build --release --locked --target-dir "$srcdir/target"
 }
 check() {
-  cd "$srcdir/$pkgname-$pkgver"
+  cd "$srcdir/$pkgname-$pkgver" || return 1
   unset_makepkg_rust_flags
   # Unit test + integration test Rust. --target-dir sama dengan build()
   # supaya artefak test tidak dikompilasi ulang dari nol.
