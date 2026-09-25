@@ -601,6 +601,47 @@ const STATUS_KEYS: &[&str] = &[
     "errorMessage",
 ];
 
+/// Basename mentah URL — pembanding untuk `adopt_reported_name`.
+///
+/// Sebelum respons HTTP tiba, aria2 melaporkan path dari URI (`…/open`). Nama
+/// itu bukan informasi baru (kita sudah punya dari URL) dan adopsi dini akan
+/// mengunci nama tersebut selamanya: setelah diadopsi, nama tidak lagi generic
+/// sehingga adopsi berikutnya tak pernah terjadi.
+fn url_raw_basename(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let last = parsed.path().trim_end_matches('/').rsplit('/').next()?;
+    if last.is_empty() {
+        return None;
+    }
+    Some(
+        urlencoding::decode(last)
+            .unwrap_or_else(|_| last.into())
+            .into_owned(),
+    )
+}
+
+/// Nama yang diadopsi dari laporan daemon (`files[0].path`) — v3.3.1.
+///
+/// Adopsi hanya bila nama kita masih generic DAN laporan itu membawa informasi
+/// baru: berbeda dari basename URL (lihat `url_raw_basename`). Unduhan yang
+/// sudah `complete` dikecualikan dari syarat "informasi baru" — saat itu nama
+/// laporan adalah nama FINAL di file yang benar-benar ditulis daemon, apa pun
+/// bentuknya.
+fn adopt_reported_name(
+    current: &str,
+    reported: &str,
+    url_basename: Option<&str>,
+    completed: bool,
+) -> Option<String> {
+    if !aria2::is_generic_filename(current) || reported.is_empty() || reported == current {
+        return None;
+    }
+    if !completed && url_basename == Some(reported) {
+        return None;
+    }
+    Some(reported.to_string())
+}
+
 /// Terminal kegagalan yang hormat-cancel: jangan menimpa keputusan user.
 async fn fail(
     info: &Arc<Mutex<DownloadInfo>>,
@@ -841,9 +882,24 @@ pub async fn download(
 
     // B2.2: opsi per-URI — header (mis. Referer) +
     // timeout/retry mengikuti Pengaturan.
+    // v3.3.1: sama seperti jalur per-proses — nama placeholder tidak dipaksa
+    // sebagai opsi `out`. Daemon lalu memakai `Content-Disposition`/URL final
+    // (lihat `aria2::should_force_out_name`), dan namanya diadopsi dari
+    // `files[0].path` di loop poll bawah.
     let (out, headers) = {
         let i = info.lock().await;
-        (Some(i.filename.clone()), i.headers.clone())
+        // `if` eksplisit (bukan `bool::then`) supaya clone tidak dievaluasi
+        // malas — sekaligus menghindari lint `unnecessary_lazy_evaluations`.
+        let force = aria2::should_force_out_name(
+            &i.filename,
+            aria2::partial_control_exists(&i.save_dir, &i.filename),
+        );
+        let filename = if force {
+            Some(i.filename.clone())
+        } else {
+            None
+        };
+        (filename, i.headers.clone())
     };
     let options = adduri_options(&save_dir, out.as_deref(), &headers, cfg);
 
@@ -938,6 +994,9 @@ pub async fn download(
         return RpcOutcome::Done;
     }
 
+    // v3.3.1: pembanding adopsi nama (`adopt_reported_name`).
+    let url_base = url_raw_basename(&url);
+
     // v2.10.5 (perf): 600ms dulu membuat progress/kecepatan UI terasa lambat
     // (±1.6 update/detik). 300ms = ±3.3 update/detik — lebih responsif, biaya
     // tellStatus loopback dapat diabaikan.
@@ -992,8 +1051,10 @@ pub async fn download(
                 }
                 i.rpc_gid = None; // hasil dihapus dari daftar daemon
                 if let Some(f) = p.first_file.as_deref() {
-                    if aria2::is_generic_filename(&i.filename) {
-                        i.filename = f.to_string();
+                    if let Some(name) =
+                        adopt_reported_name(&i.filename, f, url_base.as_deref(), true)
+                    {
+                        i.filename = name;
                     }
                 }
                 i.downloaded = p.completed;
@@ -1041,9 +1102,14 @@ pub async fn download(
                 if !matches!(i.status, DownloadStatus::Downloading) {
                     i.status = DownloadStatus::Downloading;
                 }
+                // v3.3.1: nama asli yang dipilih daemon (kita tidak mengirim
+                // `out` saat nama masih placeholder) — kartu ikut berubah
+                // SEBELUM unduhan selesai.
                 if let Some(f) = p.first_file.as_deref() {
-                    if aria2::is_generic_filename(&i.filename) {
-                        i.filename = f.to_string();
+                    if let Some(name) =
+                        adopt_reported_name(&i.filename, f, url_base.as_deref(), false)
+                    {
+                        i.filename = name;
                     }
                 }
                 i.total_size = p.total;
@@ -1203,6 +1269,61 @@ mod tests {
         assert!(o.get("out").is_none());
         assert!(o.get("cookie").is_none());
         assert!(o.get("header").is_none());
+    }
+
+    // ── v3.3.1: adopsi nama dari laporan daemon (`files[0].path`) ──
+
+    #[test]
+    fn adopt_reported_name_upgrades_placeholder_only() {
+        let placeholder = "download_1790300206135_cd6d";
+        let url_base = Some("open");
+        // Nama asli (dari Content-Disposition daemon) → diadopsi.
+        assert_eq!(
+            adopt_reported_name(
+                placeholder,
+                "Goatwillow 2026 06（JPG）.zip",
+                url_base,
+                false
+            ),
+            Some("Goatwillow 2026 06（JPG）.zip".to_string())
+        );
+        // Laporan yang hanya basename URI (`…/open`) BUKAN informasi baru:
+        // adopsi dini akan mengunci nama itu karena setelahnya tidak generic.
+        assert_eq!(
+            adopt_reported_name(placeholder, "open", url_base, false),
+            None
+        );
+        // Kecuali unduhan sudah selesai — saat itu nama = file final di disk.
+        assert_eq!(
+            adopt_reported_name(placeholder, "open", url_base, true),
+            Some("open".to_string())
+        );
+        // Nama spesifik tidak pernah ditimpa (laporan = nama kita sendiri).
+        assert_eq!(adopt_reported_name("eee.mp4", "open", url_base, true), None);
+        // Tidak ada perubahan / laporan kosong.
+        assert_eq!(
+            adopt_reported_name(placeholder, placeholder, url_base, true),
+            None
+        );
+        assert_eq!(adopt_reported_name(placeholder, "", url_base, true), None);
+    }
+
+    #[test]
+    fn url_raw_basename_strips_query_and_decodes() {
+        assert_eq!(
+            url_raw_basename("https://drive.usercontent.google.com/open?id=X&authuser=0"),
+            Some("open".to_string())
+        );
+        assert_eq!(
+            url_raw_basename("https://cdn.test/unduh/Goatwillow%202026.zip"),
+            Some("Goatwillow 2026.zip".to_string())
+        );
+        assert_eq!(
+            url_raw_basename("https://cdn.test/dir/"),
+            Some("dir".to_string())
+        );
+        assert_eq!(url_raw_basename("https://cdn.test"), None);
+        assert_eq!(url_raw_basename("bukan-url"), None);
     }
 
     #[test]

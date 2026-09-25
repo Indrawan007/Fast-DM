@@ -18,6 +18,12 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 - 🐧 **Multi-distro** — paket `.deb` (Debian/Ubuntu) **dan** `.pkg.tar.zst` (Arch/Manjaro/EndeavourOS); pesan "tool tidak terinstall" otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro
 
+## Perubahan v3.3.1
+
+- **Nama file asli tidak lagi hilang pada tautan tanpa nama** (mis. Google Drive `…/open?id=…`): selama nama masih placeholder `download_<millis>_<hex>`, Fast-DM tidak memaksakannya ke aria2 — aria2 memakai `Content-Disposition`/URL final lalu namanya diadopsi balik, sehingga file di disk sudah benar sejak awal dan kartu unduhan ikut berubah.
+- **Pra-cek yang ditolak (403/405/416/429/5xx) tetap memakai `Content-Disposition` + URL final** untuk menamai file, dan tabrakan nama tetap diselesaikan gaya browser (`eee (1).mp4`).
+- Unduhan yang sudah punya nama spesifik (dari URL, header, atau dialog "Simpan Sebagai…") berperilaku persis sama seperti sebelumnya, termasuk saat resume.
+
 ## Perubahan v3.3.0
 
 - **Audit 22 bug (K1-K11 kritis, M1-M8 medium, L1-L5 low)** — perbaikan menyeluruh hasil audit kode:
