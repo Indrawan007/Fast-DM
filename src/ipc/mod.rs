@@ -494,6 +494,27 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
             control_response(&msg.action, id, accepted)
         }
 
+        // v3.3.2: extension bertanya apakah unduhan yang ia cegat harus
+        // dikembalikan ke browser (server menolak Fast-DM). `message` =
+        // "pending" | "handback" | "done" — lihat `HandbackState`.
+        "handback" => {
+            let Some(id) = msg.id.as_deref() else {
+                return IpcResponse {
+                    success: false,
+                    id: None,
+                    error: Some("No ID untuk aksi handback".into()),
+                    message: None,
+                };
+            };
+            let state = engine.poll_browser_handback(id).await;
+            IpcResponse {
+                success: true,
+                id: Some(id.to_string()),
+                error: None,
+                message: Some(state.as_str().into()),
+            }
+        }
+
         "list" => {
             let downloads = engine.get_all_downloads().await;
             let list: Vec<serde_json::Value> = downloads

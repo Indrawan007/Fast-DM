@@ -3,6 +3,18 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.3.2] - 2026-09-25
+
+Unduhan dari browser yang ditolak server (HTTP 403 / halaman HTML) tidak lagi
+berakhir "GAGAL" — diserahkan kembali ke browser secara otomatis.
+
+### Fixed
+
+- **Unduhan hilang saat server menolak Fast-DM** — extension membatalkan unduhan di browser lalu menyerahkannya ke Fast-DM; bila server (file-host dengan anti-bot/hotlink-protection, sesi terikat sidik jari TLS browser, tautan bertanda tangan) menjawab 403 (aria2 exit 22/24) atau halaman HTML, user kehilangan unduhannya. Kini `DownloadInfo::access_denied` menandai kegagalan itu (per-proses: `is_access_denied_exit`; daemon RPC: `Patch::error_code`; resolver: respons HTML), extension menanyakan hasilnya lewat aksi IPC baru `handback` (`pending`/`handback`/`done`), dan bila ditolak sebelum satu byte pun diterima, item ditandai "Diserahkan ke browser" secara atomik lalu browser mengunduhnya sendiri.
+- **Native host membuang ID unduhan** — `NativeResponse` kini meneruskan `id` dari GUI (dibutuhkan aksi `handback`).
+- **Pesan error lama tetap tampil saat percobaan baru berjalan** — kartu berstatus MENGUNDUH sambil menampilkan "aria2c gagal (exit 22)" milik percobaan sebelumnya. `request_start` kini membersihkan `error_msg`.
+- **Retry otomatis untuk penolakan server** — 403/401/halaman HTML tidak lagi di-retry otomatis 2× (request identik mendapat jawaban identik); tombol **Ulangi** langsung tersedia. Gangguan jaringan sementara tetap di-retry seperti sebelumnya.
+
 ## [3.3.1] - 2026-09-25
 
 Perbaikan penamaan file: nama placeholder `download_<millis>_<4 hex>` (dibuat

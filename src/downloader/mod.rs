@@ -532,6 +532,32 @@ impl DownloadEngine {
         true
     }
 
+    /// v3.3.2: aksi IPC `handback` — dipanggil berkala oleh extension untuk
+    /// unduhan yang ia cegat dari browser. Bila server menolak Fast-DM
+    /// (`DownloadInfo::needs_browser_handback`), item ditandai selesai-
+    /// diserahkan SECARA ATOMIK (di bawah lock item yang sama dengan
+    /// pemeriksaannya) lalu browser mengunduhnya sendiri dengan sesi,
+    /// header, dan sidik jari TLS aslinya.
+    pub async fn poll_browser_handback(&self, id: &str) -> HandbackState {
+        let downloads = self.downloads.read().await;
+        let Some(info) = downloads.get(id) else {
+            return HandbackState::Done;
+        };
+        let mut i = info.lock().await;
+        if i.needs_browser_handback() {
+            i.status = DownloadStatus::Cancelled;
+            i.access_denied = false;
+            i.error_msg.clear();
+            i.speed = 0;
+            i.status_detail = HANDBACK_DETAIL.to_string();
+            let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
+            self.mark_dirty();
+            tracing::info!("Unduhan {} diserahkan kembali ke browser", i.id);
+            return HandbackState::Handback;
+        }
+        handback_state_of(&i)
+    }
+
     pub async fn clear_download(&self, id: &str) {
         // Cancel dulu supaya background task (aria2/yt-dlp) berhenti. Tidak
         // mengirim event agar row yang baru dihapus GUI tidak dibuat kembali.
@@ -733,6 +759,45 @@ fn spawn_supervised(
             promote_next(downloads, tx, shared_config, dirty, shutting_down).await;
         }
     });
+}
+
+/// v3.3.2: jawaban aksi IPC `handback` (lihat `poll_browser_handback`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandbackState {
+    /// Masih menentukan (resolve / menunggu byte pertama / worker belum
+    /// selesai) — extension perlu bertanya lagi.
+    Pending,
+    /// Server menolak Fast-DM; item sudah ditandai — browser harus
+    /// mengunduhnya sendiri sekarang.
+    Handback,
+    /// Tidak perlu diserahkan (data mengalir, selesai, dijeda/dibatalkan
+    /// user, gagal karena sebab lain, atau item sudah tidak ada).
+    Done,
+}
+
+impl HandbackState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Handback => "handback",
+            Self::Done => "done",
+        }
+    }
+}
+
+pub const HANDBACK_DETAIL: &str =
+    "Diserahkan ke browser — server menolak Fast-DM (HTTP 403/login/anti-bot).";
+
+/// Fungsi murni untuk item yang TIDAK (atau belum) perlu diserahkan.
+pub(crate) fn handback_state_of(i: &DownloadInfo) -> HandbackState {
+    match i.status {
+        DownloadStatus::Queued | DownloadStatus::Resolving => HandbackState::Pending,
+        DownloadStatus::Downloading if i.downloaded == 0 => HandbackState::Pending,
+        // Error yang worker-nya belum lepas slot, atau retry otomatis masih
+        // tertunda: keputusan akhir belum ada (retry bisa saja berakhir 403).
+        DownloadStatus::Error if i.worker_active || i.resume_pending => HandbackState::Pending,
+        _ => HandbackState::Done,
+    }
 }
 
 /// Skema yang engine tahu cara mengunduhnya: http/https/ftp (aria2/yt-dlp).
@@ -1632,6 +1697,79 @@ mod tests {
             shutting_down: Arc::new(AtomicBool::new(false)),
             restored_ids: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    #[tokio::test]
+    async fn handback_marks_rejected_download_once() {
+        let engine = lifecycle_engine();
+        let info = lifecycle_item(&engine, "denied", DownloadStatus::Error).await;
+        {
+            let mut i = info.lock().await;
+            i.access_denied = true;
+            i.error_msg = "aria2c gagal (exit 22): server menolak permintaan".into();
+        }
+        assert_eq!(
+            engine.poll_browser_handback("denied").await,
+            HandbackState::Handback
+        );
+        {
+            let i = info.lock().await;
+            assert_eq!(i.status, DownloadStatus::Cancelled);
+            assert!(i.error_msg.is_empty());
+            assert_eq!(i.status_detail, HANDBACK_DETAIL);
+        }
+        assert!(engine.dirty.load(Ordering::SeqCst));
+        // Poll kedua tidak boleh memicu unduhan browser ganda.
+        assert_eq!(
+            engine.poll_browser_handback("denied").await,
+            HandbackState::Done
+        );
+        assert_eq!(
+            engine.poll_browser_handback("missing").await,
+            HandbackState::Done
+        );
+    }
+
+    #[tokio::test]
+    async fn handback_waits_for_decision_and_ignores_other_failures() {
+        let engine = lifecycle_engine();
+        for status in [DownloadStatus::Queued, DownloadStatus::Resolving] {
+            lifecycle_item(&engine, "p", status).await;
+            assert_eq!(
+                engine.poll_browser_handback("p").await,
+                HandbackState::Pending
+            );
+        }
+        let dl = lifecycle_item(&engine, "dl", DownloadStatus::Downloading).await;
+        assert_eq!(
+            engine.poll_browser_handback("dl").await,
+            HandbackState::Pending
+        );
+        dl.lock().await.downloaded = 4096;
+        assert_eq!(
+            engine.poll_browser_handback("dl").await,
+            HandbackState::Done
+        );
+
+        // Worker belum melepas slot → belum final walau sudah access_denied.
+        let busy = lifecycle_item(&engine, "busy", DownloadStatus::Error).await;
+        {
+            let mut i = busy.lock().await;
+            i.access_denied = true;
+            i.worker_active = true;
+        }
+        assert_eq!(
+            engine.poll_browser_handback("busy").await,
+            HandbackState::Pending
+        );
+
+        // Gagal karena sebab lain (disk penuh, 404, dll.) → bukan urusan browser.
+        let other = lifecycle_item(&engine, "other", DownloadStatus::Error).await;
+        assert_eq!(
+            engine.poll_browser_handback("other").await,
+            HandbackState::Done
+        );
+        assert_eq!(other.lock().await.status, DownloadStatus::Error);
     }
 
     async fn lifecycle_item(

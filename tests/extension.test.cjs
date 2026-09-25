@@ -599,3 +599,71 @@ for (const variant of ["browser", "explicit", "no-navigator"]) {
     assert.equal((await response).success, true);
   });
 }
+
+// v3.3.2: server menolak Fast-DM (HTTP 403 / halaman HTML) setelah unduhan
+// diterima — extension wajib mengembalikannya ke browser, bukan membiarkan
+// user kehilangan unduhan yang sudah dibatalkan di browser.
+async function interceptThenPoll(states) {
+  const b = background();
+  const flushed = () => new Promise(setImmediate);
+  // Hanya jeda polling handback yang dijalankan; timeout native (25 dtk) dan
+  // timer badge tetap tidak pernah terpicu.
+  b.context.setTimeout = (callback, delay) => {
+    if (delay === 2000) setImmediate(callback);
+    return 1;
+  };
+  const url = "https://files.example/4c59afe7.zip?sig=abc";
+  void b.onDownloadsCreated({
+    id: 7,
+    url,
+    finalUrl: url,
+    filename: "/home/user/Downloads/4c59afe7.zip",
+    fileSize: 50_000_000,
+    mime: "application/zip",
+    referrer: "https://files.example/page",
+    state: "in_progress",
+  });
+  await flushed();
+  assert.equal(b.requests[0].message.action, "download");
+  b.requests[0].callback({ success: true, id: "dl_abc" });
+  for (const state of states) {
+    for (let i = 0; i < 5; i++) await flushed();
+    const req = b.requests.at(-1);
+    assert.equal(req.message.action, "handback");
+    assert.equal(req.message.id, "dl_abc");
+    req.callback({ success: true, id: "dl_abc", message: state });
+  }
+  for (let i = 0; i < 5; i++) await flushed();
+  return { b, url };
+}
+
+test("rejected download is handed back to the browser after pending polls", async () => {
+  const { b, url } = await interceptThenPoll(["pending", "pending", "handback"]);
+  assert.equal(b.requests.length, 4, "download + 3 poll, lalu berhenti");
+  assert.equal(
+    JSON.stringify(b.downloaded),
+    JSON.stringify([{ url }]),
+    "browser mengunduh ulang, tanpa saveAs",
+  );
+  assert.equal(b.badges.at(-1), "↩");
+
+  // Unduhan hasil handback tidak boleh dicegat & dikirim ke Fast-DM lagi.
+  b.onDownloadsCreated({
+    id: 8,
+    url,
+    finalUrl: url,
+    filename: "/home/user/Downloads/4c59afe7.zip",
+    fileSize: 50_000_000,
+    mime: "application/zip",
+    state: "in_progress",
+  });
+  await new Promise(setImmediate);
+  assert.equal(b.requests.length, 4);
+  assert.deepEqual(b.cancelled, [7]);
+});
+
+test("download that starts flowing is never handed back", async () => {
+  const { b } = await interceptThenPoll(["pending", "done"]);
+  assert.equal(b.requests.length, 3, "polling berhenti pada done");
+  assert.equal(b.downloaded.length, 0);
+});

@@ -22,6 +22,10 @@ struct NativeMessage {
 #[derive(Serialize)]
 struct NativeResponse {
     success: bool,
+    /// v3.3.2: ID unduhan dari GUI (dulu dibuang di sini) — extension
+    /// membutuhkannya untuk aksi `handback`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -62,6 +66,7 @@ pub fn run() {
             Ok(msg) => handle_native_message(msg),
             Err(e) => NativeResponse {
                 success: false,
+                id: None,
                 message: None,
                 error: Some(e.to_string()),
             },
@@ -93,11 +98,13 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
                 match setup::register_extension_id(&ext_id) {
                     Ok(n) => NativeResponse {
                         success: true,
+                        id: None,
                         message: Some(format!("Registered {} manifests", n)),
                         error: None,
                     },
                     Err(e) => NativeResponse {
                         success: false,
+                        id: None,
                         message: None,
                         error: Some(e.to_string()),
                     },
@@ -105,6 +112,7 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
             } else {
                 NativeResponse {
                     success: false,
+                    id: None,
                     message: None,
                     error: Some("No extension_id".into()),
                 }
@@ -156,12 +164,14 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
                     if ready {
                         forward_to_gui(&socket_path, &msg).unwrap_or(NativeResponse {
                             success: false,
+                            id: None,
                             message: None,
                             error: Some("Cannot reach GUI".into()),
                         })
                     } else {
                         NativeResponse {
                             success: false,
+                            id: None,
                             message: None,
                             error: Some(format!(
                                 "Cannot reach GUI: Fast DM tidak bisa dijalankan ({})",
@@ -255,6 +265,9 @@ fn parse_gui_response(line: &str) -> Result<NativeResponse, String> {
 
     Ok(NativeResponse {
         success,
+        id: resp
+            .get("id")
+            .and_then(|v| v.as_str().map(|s| s.to_string())),
         message: resp
             .get("message")
             .and_then(|v| v.as_str().map(|s| s.to_string())),
@@ -278,8 +291,9 @@ mod tests {
 
     #[test]
     fn gui_response_preserves_success_and_rejection() {
-        let ok = parse_gui_response(r#"{"success":true,"message":"queued"}"#).unwrap();
+        let ok = parse_gui_response(r#"{"success":true,"id":"dl_1","message":"queued"}"#).unwrap();
         assert!(ok.success);
+        assert_eq!(ok.id.as_deref(), Some("dl_1"));
         assert_eq!(ok.message.as_deref(), Some("queued"));
 
         let rejected = parse_gui_response(r#"{"success":false,"error":"denied"}"#).unwrap();

@@ -81,6 +81,13 @@ pub struct DownloadInfo {
     pub(crate) retry_after: Option<Instant>,
     #[serde(skip)]
     pub(crate) auto_retry_count: u8,
+    /// v3.3.2: server MENOLAK Fast-DM (HTTP 401/403/429 → aria2 exit 22/24,
+    /// atau probe mendapat halaman HTML) sebelum satu byte pun diterima.
+    /// Retry otomatis dengan request yang sama sia-sia; unduhan yang berasal
+    /// dari intersep browser diserahkan kembali ke browser (aksi IPC
+    /// `handback`). Runtime-only: direset setiap start.
+    #[serde(skip)]
+    pub(crate) access_denied: bool,
 }
 
 impl DownloadInfo {
@@ -116,6 +123,7 @@ impl DownloadInfo {
             resume_pending: false,
             retry_after: None,
             auto_retry_count: 0,
+            access_denied: false,
             created: chrono::Utc::now().timestamp_millis(),
         }
     }
@@ -161,6 +169,12 @@ impl DownloadInfo {
         self.speed = 0;
         self.eta = 0;
         self.status_detail.clear();
+        // v3.3.2: pesan kegagalan percobaan sebelumnya dulu tetap tampil
+        // (merah) selama percobaan baru berjalan — kartu berstatus MENGUNDUH
+        // sambil menampilkan "aria2c gagal (exit 22)" milik percobaan lama.
+        // Percobaan baru dimulai bersih; kegagalan baru akan menulisnya lagi.
+        self.error_msg.clear();
+        self.access_denied = false;
         self.status = if slot_available {
             DownloadStatus::Resolving
         } else {
@@ -180,6 +194,7 @@ impl DownloadInfo {
     pub(crate) fn schedule_auto_retry(&mut self, retry_wait: u8) -> Option<Duration> {
         if self.status != DownloadStatus::Error
             || self.resume_pending
+            || self.access_denied
             || self.auto_retry_count >= MAX_AUTO_RETRIES
         {
             return None;
@@ -241,6 +256,18 @@ impl DownloadInfo {
         if !auto_retry_pending {
             self.resume_pending = false;
         }
+    }
+
+    /// v3.3.2: unduhan gagal karena server menolak Fast-DM, sebelum ada
+    /// data yang diterima, dan tidak ada worker/retry yang masih berjalan.
+    /// Unduhan seperti ini sebaiknya diunduh ulang oleh browser (yang punya
+    /// sesi, sidik jari TLS, dan header lengkap) daripada dibiarkan gagal.
+    pub(crate) fn needs_browser_handback(&self) -> bool {
+        self.status == DownloadStatus::Error
+            && self.access_denied
+            && self.downloaded == 0
+            && !self.worker_active
+            && !self.resume_pending
     }
 
     pub fn total_size_fmt(&self) -> String {
@@ -315,6 +342,45 @@ mod tests {
             Default::default(),
             None,
         )
+    }
+
+    #[test]
+    fn restart_clears_previous_error_message() {
+        let mut info = lifecycle_info();
+        info.status = DownloadStatus::Error;
+        info.error_msg = "aria2c gagal (exit 22): server menolak permintaan".into();
+        info.access_denied = true;
+        assert!(info.request_start(true));
+        assert!(info.error_msg.is_empty());
+        assert!(!info.access_denied);
+    }
+
+    #[test]
+    fn access_denied_is_not_auto_retried_and_needs_handback() {
+        let mut info = lifecycle_info();
+        assert!(info.request_start(true));
+        info.status = DownloadStatus::Error;
+        info.access_denied = true;
+        assert_eq!(info.schedule_auto_retry(1), None);
+        assert!(!info.needs_browser_handback(), "worker masih aktif");
+        info.finish_worker(true);
+        assert_eq!(info.status, DownloadStatus::Error);
+        assert!(info.needs_browser_handback());
+
+        // Sudah ada data yang diterima → jangan serahkan ke browser (akan
+        // mengunduh ulang dari nol dan membuang progres).
+        info.downloaded = 1;
+        assert!(!info.needs_browser_handback());
+    }
+
+    #[test]
+    fn transient_error_still_auto_retries_without_handback() {
+        let mut info = lifecycle_info();
+        assert!(info.request_start(true));
+        info.status = DownloadStatus::Error;
+        assert!(info.schedule_auto_retry(1).is_some());
+        info.finish_worker(true);
+        assert!(!info.needs_browser_handback());
     }
 
     #[test]
