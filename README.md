@@ -22,6 +22,33 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 
 - **Audit 22 bug (K1-K11 kritis, M1-M8 medium, L1-L5 low)** — perbaikan menyeluruh hasil audit kode:
   - Cookie freshness 24h konsisten di semua jalur (aria2, youtube, RPC), clipboard re-probe saat tool hilang, TOCTOU port race dihilangkan, rpc_secret invalid dibersihkan, backup config/session pakai millis+random anti-tabrakan, save_dir divalidasi (absolute, tanpa `..`, tolak `/` & `/tmp`) dengan inline error di Pengaturan, proxy inline validation, speed limit tolak spasi internal, shutdown daemon tidak simpan GID basi, filename fallback anti-collision millis+random, proxy length limit, cookies filename truncate. Setelah memperbarui, **reload** extension di `chrome://extensions`.
+- **Semua perbaikan CI/packaging v3.2.10 digabungkan kembali** — squash
+  merge v3.3.0 sempat menjatuhkannya, sehingga `cargo deny` dan paket Arch
+  merah lagi di CI; kini statusnya dipulihkan (lihat bagian v3.2.10).
+- **CI tidak lagi merah karena Clippy** — refactor cookie freshness di atas
+  meninggalkan satu fungsi yang tak terpakai di backend YouTube. Clippy
+  memblokir job build, tetapi selama ini tidak pernah terlihat karena
+  `cargo deny` gagal lebih dulu. Fungsi mati itu dibersihkan; tidak ada
+  perubahan cara mengunduh. Kegagalan Clippy berikutnya juga akan tampil
+  sebagai anotasi di halaman Actions, bukan sekadar "exit code 101".
+
+## Perubahan v3.2.10
+
+Perbaikan audit dikerjakan dalam empat tahap. Tahap 1 memperkuat fondasi build
+dan rilis:
+
+- `PKGBUILD` kembali valid, kebijakan lisensi menerima
+  `CDLA-Permissive-2.0`, dan cache Cargo tidak lagi mencoba workspace
+  `target` yang belum ada.
+- Paket `.deb` selalu menyimpan payload sebagai `root:root`, bukan UID runner
+  pembangun.
+- HTTP resolver hanya memakai Rustls; backend `native-tls`/OpenSSL yang tidak
+  disengaja dinonaktifkan.
+- Workflow memakai action berbasis Node 24 dan workflow rilis kini wajib lolos
+  format, audit, cargo-deny, Clippy, seluruh test, lint extension, serta
+  pemeriksa identifier sebelum artefak dipublikasikan.
+- Regression test `release_hygiene.test.cjs` mengunci aturan CI/packaging di
+  atas agar tidak kembali rusak.
 
 ## Perubahan v3.2.9
 
@@ -39,11 +66,13 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 
 ## Perubahan v3.2.8
 
-- CI kembali hijau: pemeriksa identifier extension (`tools/check-undeclared.cjs`)
-  yang hilang sejak v3.2.3 ada lagi, `cargo audit` tidak lagi gagal pada
-  `rustls`/`h2`, dan paket Arch tidak lagi mati di `makepkg` karena flag
-  LTO/debug. Tidak ada perubahan cara mengunduh. Setelah memperbarui extension,
-  **reload** di `chrome://extensions`.
+- Pemeriksa identifier extension (`tools/check-undeclared.cjs`) yang hilang
+  sejak v3.2.3 ditambahkan kembali, advisory `rustls`/`h2` diperbarui, dan
+  konflik flag LTO/debug paket Arch diperbaiki. **Koreksi v3.2.10:** klaim lama
+  bahwa CI sudah kembali hijau tidak tepat; keseluruhan workflow saat itu masih
+  gagal karena syntax `PKGBUILD` dan kebijakan lisensi `webpki-roots`. Dua
+  blocker tersisa itu baru diperbaiki di v3.2.10. Tidak ada perubahan cara
+  mengunduh pada v3.2.8.
 
 ## Perubahan v3.2.7
 
