@@ -3,6 +3,19 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.3.1] - 2026-09-25
+
+Perbaikan penamaan file: nama placeholder `download_<millis>_<4 hex>` (dibuat
+saat URL tidak memuat nama file, mis. tautan Google Drive `…/open?id=…`) tidak
+lagi menimpa nama asli yang diketahui aria2.
+
+### Fixed
+
+- **T1 pra-cek non-2xx membuang nama** — jalur `ProbeVerdict::Proceed` di `resolve_filename` `return` lebih awal sehingga `Content-Disposition`, nama dari URL final setelah redirect, dan dedup gaya browser (`unique_filename`) terlewat. Kini ketiganya dijalankan lewat helper yang sama dengan jalur sukses (`apply_content_disposition`, `apply_final_url_name`, `apply_unique_filename`).
+- **Nama placeholder dipaksa ke aria2** — nama `download_<millis>_<hex>` selalu dikirim sebagai `--out=` (per-proses) / opsi `out` (daemon RPC), jadi nama asli dari server tertimpa. Kini keduanya dilewati untuk nama placeholder (`should_force_out_name`) dan nama yang dipilih aria2 diadopsi balik: jalur per-proses dari notice `[NOTICE] Download complete: <path>` (`parse_aria2_completed_name`), jalur daemon dari `files[0].path` (`adopt_reported_name`, kini juga saat unduhan masih berjalan).
+- **Adopsi nama tidak boleh terkunci ke basename URI** — sebelum respons HTTP tiba, daemon melaporkan path dari URI (`…/open`); nama itu bukan informasi baru dan adopsi dini membuat nama asli berikutnya tak pernah diambil (`url_raw_basename` sebagai pembanding).
+- Unduhan dengan nama spesifik (URL/`Content-Disposition`/dialog "Simpan Sebagai…") dan target resume (`<nama>.aria2` berdampingan) berperilaku sama seperti sebelumnya.
+
 ## [3.3.0] - 2026-09-24
 
 Rilis perbaikan hasil audit bug menyeluruh — 22 bug (K1-K11 kritis, M1-M8 medium, L1-L5 low).

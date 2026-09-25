@@ -161,7 +161,6 @@ fn build_aria2_cmd(
         "aria2c".into(),
         format!("--input-file={}", input_path.display()),
         format!("--dir={}", info.save_dir),
-        format!("--out={}", info.filename),
         format!(
             "--max-connection-per-server={}",
             conn_per_server(config.max_connections)
@@ -217,6 +216,19 @@ fn build_aria2_cmd(
         format!("--allow-overwrite={}", !config.auto_file_renaming),
         format!("--auto-file-renaming={}", config.auto_file_renaming),
     ];
+
+    // v3.3.1: nama placeholder (`download_<millis>_<hex>`) TIDAK dipaksa ke
+    // aria2. Tanpa `--out`, aria2 memakai `Content-Disposition`/URL final yang
+    // hanya dia ketahui dari respons HTTP — lalu namanya diadopsi dari notice
+    // `Download complete:` (lihat `should_force_out_name` &
+    // `parse_aria2_completed_name`). Saat nama dipertahankan (bukan placeholder,
+    // atau ada `<nama>.aria2` = target resume), perilakunya tidak berubah.
+    if should_force_out_name(
+        &info.filename,
+        partial_control_exists(&info.save_dir, &info.filename),
+    ) {
+        cmd.push(format!("--out={}", info.filename));
+    }
     if let Some(path) = proxy_path {
         cmd.push(format!("--conf-path={}", path.display()));
     }
@@ -315,7 +327,13 @@ async fn run_aria2c(
     let stderr_task = tokio::spawn(async move {
         let mut lines = super::ChildLines::new(stderr);
         let mut buf = String::new();
+        // v3.3.1: notice penyelesaian bisa muncul di stderr (tergantung build
+        // aria2) — sekalian dicatat supaya adopsi nama tetap jalan.
+        let mut completed_name: Option<String> = None;
         while let Some(line) = lines.next_line().await {
+            if let Some(name) = parse_aria2_completed_name(&line) {
+                completed_name = Some(name);
+            }
             buf.push_str(&line);
             buf.push('\n');
             // Batasi 8 KB (pertahankan 4 KB terbaru) — log error bisa sangat
@@ -329,7 +347,7 @@ async fn run_aria2c(
                 buf.drain(..drop);
             }
         }
-        buf
+        (buf, completed_name)
     });
 
     let mut lines = super::ChildLines::new(stdout);
@@ -337,6 +355,7 @@ async fn run_aria2c(
     // v2.3.1 (M1): cek status juga saat child tidak mengeluarkan output.
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
     let mut aborted = None;
+    let mut completed_name: Option<String> = None;
 
     loop {
         let line = tokio::select! {
@@ -393,6 +412,14 @@ async fn run_aria2c(
                 last_update = Instant::now();
             }
         }
+
+        // v3.3.1: aria2 melaporkan sendiri path finalnya saat selesai
+        // (`[NOTICE] Download complete: <path>`) — inilah cara jalur
+        // per-proses mengetahui nama yang dipilih aria2 ketika `--out` sengaja
+        // tidak dikirim.
+        if let Some(name) = parse_aria2_completed_name(&line) {
+            completed_name = Some(name);
+        }
     }
 
     if let Some(status) = aborted {
@@ -421,7 +448,7 @@ async fn run_aria2c(
 
     // stdout EOF → proses akan selesai. Tunggu stderr selesai (pipe tertutup),
     // lalu exit code. (kill_on_drop tetap jadi jaring pengaman jalur panic.)
-    let err_detail = stderr_task.await.unwrap_or_default();
+    let (err_detail, completed_name_stderr) = stderr_task.await.unwrap_or_default();
     let exit_code = child
         .wait()
         .await
@@ -436,6 +463,16 @@ async fn run_aria2c(
     }
 
     if exit_code == 0 {
+        // v3.3.1: sinkronkan nama kartu dengan nama file yang BENAR-BENAR
+        // dibuat aria2 (kita tidak mengirim `--out` untuk nama placeholder).
+        // Hanya nama generic yang diganti: nama hasil resolve yang spesifik
+        // sudah menjadi `--out`, jadi laporan aria2 = nama kita sendiri.
+        if let Some(name) = completed_name.or(completed_name_stderr) {
+            if is_generic_filename(&i.filename) {
+                tracing::info!("Nama dari aria2: {} (sebelumnya {})", name, i.filename);
+                i.filename = name;
+            }
+        }
         i.status = DownloadStatus::Completed;
         i.progress = 100.0;
         i.speed = 0;
@@ -643,6 +680,61 @@ fn resolve_client(config: &Config) -> Result<reqwest::Client, String> {
     result
 }
 
+/// Adopsi nama dari header `Content-Disposition` — sumber paling akurat.
+///
+/// v3.3.1 (T1): dipakai DUA jalur `resolve_filename` (respons 2xx dan respons
+/// probe yang ditolak), jadi logika "nama harus punya ekstensi" hanya ada di
+/// satu tempat.
+fn apply_content_disposition(i: &mut DownloadInfo, cd: Option<&str>) {
+    let Some(cd) = cd else { return };
+    let Some(name) = parse_content_disposition(cd) else {
+        return;
+    };
+    let cleaned = super::sanitize_filename(&name);
+    if !cleaned.is_empty() && cleaned.contains('.') {
+        tracing::info!("Filename from Content-Disposition: {}", cleaned);
+        i.filename = cleaned;
+    }
+}
+
+/// Adopsi nama dari URL final setelah redirect — hanya bila nama sekarang
+/// masih generic (mis. `/open?id=…` → `/unduh/Goatwillow.zip`).
+fn apply_final_url_name(i: &mut DownloadInfo, final_url: Option<&str>, original_url: &str) {
+    if !is_generic_filename(&i.filename) {
+        return;
+    }
+    let Some(final_url) = final_url else { return };
+    if final_url == original_url {
+        return;
+    }
+    let name = super::extract_filename_from_url(final_url);
+    if !is_generic_filename(&name) {
+        tracing::info!("Filename from final URL: {}", name);
+        i.filename = name;
+    }
+}
+
+/// Resolusi tabrakan gaya browser (v3.2.9) — dibungkus supaya kedua jalur
+/// `resolve_filename` memakainya; lihat [`unique_filename`] untuk alasannya.
+///
+/// Aturan `auto_file_renaming` mati → nama dipertahankan (backend sudah diberi
+/// allow-overwrite=true sehingga file lama ditimpa); file yang berdampingan
+/// dengan control file `.aria2` adalah target resume, bukan tabrakan.
+fn apply_unique_filename(i: &mut DownloadInfo, auto_file_renaming: bool) {
+    if !auto_file_renaming {
+        return;
+    }
+    let dir = i.save_dir.clone();
+    let chosen = unique_filename(&i.filename, |candidate| {
+        let target = std::path::Path::new(&dir).join(candidate);
+        target.exists() && !std::path::Path::new(&format!("{}.aria2", target.display())).exists()
+    });
+    if chosen != i.filename {
+        tracing::info!("Tabrakan nama: {} → {}", i.filename, chosen);
+        i.filename = chosen;
+    }
+}
+
 /// Resolve filename + ukuran + tolak HTML/non-2xx.
 /// `pub(crate)`: v2.9.0 (B2.2) dipanggil jalur RPC SEBELUM `addUri` supaya
 /// pipeline (Content-Disposition, redirect, ekstensi, pre-check) identik
@@ -696,6 +788,18 @@ pub(crate) async fn resolve_filename(
         }
     };
 
+    // v3.3.1 (T1): simpan dulu header nama dari respons PROBE. Bila probe
+    // ditolak non-2xx (lihat `ProbeVerdict::Proceed` di bawah), respons INILAH
+    // satu-satunya sumber nama yang kita punya: `Content-Disposition` dan URL
+    // final setelah redirect tetap harus diadopsi. Sebelum ini jalur itu
+    // `return` lebih awal sehingga nama placeholder tidak pernah diperbaiki.
+    let probe_cd = resp
+        .headers()
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let probe_final_url = resp.url().as_str().to_string();
+
     // 0. Tolak halaman HTML / HTTP error — inilah penyebab "file .php" yang
     //    sebenarnya isi halaman web. Jangan pernah menyimpannya sebagai download.
     //
@@ -723,7 +827,15 @@ pub(crate) async fn resolve_filename(
                 ProbeVerdict::Fatal(msg) => return Err(msg),
                 ProbeVerdict::Proceed => {
                     tracing::warn!("Pra-cek HTTP {} diabaikan — diserahkan ke aria2", first);
+                    // v3.3.1 (T1): probe yang ditolak BUKAN alasan membuang
+                    // informasi nama — CD & URL final respons itu tetap dipakai,
+                    // dan dedup gaya browser tetap dijalankan. Ukuran &
+                    // content-type TIDAK diambil dari respons non-2xx (itu
+                    // panjang halaman error, bukan ukuran file).
                     let mut i = info.lock().await;
+                    apply_content_disposition(&mut i, probe_cd.as_deref());
+                    apply_final_url_name(&mut i, Some(probe_final_url.as_str()), &url);
+                    apply_unique_filename(&mut i, config.auto_file_renaming);
                     i.status_detail =
                         format!("Pra-cek HTTP {first} diabaikan — mencoba langsung lewat aria2…");
                     return Ok(());
@@ -750,30 +862,17 @@ pub(crate) async fn resolve_filename(
 
     let mut i = info.lock().await;
 
-    // 1. Content-Disposition — paling akurat
-    if let Some(cd) = resp.headers().get("content-disposition") {
-        if let Ok(cd_str) = cd.to_str() {
-            if let Some(name) = parse_content_disposition(cd_str) {
-                let cleaned = super::sanitize_filename(&name);
-                if !cleaned.is_empty() && cleaned.contains('.') {
-                    tracing::info!("Filename from Content-Disposition: {}", cleaned);
-                    i.filename = cleaned;
-                }
-            }
-        }
-    }
-
-    // 2. Jika filename masih generic, coba dari URL final (setelah redirect)
-    if is_generic_filename(&i.filename) {
-        let final_url = resp.url().to_string();
-        if final_url != url {
-            let name = super::extract_filename_from_url(&final_url);
-            if !is_generic_filename(&name) {
-                tracing::info!("Filename from final URL: {}", name);
-                i.filename = name;
-            }
-        }
-    }
+    // 1. Content-Disposition — paling akurat.
+    // 2. Bila nama masih generic, URL final setelah redirect.
+    // Keduanya kini helper (v3.3.1) supaya jalur "probe ditolak" di atas
+    // memakai pipeline nama yang sama persis, bukan melewatinya.
+    apply_content_disposition(
+        &mut i,
+        resp.headers()
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok()),
+    );
+    apply_final_url_name(&mut i, Some(resp.url().as_str()), &url);
 
     // 3. Content-Range untuk total size
     if let Some(cr) = resp.headers().get("content-range") {
@@ -838,18 +937,7 @@ pub(crate) async fn resolve_filename(
     //    meninggalkan parsial + memulai ulang dari nol.
     //    `auto_file_renaming` mati → nama dipertahankan; backend sudah
     //    diberi allow-overwrite=true sehingga file lama ditimpa.
-    if config.auto_file_renaming {
-        let dir = i.save_dir.clone();
-        let chosen = unique_filename(&i.filename, |candidate| {
-            let target = std::path::Path::new(&dir).join(candidate);
-            target.exists()
-                && !std::path::Path::new(&format!("{}.aria2", target.display())).exists()
-        });
-        if chosen != i.filename {
-            tracing::info!("Tabrakan nama: {} → {}", i.filename, chosen);
-            i.filename = chosen;
-        }
-    }
+    apply_unique_filename(&mut i, config.auto_file_renaming);
 
     tracing::info!("Final filename: {} (size: {})", i.filename, i.total_size);
     Ok(())
@@ -1076,6 +1164,73 @@ pub(crate) fn is_generic_filename(name: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Nama cadangan yang DIBUAT Fast-DM sendiri saat URL tidak memuat nama file
+/// (`extract_filename_from_url` → `download_<millis>_<4 hex>`).
+///
+/// Dibedakan dari "nama generic yang datang dari URL" (`video.mp4`,
+/// `index.html`, `2026.zip`, …) karena keduanya butuh perlakuan berbeda: untuk
+/// placeholder kita tidak tahu namanya sama sekali, sedangkan nama generic dari
+/// URL adalah nama yang memang benar dan tidak boleh dibuang.
+pub(crate) fn is_placeholder_filename(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("");
+    let Some(rest) = stem.strip_prefix("download_") else {
+        return false;
+    };
+    let Some((millis, rnd)) = rest.split_once('_') else {
+        return false;
+    };
+    // millis = epoch milidetik (≥10 digit), rnd = 4 hex dari uuid (v3.2.9).
+    millis.len() >= 10
+        && millis.chars().all(|c| c.is_ascii_digit())
+        && rnd.len() == 4
+        && rnd.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Apakah nama kita dikirim eksplisit ke aria2 (`--out=` / opsi RPC `out`)?
+///
+/// Nama placeholder TIDAK dipaksa: dengan `out` kosong aria2 memakai
+/// `Content-Disposition`/URL final yang hanya dia ketahui dari respons HTTP,
+/// lalu namanya diadopsi (`parse_aria2_completed_name` jalur per-proses,
+/// `files[0].path` jalur daemon RPC). Tanpa ini nama asli yang diketahui aria2
+/// tertimpa placeholder seperti `download_1790300206135_cd6d` (mis. Google
+/// Drive `…/open?id=…`).
+///
+/// Pengecualian: file `<nama>.aria2` yang berdampingan adalah target RESUME —
+/// memaksa nama lain membuat aria2 mulai dari nol dan meninggalkan parsial
+/// yatim.
+pub(crate) fn should_force_out_name(filename: &str, partial_exists: bool) -> bool {
+    !is_placeholder_filename(filename) || partial_exists
+}
+
+/// Ada control file aria2 (`<save_dir>/<filename>.aria2`) = target resume.
+pub(crate) fn partial_control_exists(save_dir: &str, filename: &str) -> bool {
+    let target = std::path::Path::new(save_dir).join(filename);
+    std::path::Path::new(&format!("{}.aria2", target.display())).exists()
+}
+
+/// Nama file dari baris console aria2c `… [NOTICE] Download complete: <path>`
+/// (v3.3.1).
+///
+/// Dipakai jalur per-proses untuk mengadopsi nama yang dipilih aria2 sendiri
+/// ketika kita sengaja tidak mengirim `--out` (lihat `should_force_out_name`).
+/// Bentuk baris nyata:
+/// `09/25 09:36:46 [NOTICE] Download complete: /home/u/Unduhan/eee.zip`
+/// Path bisa relatif (tanpa `--dir` absolut) — basename berlaku untuk keduanya.
+pub(crate) fn parse_aria2_completed_name(line: &str) -> Option<String> {
+    const MARKER: &str = "Download complete:";
+    let rest = line.split_once(MARKER)?.1.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let base = std::path::Path::new(rest).file_name()?.to_str()?;
+    let cleaned = super::sanitize_filename(base);
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 /// v3.2.9: nama bebas tabrakan gaya browser — `eee.mp4` → `eee (1).mp4` →
@@ -1661,6 +1816,179 @@ mod tests {
                 name
             );
         }
+    }
+
+    // ── v3.3.1: placeholder vs nama asli (T1 + adopsi nama dari aria2) ──
+
+    #[test]
+    fn is_placeholder_filename_detects_our_own_fallback() {
+        // Bentuk yang dibuat `extract_filename_from_url` (K9: millis + 4 hex),
+        // dengan atau tanpa ekstensi hasil koreksi content-type.
+        assert!(is_placeholder_filename("download_1790300206135_cd6d"));
+        assert!(is_placeholder_filename("download_1790300206135_cd6d.zip"));
+        assert!(is_placeholder_filename("download_1700000000000_abcd.mp4"));
+        // Nama generic/nyata TIDAK boleh dianggap placeholder — dedup gaya
+        // browser (v3.2.9) hanya berlaku selama nama dikirim sebagai `--out`.
+        assert!(!is_placeholder_filename("video.mp4"));
+        assert!(!is_placeholder_filename("index.html"));
+        assert!(!is_placeholder_filename("download.zip"));
+        assert!(!is_placeholder_filename("download_123.mp4")); // millis pendek
+        assert!(!is_placeholder_filename("download_1790300206135_zzzz")); // bukan hex
+        assert!(!is_placeholder_filename("download_1790300206135_cd6d (1)"));
+        assert!(!is_placeholder_filename("Goatwillow 2026 06（JPG）.zip"));
+        assert!(!is_placeholder_filename(""));
+    }
+
+    #[test]
+    fn should_force_out_name_keeps_resume_targets() {
+        let placeholder = "download_1790300206135_cd6d";
+        // Placeholder & belum ada parsial → biarkan aria2 memilih nama dari
+        // Content-Disposition/URL final.
+        assert!(!should_force_out_name(placeholder, false));
+        // `<nama>.aria2` berdampingan = target resume → nama wajib dipertahankan.
+        assert!(should_force_out_name(placeholder, true));
+        // Nama hasil resolve → selalu dikirim eksplisit seperti sebelumnya.
+        assert!(should_force_out_name(
+            "Goatwillow 2026 06（JPG）.zip",
+            false
+        ));
+        assert!(should_force_out_name("eee.mp4", true));
+    }
+
+    #[test]
+    fn parse_aria2_completed_name_reads_notice_lines() {
+        // Baris nyata console aria2c (`--console-log-level=notice`).
+        assert_eq!(
+            parse_aria2_completed_name(
+                "09/25 09:36:46 [NOTICE] Download complete: /home/u/Unduhan/Goatwillow 2026 06（JPG）.zip"
+            ),
+            Some("Goatwillow 2026 06（JPG）.zip".to_string())
+        );
+        // Path relatif (tanpa `--dir` absolut) juga harus bekerja.
+        assert_eq!(
+            parse_aria2_completed_name("11/17 16:07:20 [NOTICE] Download complete: tesfile.tar"),
+            Some("tesfile.tar".to_string())
+        );
+        // Karakter terlarang disaring seperti pipeline resolve lain.
+        assert_eq!(
+            parse_aria2_completed_name("[NOTICE] Download complete: /dl/a:b.zip"),
+            Some("a_b.zip".to_string())
+        );
+        // Bukan notice penyelesaian / path kosong.
+        assert_eq!(
+            parse_aria2_completed_name("[#2089b0 400.0KiB/33.2MiB(1%) CN:1 DL:115.7KiB ETA:4m51s]"),
+            None
+        );
+        assert_eq!(
+            parse_aria2_completed_name("[NOTICE] Download complete:"),
+            None
+        );
+        assert_eq!(parse_aria2_completed_name("   "), None);
+    }
+
+    #[test]
+    fn apply_content_disposition_accepts_only_named_files() {
+        let placeholder = "download_1790300206135_cd6d";
+        let mut item = DownloadInfo::new(
+            "cd".into(),
+            "https://drive.usercontent.google.com/open?id=X".into(),
+            placeholder.into(),
+            "unused".into(),
+            Default::default(),
+            None,
+        );
+        // Tanpa header → tidak berubah.
+        apply_content_disposition(&mut item, None);
+        assert_eq!(item.filename, placeholder);
+        // Nama tanpa ekstensi (bukan file) → diabaikan.
+        apply_content_disposition(&mut item, Some("attachment; filename=\"README\""));
+        assert_eq!(item.filename, placeholder);
+        // RFC 5987 + unicode fullwidth tetap terbaca.
+        apply_content_disposition(
+            &mut item,
+            Some("attachment; filename*=UTF-8''Goatwillow%202026%2006%EF%BC%88JPG%EF%BC%89.zip"),
+        );
+        assert_eq!(item.filename, "Goatwillow 2026 06（JPG）.zip");
+    }
+
+    #[test]
+    fn apply_final_url_name_only_upgrades_generic_names() {
+        let placeholder = "download_1790300206135_cd6d";
+        let mut item = DownloadInfo::new(
+            "final".into(),
+            "https://drive.usercontent.google.com/open?id=X".into(),
+            placeholder.into(),
+            "unused".into(),
+            Default::default(),
+            None,
+        );
+        // URL final sama dengan URL asal → tidak ada informasi baru.
+        apply_final_url_name(
+            &mut item,
+            Some("https://drive.usercontent.google.com/open?id=X"),
+            "https://drive.usercontent.google.com/open?id=X",
+        );
+        assert_eq!(item.filename, placeholder);
+        // Redirect ke path berisi nama file → diadopsi.
+        apply_final_url_name(
+            &mut item,
+            Some("https://cdn.example.test/unduh/Goatwillow.zip"),
+            "https://drive.usercontent.google.com/open?id=X",
+        );
+        assert_eq!(item.filename, "Goatwillow.zip");
+
+        // Nama spesifik tidak pernah ditimpa URL final.
+        let mut named = DownloadInfo::new(
+            "named".into(),
+            "https://example.test/eee.mp4".into(),
+            "eee.mp4".into(),
+            "unused".into(),
+            Default::default(),
+            None,
+        );
+        apply_final_url_name(
+            &mut named,
+            Some("https://cdn.example.test/other.zip"),
+            "https://example.test/eee.mp4",
+        );
+        assert_eq!(named.filename, "eee.mp4");
+    }
+
+    #[test]
+    fn apply_unique_filename_skips_resume_targets_and_disabled_renaming() {
+        let dir = std::env::temp_dir().join(format!("fastdm-outname-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save_dir = dir.display().to_string();
+        let make = |id: &str, name: &str| {
+            DownloadInfo::new(
+                id.into(),
+                format!("https://example.test/{name}"),
+                name.into(),
+                save_dir.clone(),
+                Default::default(),
+                None,
+            )
+        };
+
+        // Tabrakan biasa → sufiks gaya browser (v3.2.9).
+        std::fs::write(dir.join("eee.mp4"), b"x").unwrap();
+        let mut item = make("collide", "eee.mp4");
+        apply_unique_filename(&mut item, true);
+        assert_eq!(item.filename, "eee (1).mp4");
+
+        // `<nama>.aria2` berdampingan = target resume, bukan tabrakan.
+        std::fs::write(dir.join("resume.zip"), b"x").unwrap();
+        std::fs::write(dir.join("resume.zip.aria2"), b"x").unwrap();
+        let mut resume = make("resume", "resume.zip");
+        apply_unique_filename(&mut resume, true);
+        assert_eq!(resume.filename, "resume.zip");
+
+        // auto_file_renaming mati → nama dipertahankan (allow-overwrite).
+        let mut overwrite = make("overwrite", "eee.mp4");
+        apply_unique_filename(&mut overwrite, false);
+        assert_eq!(overwrite.filename, "eee.mp4");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── unique_filename (v3.2.9: resolusi tabrakan gaya browser) ──
