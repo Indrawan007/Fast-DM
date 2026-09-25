@@ -19,7 +19,7 @@ jobs:
     name: Test & Build (Linux x86_64)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install system dependencies
         run: |
@@ -36,11 +36,10 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry & build artifacts
+        # Default rust-cache sudah memetakan workspace `.` ke `target`.
+        # Menulis `target` sebagai workspace kedua membuat action mencoba cwd
+        # yang belum ada dan selalu mencetak error non-fatal.
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            .
-            target
 
       - name: Check formatting
         # `cargo fmt --check` mengembalikan non-zero kalau ada diff.
@@ -61,7 +60,29 @@ jobs:
         run: cargo deny check advisories bans licenses sources
 
       - name: Clippy (blocking)
+        id: clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      # Log runner GitHub tidak selalu dapat diunduh (blob kedaluwarsa /
+      # jaringan terbatas), sehingga kegagalan Clippy pernah hanya terbaca
+      # sebagai "exit code 101" tanpa tahu penyebabnya. Step diagnostik ini
+      # jalan HANYA bila gate Clippy di atas gagal, lalu menerbitkan ulang
+      # tiap diagnostik sebagai anotasi run. Tidak mengubah hasil gate —
+      # status job sudah ditentukan oleh step Clippy.
+      - name: Publish Clippy diagnostics as annotations
+        if: failure() && steps.clippy.outcome == 'failure'
+        run: |
+          # Cargo menyimpan hasil Clippy; tanpa clean, run kedua hanya
+          # mencetak "Finished" dan diagnostiknya tidak muncul lagi.
+          cargo clean -p fast-dm
+          # Format pendek = satu baris per diagnostik (path:line:col: level:
+          # pesan), paling terbaca sebagai anotasi. `|| true` karena clippy
+          # memang diharapkan gagal di sini.
+          cargo clippy --all-targets --message-format=short -- -D warnings \
+            > clippy.log 2>&1 || true
+          grep -E '(^|: )(error|warning)(\[|:)' clippy.log | head -40 | while IFS= read -r line; do
+            echo "::error::${line}"
+          done
 
       - name: Run all tests (unit + integration)
         # Jalankan seluruh unit test dan integration test di tests/.
@@ -85,7 +106,7 @@ jobs:
           ./target/release/fast-dm --help
 
       - name: Upload release binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fast-dm-linux-x86_64
           path: target/release/fast-dm
@@ -98,13 +119,13 @@ jobs:
     name: Zip browser extension
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
 
-      - name: Test browser extension
-        run: node --test tests/extension.test.cjs
+      - name: Test browser extension & release hygiene
+        run: node --test tests/*.test.cjs
 
       - name: Lint Chromium extension
         run: node tests/extension_lint.cjs
@@ -128,7 +149,7 @@ jobs:
             -x "*/.git/*"
 
       - name: Upload extension zip
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fast-dm-extension
           path: fast-dm-extension.zip
@@ -141,7 +162,7 @@ jobs:
     name: Build .deb package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install system dependencies
         run: |
@@ -161,8 +182,16 @@ jobs:
       - name: Build .deb
         run: bash packaging/build-deb.sh
 
+      - name: Verify .deb ownership
+        run: |
+          DEB=$(find build -maxdepth 1 -name '*.deb' -print -quit)
+          test -n "$DEB"
+          dpkg-deb --fsys-tarfile "$DEB" \
+            | tar --numeric-owner -tvf - \
+            | awk '$2 != "0/0" { print "non-root owner: " $0; bad=1 } END { exit bad }'
+
       - name: Upload .deb
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fast-dm-deb
           path: build/*.deb
@@ -200,7 +229,7 @@ jobs:
             git \
             sudo
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -208,8 +237,8 @@ jobs:
       - name: Run all tests (unit + integration)
         run: cargo test --locked --no-fail-fast
 
-      - name: Test browser extension
-        run: node --test tests/extension.test.cjs
+      - name: Test browser extension & release hygiene
+        run: node --test tests/*.test.cjs
 
       - name: Smoke test binary
         run: |
@@ -232,7 +261,7 @@ jobs:
             'opt/fast-dm/fast-dm$|opt/fast-dm/fast-dm-native$|usr/bin/fast-dm$|applications/fast-dm\.desktop$|128x128/apps/io\.github\.fastdm\.FastDownloadManager\.png$'
 
       - name: Upload Arch package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fast-dm-arch-x86_64
           path: build/*.pkg.tar.zst
