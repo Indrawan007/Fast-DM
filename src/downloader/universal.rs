@@ -5,6 +5,7 @@ use crate::downloader::youtube::{
     cookie_args, merge_output_format, network_args, output_template, quality_args,
     run_ytdlp_with_stdin, ytdlp_proxy_args, PrivateFileGuard, YTDLP_BATCH_FILE_STDIN,
 };
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -40,6 +41,79 @@ fn mark_missing_tool(info: &mut DownloadInfo, binary: &str, pkg: &str) {
     info.speed = 0;
 }
 
+/// File parsial yt-dlp (`<nama>.part`, `<nama>.ytdl`) di samping nama sekarang
+/// → unduhan ini LANJUTAN, bukan unduhan baru.
+///
+/// Padanan `aria2::partial_control_exists` (yang mencari `<nama>.aria2`) di
+/// jalur aria2: nama placeholder hasil sesi lama harus dipertahankan supaya
+/// `--continue` melanjutkan, bukan memulai ulang dari nol dengan nama lain dan
+/// meninggalkan parsial yatim.
+fn ytdlp_partial_exists(save_dir: &str, filename: &str) -> bool {
+    [".part", ".ytdl"]
+        .iter()
+        .any(|ext| Path::new(save_dir).join(format!("{}{}", filename, ext)).exists())
+}
+
+/// v3.3.4: tanyakan nama asli ke server lalu adopsi ke item unduhan — hanya
+/// bila nama sekarang benar-benar belum diketahui.
+///
+/// Syarat (semuanya harus benar, lihat `should_probe_filename`):
+/// * nama sekarang placeholder Fast-DM (`download_<millis>_<hex>`) ATAU tanpa
+///   ekstensi sama sekali (`unknown_video` dari path CDN bertanda tangan);
+/// * nama itu BUKAN pilihan user (dialog "Simpan Sebagai...");
+/// * nama itu bukan manifest streaming — `.m3u8`/`.mpd` harus dibiarkan ke
+///   yt-dlp untuk di-merge, bukan dijadikan nama output;
+/// * belum ada file parsial di samping nama itu (`.part`/`.ytdl`) — kalau ada,
+///   ini unduhan lanjutan dari sesi sebelumnya, bukan unduhan baru.
+///
+/// Adopsi nama juga meng-update `i.filename` + mengirim event Progress supaya
+/// kartu GUI berubah saat unduhan berjalan — persis seperti yang dilakukan
+/// jalur aria2 lewat `resolve_filename`.
+async fn adopt_real_filename(
+    info: &Arc<Mutex<DownloadInfo>>,
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+    url: &str,
+    headers: &std::collections::HashMap<String, String>,
+    config: &Config,
+) -> Option<String> {
+    {
+        let i = info.lock().await;
+        if i.user_named || !super::aria2::should_probe_filename(&i.filename) {
+            return None;
+        }
+        if super::aria2::is_manifest_name(&i.filename) {
+            return None;
+        }
+        if ytdlp_partial_exists(&i.save_dir, &i.filename) {
+            return None;
+        }
+    }
+
+    let name = super::aria2::probe_real_filename(url, headers, config).await?;
+
+    let mut i = info.lock().await;
+    // Re-check di bawah lock: user bisa saja membatalkan/pause saat probe
+    // berjalan, dan nama yang baru ditemukan harus tetap masuk ke kartu.
+    if i.stop_requested() {
+        return None;
+    }
+    tracing::info!("Nama asli dari server (jalur yt-dlp): {}", name);
+    i.filename = name;
+    // Tabrakan nama WAJIB diselesaikan di sini, sebelum yt-dlp jalan: Fast-DM
+    // mengirim `--no-overwrites`, jadi kalau file dengan nama itu sudah ada
+    // yt-dlp GAGAL ("File already exists"), bukan menamai ulang seperti
+    // browser. Skema `name (1).ext` yang sama sudah dipakai jalur aria2
+    // (v3.2.9), jadi file yang sama yang diunduh lewat dua jalur berakhir
+    // sama-sama. Retry setelah gagal juga aman: file final belum ada (hanya
+    // `.part`), jadi nama tidak berubah dan yt-dlp melanjutkan `--continue`.
+    super::aria2::apply_unique_filename(&mut i, config.auto_file_renaming);
+    let name = i.filename.clone();
+    // Kartu di GUI menampilkan `filename`; tanpa event ini kartu masih
+    // menampilkan nama placeholder sampai progress berikutnya datang.
+    let _ = tx.send(DownloadEvent::Progress(i.clone()));
+    Some(name)
+}
+
 /// Unduh URL non-YouTube via yt-dlp sebagai "resolver universal" (gaya IDM):
 /// yt-dlp mengenali 1800+ situs (TikTok, Instagram, Facebook, Twitter/X, Vimeo,
 /// Twitch, situs berita, HLS/m3u8, dll.) dan menangani login + kualitas.
@@ -65,6 +139,25 @@ pub async fn download(
             i.quality.clone(),
             i.filename.clone(),
         )
+    };
+
+    // v3.3.4: nama asli dari server, SEBELUM yt-dlp menentukan nama file.
+    //
+    // Akar bug: `resolve_filename` (satu-satunya pembaca `Content-Disposition`)
+    // hanya dipanggil dari 2 jalur aria2. Tautan bertanda tangan tanpa
+    // ekstensi — PikPak `.../unknown_video?sign=...` — tidak punya ekstensi
+    // media, jadi `is_direct_file_url` FALSE dan unduhan masuk ke resolver
+    // universal (yt-dlp) TANPA pernah menanyakan nama ke server. Hasilnya
+    // `output_template()` memakai `%(title)s.%(ext)s`, nama file ditentukan
+    // extractor yt-dlp dari path bertanda tangan, dan file di disk maupun
+    // kartu GUI sama-sama bernama `download.unknown_video`.
+    //
+    // Di sini kita menanyakan nama yang sama seperti jalur aria2, lalu
+    // memakai hasilnya di `output_template` bawah sehingga nama di disk dan
+    // nama di kartu identik dengan nama asli.
+    let filename = match adopt_real_filename(&info, &tx, &url, &headers, config).await {
+        Some(name) => name,
+        None => filename,
     };
 
     // B10: spawn_blocking — jangan blokir thread executor tokio menunggu proses.
@@ -246,5 +339,87 @@ mod tests {
             "pesan harus datang dari crate::pkg — satu sumber dengan youtube.rs/aria2.rs"
         );
         assert!(info.error_msg.starts_with("yt-dlp tidak terinstall"));
+    }
+
+    // ── v3.3.4: nama asli dari server, tanpa menimpa pilihan user ──
+
+    /// Engine unduhan mini + item, supaya test tidak spawning proses.
+    fn probe_fixture(
+        filename: &str,
+    ) -> (Arc<Mutex<DownloadInfo>>, mpsc::UnboundedSender<DownloadEvent>) {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let info = Arc::new(Mutex::new(DownloadInfo::new(
+            "dl_x".into(),
+            "https://dl-pikpak.test/down/abc/unknown_video?sign=xyz".into(),
+            filename.into(),
+            "/tmp".into(),
+            Default::default(),
+            None,
+        )));
+        (info, tx)
+    }
+
+    /// Nama pilihan user (dialog "Simpan Sebagai...") TIDAK boleh ditimpa
+    /// probe, walau tanpa ekstensi. Kedua guard ini jalan sebelum ada request
+    /// apa pun, jadi test ini tidak menyentuh jaringan.
+    #[tokio::test]
+    async fn adopt_real_filename_never_overrides_a_user_chosen_name() {
+        let (info, tx) = probe_fixture("myvideo");
+        info.lock().await.user_named = true;
+        let headers = std::collections::HashMap::new();
+
+        let out = adopt_real_filename(
+            &info,
+            &tx,
+            "https://dl-pikpak.test/down/abc/unknown_video?sign=xyz",
+            &headers,
+            &Config::default(),
+        )
+        .await;
+
+        assert!(out.is_none(), "nama pilihan user tidak boleh ditimpa");
+        assert_eq!(info.lock().await.filename, "myvideo");
+    }
+
+    /// Nama ber-ekstensi sudah final → probe dilewati tanpa request.
+    #[tokio::test]
+    async fn adopt_real_filename_skips_a_name_that_already_has_an_extension() {
+        let name = "bangbrosclips.26.09.29.rika.fane.and.dalila.lapiedra.mp4";
+        let (info, tx) = probe_fixture(name);
+        let headers = std::collections::HashMap::new();
+
+        let out = adopt_real_filename(
+            &info,
+            &tx,
+            "https://dl-pikpak.test/down/abc/unknown_video?sign=xyz",
+            &headers,
+            &Config::default(),
+        )
+        .await;
+
+        assert!(out.is_none());
+        assert_eq!(info.lock().await.filename, name);
+    }
+
+    /// `.part`/`.ytdl` di samping nama = unduhan lanjutan, bukan unduhan baru.
+    /// Nama placeholder dari sesi lama harus dipertahankan agar `--continue`
+    /// melanjutkan, bukan memulai ulang dari nol.
+    #[test]
+    fn ytdlp_partial_marker_is_detected_next_to_the_name() {
+        let dir = std::env::temp_dir().join("fast-dm-partial-test");
+        std::fs::create_dir_all(&dir).expect("buat tempdir");
+        let name = "download_1790300206135_cd6d.mp4";
+        let path = |suffix: &str| dir.join(format!("{}{}", name, suffix));
+        let dir_s = dir.to_string_lossy().to_string();
+
+        assert!(!ytdlp_partial_exists(&dir_s, name), "belum ada parsial");
+        std::fs::write(path(".part"), b"x").expect("tulis .part");
+        assert!(ytdlp_partial_exists(&dir_s, name), ".part = target resume");
+        std::fs::remove_file(path(".part")).expect("hapus .part");
+        std::fs::write(path(".ytdl"), b"{}").expect("tulis .ytdl");
+        assert!(ytdlp_partial_exists(&dir_s, name), ".ytdl = target resume");
+
+        let _ = std::fs::remove_file(path(".ytdl"));
+        let _ = std::fs::remove_dir(&dir);
     }
 }

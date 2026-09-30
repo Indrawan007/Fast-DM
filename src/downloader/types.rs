@@ -88,6 +88,13 @@ pub struct DownloadInfo {
     /// `handback`). Runtime-only: direset setiap start.
     #[serde(skip)]
     pub(crate) access_denied: bool,
+    /// v3.3.4: nama ini dipilih USER (dialog "Simpan Sebagai..."), bukan hasil
+    /// tebakan Fast-DM atau browser. Probe `Content-Disposition` di jalur
+    /// yt-dlp (`aria2::probe_real_filename`) TIDAK boleh menimpanya — user yang
+    /// sengaja memberi nama tanpa ekstensi (`myvideo`) tetap mendapatkannya.
+    /// Runtime-only: tidak perlu diserialisasi ke `session.json`.
+    #[serde(skip)]
+    pub(crate) user_named: bool,
 }
 
 impl DownloadInfo {
@@ -124,6 +131,7 @@ impl DownloadInfo {
             retry_after: None,
             auto_retry_count: 0,
             access_denied: false,
+            user_named: false,
             created: chrono::Utc::now().timestamp_millis(),
         }
     }

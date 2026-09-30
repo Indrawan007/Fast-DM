@@ -18,6 +18,23 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 - 🐧 **Multi-distro** — paket `.deb` (Debian/Ubuntu) **dan** `.pkg.tar.zst` (Arch/Manjaro/EndeavourOS); pesan "tool tidak terinstall" otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro
 
+## Perubahan v3.3.4
+
+- **Nama asli video PikPak tidak lagi hilang** — file
+  `bangbrosclips.26.09.29.rika.fane.and.dalila.lapiedra.mp4` tidak lagi
+  tersimpan sebagai `download.unknown_video`. Tautan bertanda tangan PikPak
+  tidak memuat nama file, sedangkan nama aslinya hanya ada di header
+  `Content-Disposition`. Fast-DM hanya membaca header itu di jalur aria2;
+  tautan tanpa ekstensi (seperti PikPak) justru dialihkan ke yt-dlp, yang
+  menamai file dari path bertanda tangan. Kini jalur yt-dlp juga menanyakan
+  nama ke server (HEAD, lalu ranged GET) sebelum mengunduh, jadi nama di disk
+  dan nama di kartu GUI sama-sama nama asli.
+- Nama ber-ekstensi, nama pilihan user dari dialog "Simpan Sebagai…", dan
+  manifest `.m3u8`/`.mpd` (yang harus di-merge) tidak pernah ditimpa probe ini.
+- Tabrakan nama memakai skema `name (1).ext` yang sama dengan jalur aria2,
+  karena yt-dlp dianggil dengan `--no-overwrites` dan akan gagal bila file
+  dengan nama itu sudah ada.
+
 ## Perubahan v3.3.3
 
 - **Fast-DM tidak lagi terbuka sendiri saat popup extension dibuka** — native
