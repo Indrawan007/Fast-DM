@@ -721,7 +721,11 @@ fn apply_final_url_name(i: &mut DownloadInfo, final_url: Option<&str>, original_
 /// Aturan `auto_file_renaming` mati → nama dipertahankan (backend sudah diberi
 /// allow-overwrite=true sehingga file lama ditimpa); file yang berdampingan
 /// dengan control file `.aria2` adalah target resume, bukan tabrakan.
-fn apply_unique_filename(i: &mut DownloadInfo, auto_file_renaming: bool) {
+///
+/// `pub(crate)` sejak v3.3.4: jalur yt-dlp (`universal::adopt_real_filename`)
+/// memakai fungsi yang SAMA, karena ia perlu dedup sebelum menjalankan
+/// yt-dlp — lihat komentar di sana.
+pub(crate) fn apply_unique_filename(i: &mut DownloadInfo, auto_file_renaming: bool) {
     if !auto_file_renaming {
         return;
     }
@@ -734,6 +738,170 @@ fn apply_unique_filename(i: &mut DownloadInfo, auto_file_renaming: bool) {
         tracing::info!("Tabrakan nama: {} → {}", i.filename, chosen);
         i.filename = chosen;
     }
+}
+
+/// v3.3.4: apakah nama yang kita pegang masih "tidak diketahui" sehingga layak
+/// ditanyakan ke server lewat [`probe_real_filename`].
+///
+/// Benar HANYA untuk nama yang dibuat REKAM JEJAK Fast-DM sendiri atau nama
+/// tanpa ekstensi apa pun — dua-duanya tidak mungkin merupakan pilihan user
+/// yang bermakna. Nama ber-ekstensi (dari browser maupun dialog "Simpan
+/// Sebagai…") sudah final dan tidak boleh ditimpa.
+///
+/// Terpisah dari `is_placeholder_filename`: nama `unknown_video` (path CDN
+/// bertanda tangan tanpa ekstensi) bukan placeholder Fast-DM, tapi tetap bukan
+/// nama file — tanpa aturan ini PikPak dan file-host similar kehilangan nama
+/// asli.
+pub(crate) fn should_probe_filename(name: &str) -> bool {
+    if is_placeholder_filename(name) {
+        return true;
+    }
+    // Tanpa titik = tanpa ekstensi = belum pernah jadi nama file. Sengaja
+    // TIDAK memakai `is_generic_filename`: stems seperti `video.mp4` adalah
+    // nama sah yang hanya perlu dipertahankan, sedangkan di sini yang ditanya
+    // adalah "apakah kita punya nama sama sekali".
+    !name.contains('.')
+}
+
+/// Manifest streaming TIDAK boleh dipakai sebagai nama output: yt-dlp harus
+/// merge fragmennya, dan `video.m3u8`/`video.mpd` bukan nama file hasil unduhan.
+pub(crate) fn is_manifest_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".m3u8") || lower.ends_with(".mpd")
+}
+
+/// v3.3.4: pilih nama dari satu respons HTTP — bagian MURNI dari
+/// [`probe_real_filename`] supaya bisa di-unit test tanpa jaringan.
+///
+/// `cd` = header `Content-Disposition` respons, `final_url` = URL setelah
+/// redirect. Mengembalikan `None` bila tak ada nama yang layak pakai.
+///
+/// Dua sumber punya KEYAKINAN BERBEDA dan sengaja disaring berbeda:
+/// * `Content-Disposition` = pernyataan server sendiri tentang nama file, jadi
+///   dipakai apa adanya selama ekstensinya masuk akal. Bahkan `video.mp4` lebih
+///   berguna daripada `unknown_video` yang sekarang sedang dipegang.
+/// * basename URL redirect = tebakan, dan redirect memang sering berakhir di
+///   path generik (`/video`, `/12345`) — di sini filter `is_generic_filename`
+///   ikut berlaku, sama seperti `apply_final_url_name` sudah melakukannya.
+pub(crate) fn pick_probed_filename(
+    cd: Option<&str>,
+    final_url: Option<&str>,
+    original_url: &str,
+) -> Option<String> {
+    if let Some(cd) = cd {
+        if let Some(name) = parse_content_disposition(cd) {
+            let cleaned = super::sanitize_filename(&name);
+            if is_adoptable_name(&cleaned) {
+                return Some(cleaned);
+            }
+        }
+    }
+    let final_url = final_url?;
+    if final_url == original_url {
+        return None;
+    }
+    let name = super::extract_filename_from_url(final_url);
+    if is_adoptable_name(&name) && !is_generic_filename(&name) {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// Nama hasil probe harus "cukup meyakinkan": punya ekstensi, bukan ekstensi
+/// skrip, bukan manifest streaming, dan bukan placeholder buatan kita sendiri
+/// (placeholder setelah redirect = tidak ada nama di server juga).
+fn is_adoptable_name(name: &str) -> bool {
+    if name.is_empty() || !name.contains('.') {
+        return false;
+    }
+    if super::is_script_extension(name) || is_manifest_name(name) {
+        return false;
+    }
+    !is_placeholder_filename(name)
+}
+
+/// Tanya nama asli ke server — untuk jalur yt-dlp yang tidak pernah menyentuh
+/// `resolve_filename`.
+///
+/// **Akar bug v3.3.4:** `resolve_filename` (satu-satunya pembaca
+/// `Content-Disposition`) hanya dipanggil dari 2 jalur aria2. Tautan bertanda
+/// tangan tanpa ekstensi — PikPak `…/unknown_video?sign=…` — lolos ke
+/// `universal::download()` (yt-dlp), jadi nama asli yang sebenarnya ada di
+/// header response TIDAK PERNAH dibaca. `output_template()` lalu memakai
+/// `%(title)s.%(ext)s` dan nama file ditentukan extractor yt-dlp dari path
+/// bertanda tangan tersebut → `download.unknown_video` di disk DAN di kartu
+/// GUI, padahal server sudah mengirim `bangbrosclips.26.09.29…mp4`.
+///
+/// Sifat penting: **tidak pernah gagal** — hasil `None` berarti "server tidak
+/// memberi nama yang bisa dipakai", yang bagi pemanggil sama dengan "biarkan
+/// nama sekarang". Tidak ada status Error, tidak ada retry (retry supervisor
+/// akan mengulang probe yang sama).
+///
+/// Biaya: satu HEAD murah lebih dulu — halaman web (TikTok/IG/artikel) dijawab
+/// `text/html` dan langsung berhenti tanpa body. Hanya respons NON-HTML yang
+/// baru deserve fallback ranged-GET `bytes=0-0` (beberapa CDN tidak mengirim
+/// `Content-Disposition` pada HEAD).
+pub(crate) async fn probe_real_filename(
+    url: &str,
+    headers: &std::collections::HashMap<String, String>,
+    config: &Config,
+) -> Option<String> {
+    let client = resolve_client(config).ok()?;
+    let cookie = cookie_header_for(url);
+    let build = |method: reqwest::Method| {
+        let mut req = client.request(method, url);
+        for (k, v) in headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        if let Some(c) = &cookie {
+            req = req.header("Cookie", c.as_str());
+        }
+        req
+    };
+
+    let header_of = |r: &reqwest::Response| {
+        r.headers()
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    };
+
+    // 1. HEAD dulu — murah, dan langsung menandai halaman HTML
+    //    "bukan file" tanpa pernah menarik body-nya.
+    if let Ok(resp) = build(reqwest::Method::HEAD).send().await {
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if ct.contains("text/html") {
+            return None;
+        }
+        let cd = header_of(&resp);
+        if let Some(name) = pick_probed_filename(cd.as_deref(), Some(resp.url().as_str()), url) {
+            return Some(name);
+        }
+    }
+
+    // 2. Fallback ranged GET — CDP/CDN yang hanya mengirim CD pada GET.
+    let resp = build(reqwest::Method::GET)
+        .header("Range", "bytes=0-0")
+        .send()
+        .await
+        .ok()?;
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ct.contains("text/html") {
+        return None;
+    }
+    let cd = header_of(&resp);
+    pick_probed_filename(cd.as_deref(), Some(resp.url().as_str()), url)
 }
 
 /// Resolve filename + ukuran + tolak HTML/non-2xx.
@@ -1839,6 +2007,84 @@ mod tests {
                 name
             );
         }
+    }
+
+    // ── v3.3.4: nama asli dari server untuk jalur yt-dlp (PikPak) ──
+
+    /// Regression test untuk laporan user: unduhan PikPak bernama
+    /// `bangbrosclips.26.09.29.rika.fane.and.dalila.lapiedra.mp4` berakhir
+    /// menjadi `download.unknown_video`, karena URL bertanda tangan PikPak
+    /// tidak memuat nama dan jalur yt-dlp tidak pernah membaca
+    /// `Content-Disposition`.
+    const PIKPAK_URL: &str = "https://dl-pikpak.pikpak.com/down/abc/unknown_video?sign=xyz";
+    const PIKPAK_NAME: &str = "bangbrosclips.26.09.29.rika.fane.and.dalila.lapiedra.mp4";
+    const CD_PIKPAK: &str =
+        "attachment; filename*=UTF-8''bangbrosclips.26.09.29.rika.fane.and.dalila.lapiedra.mp4";
+    const CD_LOGIN: &str = "attachment; filename=login.php";
+    const CD_M3U8: &str = "attachment; filename=stream.m3u8";
+    const CD_VIDEO: &str = "attachment; filename=video.mp4";
+
+    #[test]
+    fn should_probe_only_when_we_have_no_usable_name() {
+        // Placeholder buatan Fast-DM → tanya server.
+        assert!(should_probe_filename("download_1790300206135_cd6d"));
+        // Path CDN bertanda tangan tanpa ekstensi → tanya server. INI kasus
+        // PikPak: `unknown_video` bukan placeholder kita, tapi bukan nama file.
+        assert!(should_probe_filename("unknown_video"));
+        // Nama ber-ekstensi sudah final (dari browser atau "Simpan Sebagai…")
+        // → jangan pernah ditanya/ditimpa.
+        assert!(!should_probe_filename(PIKPAK_NAME));
+        assert!(!should_probe_filename("video.mp4"));
+        assert!(!should_probe_filename("archive.tar.gz"));
+    }
+
+    #[test]
+    fn manifest_names_are_never_used_as_output_names() {
+        assert!(is_manifest_name("stream.m3u8"));
+        assert!(is_manifest_name("dash.MPD"));
+        assert!(!is_manifest_name(PIKPAK_NAME));
+    }
+
+    #[test]
+    fn probed_content_disposition_recovers_the_pikpak_name() {
+        assert_eq!(
+            pick_probed_filename(Some(CD_PIKPAK), Some(PIKPAK_URL), PIKPAK_URL).as_deref(),
+            Some(PIKPAK_NAME),
+            "nama asli harus diadopsi utuh, termasuk titik-tikinya"
+        );
+    }
+
+    #[test]
+    fn probed_filename_falls_back_to_redirect_url() {
+        // Tanpa CD, tapi redirect berakhir di path yang memuat nama asli.
+        let redirected = "https://dl.pikpak.com/file/Goatwillow.zip";
+        assert_eq!(
+            pick_probed_filename(None, Some(redirected), PIKPAK_URL).as_deref(),
+            Some("Goatwillow.zip")
+        );
+        // Tanpa CD dan tanpa redirect → tidak ada yang bisa diadopsi.
+        assert_eq!(
+            pick_probed_filename(None, Some(PIKPAK_URL), PIKPAK_URL),
+            None
+        );
+        assert_eq!(pick_probed_filename(None, None, PIKPAK_URL), None);
+    }
+
+    #[test]
+    fn probed_name_rejects_scripts_manifests_and_generic_redirects() {
+        // Halaman login/anti-bot → `login.php` tidak boleh jadi nama file.
+        let script = pick_probed_filename(Some(CD_LOGIN), None, PIKPAK_URL);
+        assert_eq!(script, None);
+        // Manifest harus dibiarkan ke yt-dlp untuk di-merge.
+        let manifest = pick_probed_filename(Some(CD_M3U8), None, PIKPAK_URL);
+        assert_eq!(manifest, None);
+        // Path redirect generik bukan nama asli.
+        let generic = pick_probed_filename(None, Some("https://cdn.test/video"), PIKPAK_URL);
+        assert_eq!(generic, None);
+        // `video.mp4` dari header CD tetap dipakai: lebih baik daripada
+        // `unknown_video` yang sedang dipegang.
+        let from_cd = pick_probed_filename(Some(CD_VIDEO), None, PIKPAK_URL);
+        assert_eq!(from_cd.as_deref(), Some("video.mp4"));
     }
 
     // ── v3.3.1: placeholder vs nama asli (T1 + adopsi nama dari aria2) ──

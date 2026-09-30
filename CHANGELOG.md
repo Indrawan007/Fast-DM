@@ -3,6 +3,45 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.3.4] - 2026-09-30
+
+Unduhan dari file-host yang nama aslinya hanya ada di header HTTP — PikPak dan
+sejawatnya — tidak lagi berakhir bernama karangan seperti `download.unknown_video`.
+
+### Fixed
+
+- **Nama asli hilang di jalur yt-dlp (PikPak & file-host signed URL)** —
+  `resolve_filename` adalah satu-satunya kode yang membaca
+  `Content-Disposition`, dan ia hanya dipanggil dari DUA jalur aria2
+  (`aria2.rs` per-proses, `aria2_rpc.rs` daemon). Tautan bertanda tangan
+  PikPak (`.../unknown_video?sign=...`) tidak punya ekstensi media, jadi
+  `is_direct_file_url` false dan unduhan masuk ke resolver universal (yt-dlp) —
+  tanpa pernah menanyakan nama ke server. `output_template()` lalu memakai
+  `%(title)s.%(ext)s`, dan nama file ditentukan extractor yt-dlp dari path
+  bertanda tangan tersebut. Akibatnya file bernama
+  `bangbrosclips.26.09.29.rika.fane.and.dalila.lapiedra.mp4` tersimpan sebagai
+  `download.unknown_video`, dan kartu GUI menampilkan nama karangan yang sama.
+  Kini `universal::download` menanyakan nama yang sama seperti jalur aria2
+  (`aria2::probe_real_filename`: HEAD dulu, lalu ranged GET `bytes=0-0`) dan
+  mengadopsinya ke `i.filename` + event Progress, sehingga nama di disk dan
+  nama di kartu sama-sama nama asli.
+  - Probe hanya jalan bila nama sekarang benar-benar belum diketahui:
+    placeholder Fast-DM (`download_<millis>_<hex>`) atau nama tanpa ekstensi
+    (`unknown_video`). Nama ber-ekstensi tidak pernah ditanya.
+  - Nama pilihan user dari dialog "Simpan Sebagai..." tidak pernah ditimpa,
+    walau tanpa ekstensi (penanda `user_named`).
+  - `.m3u8`/`.mpd` tidak pernah jadi nama output — manifest tetap dibiarkan ke
+    yt-dlp untuk di-merge.
+  - Tabrakan nama diselesaikan dengan skema `name (1).ext` yang sama seperti
+    jalur aria2 (v3.2.9). Ini wajib karena Fast-DM mengirim `--no-overwrites`:
+    tanpa dedup, unduhan ulang file yang sama akan GAGAL ("File already
+    exists"), bukan menamai ulang.
+  - Biaya satu request: halaman web (TikTok/IG/artikel) dijawab `text/html`
+    pada HEAD dan langsung berhenti tanpa menarik body.
+- Nama dari `Content-Disposition` dipakai apa adanya selama ekstensinya
+  masuk akal; filter `is_generic_filename` hanya berlaku untuk nama tebakan
+  dari URL redirect, sama seperti `apply_final_url_name` sebelumnya.
+
 ## [3.3.3] - 2026-09-25
 
 Native messaging host tidak lagi menyalakan Fast-DM untuk pesan yang hanya

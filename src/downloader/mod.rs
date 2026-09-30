@@ -253,6 +253,11 @@ impl DownloadEngine {
         headers: HashMap<String, String>,
         quality: Option<String>,
     ) -> String {
+        // v3.3.4: `save_dir` hanya diisi dari dialog "Simpan Sebagai...", jadi
+        // saat itu user juga memilih NAMA file secara sadar. Penanda ini
+        // dibaca `universal::download` supaya probe `Content-Disposition`
+        // tidak menimpa pilihan eksplisit user.
+        let user_named = filename.is_some() && save_dir.is_some();
         let id = format!("dl_{}", &Uuid::new_v4().to_string()[..8]);
         let mut save = match save_dir {
             Some(d) => d.to_string(),
@@ -310,6 +315,7 @@ impl DownloadEngine {
         let mut info =
             DownloadInfo::new(id.clone(), url.to_string(), fname, save, headers, quality);
         info.is_youtube = is_yt;
+        info.user_named = user_named;
 
         // v2.3.0 (M11): tolak cepat skema non-download (blob:, data:, javascript:,
         // file:, dll.) — dulu lolos dan baru gagal lambat di CLI dengan error
@@ -2104,6 +2110,42 @@ mod tests {
             )
             .await;
         assert_ne!(again, id, "completed downloads can be added again");
+    }
+
+    /// v3.3.4: dialog "Simpan Sebagai..." mengirim filename DAN save_dir, dan
+    /// hanya jalur itu yang boleh menandai nama sebagai pilihan user. Penanda
+    /// `user_named` dibaca `universal::adopt_real_filename` supaya probe
+    /// `Content-Disposition` tidak menimpa nama yang dipilih sadar oleh user.
+    #[tokio::test]
+    async fn save_as_marks_the_filename_as_user_named() {
+        let engine = lifecycle_engine();
+        let dir = std::env::temp_dir().join("fast-dm-user-named-test");
+        let dir_s = dir.to_string_lossy().to_string();
+        let url = "https://dl-pikpak.test/down/abc/unknown_video?sign=xyz";
+
+        // "Simpan Sebagai..." → user_named = true.
+        let named = engine
+            .add_download(
+                url,
+                Some("myvideo"),
+                Some(&dir_s),
+                false,
+                Default::default(),
+                None,
+            )
+            .await;
+        let item = engine.downloads.read().await.get(&named).unwrap().clone();
+        assert!(item.lock().await.user_named, "nama dari Simpan Sebagai...");
+
+        // Tempel URL di GUI / kiriman extension → user_named = false, sehingga
+        // probe `Content-Disposition` BOLEH memperbaiki nama karangan.
+        let plain = engine
+            .add_download(url, None, None, false, Default::default(), None)
+            .await;
+        let item = engine.downloads.read().await.get(&plain).unwrap().clone();
+        assert!(!item.lock().await.user_named);
+
+        let _ = std::fs::remove_dir(&dir);
     }
 
     // ── is_direct_file_url ──
