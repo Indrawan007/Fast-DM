@@ -6,4 +6,8 @@ Icon=io.github.fastdm.FastDownloadManager
 Type=Application
 Terminal=false
 Categories=Network;FileTransfer;
+Keywords=download;aria2;yt-dlp;youtube;
+# StartupNotify hanya efektif di Hyprland/Wayland bila StartupWMClass cocok
+# dengan app-id GTK4 — XDG activation token dipakai compositor untuk fokus.
+StartupNotify=true
 StartupWMClass=io.github.fastdm.FastDownloadManager

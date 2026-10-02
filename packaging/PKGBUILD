@@ -26,10 +26,15 @@ license=('MIT')
 #   libgtk-4-1 -> gtk4 · aria2 -> aria2 · yt-dlp -> yt-dlp
 #   ffmpeg -> ffmpeg · xdg-utils -> xdg-utils · libnotify-bin -> libnotify
 depends=('gtk4' 'aria2' 'yt-dlp' 'ffmpeg' 'xdg-utils')
+# Sesi Wayland (Hyprland/Sway/niri): clipboard monitor memakai wl-paste,
+# dan portal memberi xdg-open + notifikasi GTK4 jalur portal. Tanpa daemon
+# notifikasi (dunst/mako) dan/atau portal, fitur itu hanya diam — unduhan
+# tetap jalan. Lihat README §"Arch + Hyprland".
 optdepends=(
   'libnotify: notifikasi desktop saat unduhan selesai/gagal'
   'xclip: monitor clipboard di sesi X11'
-  'wl-clipboard: monitor clipboard di sesi Wayland'
+  'wl-clipboard: monitor clipboard di sesi Wayland (Hyprland/Sway)'
+  'xdg-desktop-portal-hyprland: portal Hyprland (buka folder via xdg-open, notifikasi)'
   'chrome: browser untuk extension Native Messaging'
 )
 makedepends=('cargo' 'rust')

@@ -25,6 +25,34 @@ test("PKGBUILD valid dan skrip packaging lolos guard shell dasar", () => {
   assert.doesNotMatch(arch, /PKGFILE=\$\(ls\b/);
 });
 
+test("paket Arch siap-pakai di Wayland/Hyprland", () => {
+  const pkgbuild = read("packaging/PKGBUILD");
+  // Clipboard monitor memprioritaskan wl-paste saat WAYLAND_DISPLAY ada
+  // (src/gui/window.rs) — tanpa optdep ini, fitur itu bisu di Hyprland.
+  assert.match(pkgbuild, /'wl-clipboard: monitor clipboard di sesi Wayland/);
+  assert.match(pkgbuild, /xdg-desktop-portal-hyprland/);
+
+  const desktop = read("packaging/fast-dm.desktop");
+  // StartupNotify + XDG activation di compositor Wayland hanya bekerja bila
+  // StartupWMClass sama dengan app-id GTK4 (ikon juga wajib nama yang sama).
+  assert.match(desktop, /StartupNotify=true/);
+  assert.match(
+    desktop,
+    /StartupWMClass=io\.github\.fastdm\.FastDownloadManager/,
+  );
+  assert.match(desktop, /Icon=io\.github\.fastdm\.FastDownloadManager/);
+
+  const arch = read("packaging/build-arch.sh");
+  // Kit non-Arch: staging (tarball + PKGBUILD terisi versi) tanpa makepkg —
+  // kontrak "prepare di mesin A, makepkg di mesin B" (v3.4.0). Flag lain
+  // diteruskan ke makepkg, jadi `--install` = build + install sekali jalan.
+  assert.match(arch, /--prepare-only/);
+  assert.match(arch, /makepkg -f --noconfirm "\$\{MAKEPKG_ARGS\[@\]\}"/);
+  // Guard makepkg/root HANYA untuk jalur penuh — --prepare-only harus bisa
+  // jalan di container tanpa makepkg dan tanpa user khusus.
+  assert.match(arch, /if \[ "\$PREPARE_ONLY" -eq 0 \]; then/);
+});
+
 test("paket Debian selalu dinormalisasi menjadi milik root", () => {
   const script = read("packaging/build-deb.sh");
   assert.match(script, /dpkg-deb --root-owner-group --build "\$PKG"/);

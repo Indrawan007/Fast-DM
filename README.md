@@ -17,6 +17,32 @@ Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser ext
 - 🌐 **Proxy global** (HTTP/SOCKS5, kredensial di URL) — satu kolom di Pengaturan, berlaku untuk aria2 & yt-dlp
 - 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
 - 🐧 **Multi-distro** — paket `.deb` (Debian/Ubuntu) **dan** `.pkg.tar.zst` (Arch/Manjaro/EndeavourOS); pesan "tool tidak terinstall" otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro
+- 🖥️ **Wayland-native** — GUI GTK4 jalan tanpa XWayland di Hyprland/Sway; clipboard monitor memakai `wl-paste`, bukan `xclip`, saat sesi Wayland terdeteksi
+
+## Perubahan v3.4.0
+
+- 🐧⚡ **Build kit Arch bisa disiapkan dari distro apa pun** —
+  `packaging/build-arch.sh --prepare-only` membuat staging lengkap
+  (source tarball + `PKGBUILD` dengan versi terisi) di `build/arch/`
+  TANPA memanggil `makepkg`. Salin foldernya ke mesin Arch
+  (`scp -r build/arch host:~/fast-dm-kit`) lalu `cd ~/fast-dm-kit && makepkg -si`.
+  Berguna bila mesin build bukan Arch, atau Anda ingin biner ikut build
+  lokal di atas GTK/glibc milik distro sendiri. Argumen lain kini
+  diteruskan ke makepkg: `bash packaging/build-arch.sh --install`
+  = build + install sekaligus.
+- 🖥️ **Optdep Hyprland di `PKGBUILD`** — `xdg-desktop-portal-hyprland`
+  (portal untuk `xdg-open` "buka folder" & notifikasi GTK4) dan deskripsi
+  `wl-clipboard` yang kini eksplisit menyebut sesi Wayland.
+- 🚀 **`StartupNotify=true` + `Keywords=` di `.desktop`** — compositor Wayland
+  (termasuk Hyprland) memakai XDG activation; fokus/attention window saat
+  cold start dari native host kini benar. `StartupWMClass` tetap
+  `io.github.fastdm.FastDownloadManager` (sama dengan app-id GTK4) sehingga
+  window rule bisa ditulis:
+  `windowrulev2 = float,class:^(io\.github\.fastdm\.FastDownloadManager)$`
+- 🧪 **CI mengunci kontrak baru** — job utama (ubuntu, tanpa makepkg)
+  menjalankan dry-run `--prepare-only`, dan test
+  `release_hygiene.test.cjs` menjaga optdep Wayland/Hyprland serta
+  pasangan `StartupWMClass`/`Icon=` tidak hilang lagi.
 
 ## Perubahan v3.3.4
 
@@ -378,6 +404,23 @@ Dependensi (`gtk4`, `aria2`, `yt-dlp`, `ffmpeg`, `xdg-utils`) ikut terpasang
 otomatis. Opsional: `libnotify` untuk notifikasi desktop, `xclip` /
 `wl-clipboard` untuk monitor clipboard.
 
+#### Arch + Hyprland (Wayland)
+
+```bash
+# Opsional tapi disarankan di sesi Wayland:
+sudo pacman -S --needed wl-clipboard xdg-desktop-portal-hyprland
+```
+
+- **Clipboard monitor** memakai `wl-paste` otomatis saat `WAYLAND_DISPLAY`
+  ada (aktifkan di Pengaturan); tanpa `wl-clipboard` fitur ini diam.
+- **Notifikasi** butuh daemon (`dunst`/`mako`) dan/atau portal di atas;
+  `xdg-desktop-portal-hyprland` juga memperbaiki tombol "buka folder"
+  (`xdg-open`).
+- **Window rule** (dialog kualitas YouTube agar float, mis.):
+  `windowrulev2 = float,class:^(io\.github\.fastdm\.FastDownloadManager)$`
+- **Build dari working tree** (tanpa `git clone` ulang / di mesin non-Arch):
+  siapkan kit lalu selesaikan di Arch — lihat §Development.
+
 ### Browser Extension
 
 1. Download `fast-dm-extension-v<versi>.zip` dari release
@@ -412,11 +455,21 @@ bash packaging/build-deb.sh
 
 # Buat .pkg.tar.zst (Arch — jalankan di Arch/container archlinux)
 bash packaging/build-arch.sh
+
+# Build + install sekaligus di Arch
+bash packaging/build-arch.sh --install
+
+# Hanya siapkan build kit (tarball + PKGBUILD terisi versi) — boleh di
+# distro mana pun, tidak menyentuh makepkg; selesaikan di mesin Arch:
+#   scp -r build/arch host:~/fast-dm-kit && ssh host 'cd ~/fast-dm-kit && makepkg -si'
+bash packaging/build-arch.sh --prepare-only
 ```
 
-> `packaging/build-arch.sh` memakai `makepkg`, jadi hanya jalan di Arch Linux
-> (atau container `archlinux`), dan tidak boleh dijalankan sebagai root.
-> CI menjalankannya di job `arch` dengan user `builder`.
+> `packaging/build-arch.sh` memakai `makepkg`, jadi jalankan di Arch Linux
+> (atau container `archlinux`), dan tidak boleh sebagai root — makepkg
+> menolaknya. CI menjalankannya di job `arch` dengan user `builder`.
+> Pengecualian (v3.4.0): mode `--prepare-only` aman di distro mana pun dan
+> tidak memanggil makepkg sama sekali.
 
 ### Struktur Kode
 

@@ -3,6 +3,41 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.4.0] - 2026-10-02
+
+Rilis kemasan: build paket Arch kini bisa disiapkan dari distro apa pun dan
+sisi Wayland/Hyprland dirapikan. Tidak ada perubahan jalur unduh (aria2c /
+yt-dlp / extension tidak disentuh).
+
+### Added
+
+- **`packaging/build-arch.sh --prepare-only`** — membangun "build kit" di
+  `build/arch/` (source tarball `fast-dm-<versi>.tar.gz` + `PKGBUILD` dengan
+  `@VERSION@/@PKGREL@` terisi) tanpa memanggil `makepkg`. Dua penjaga yang
+  hanya relevan untuk makepkg (keberadaan `makepkg`, penolakan root) dipindah
+  ke balik kondisi `PREPARE_ONLY=0`, jadi staging bisa dilakukan di container
+  Debian/CI ubuntu lalu diselesaikan di mesin Arch dengan
+  `cd ~/fast-dm-kit && makepkg -si`.
+- **Argumen makepkg tembus** — `bash packaging/build-arch.sh --install`
+  kini berarti `makepkg -f --noconfirm --install` (build + install sekaligus
+  di mesin Arch).
+- **Optdep Hyprland di `PKGBUILD`** — `xdg-desktop-portal-hyprland`
+  (`xdg-open` "buka folder" + notifikasi GTK4 via portal pada sesi Hyprland);
+  deskripsi `wl-clipboard` diperjelas "sesi Wayland (Hyprland/Sway)".
+- **`Keywords=` di `fast-dm.desktop`** — aplikasinya ketemu di launcher/Wofi.
+
+### Changed
+
+- **`StartupNotify=true` di `fast-dm.desktop`** — dengan
+  `StartupWMClass=io.github.fastdm.FastDownloadManager` (identik app-id
+  GTK4) cold start dari native host kini memberi feedback fokus lewat
+  XDG activation di compositor Wayland.
+- **Job utama CI (ubuntu) menguji `--prepare-only`** sebagai dry-run —
+  pembuktian jalur non-Arch tidak butuh makepkg.
+- **Guard baru `tests/release_hygiene.test.cjs`** — mengunci optdep
+  Wayland/Hyprland di `PKGBUILD`, pasangan `Icon=`/`StartupWMClass=` di
+  `.desktop`, dan kontrak `--prepare-only`/`MAKEPKG_ARGS` di `build-arch.sh`.
+
 ## [3.3.4] - 2026-09-30
 
 Unduhan dari file-host yang nama aslinya hanya ada di header HTTP — PikPak dan

@@ -105,6 +105,19 @@ jobs:
           ./target/release/fast-dm --version
           ./target/release/fast-dm --help
 
+      # v3.4.0: kit build Arch (tarball + PKGBUILD terisi versi) bisa
+      # disiapkan di non-Arch dan diselesaikan dengan `makepkg -si` di mesin
+      # Arch. Job utama berjalan di ubuntu-latest — makepkg tidak ada di
+      # sana, jadi dry run ini sekaligus membuktikan --prepare-only tidak
+      # menyentuhnya.
+      - name: Prepare Arch build kit (non-Arch dry run)
+        run: |
+          bash packaging/build-arch.sh --prepare-only
+          test -f build/arch/PKGBUILD
+          grep -q 'pkgver=' build/arch/PKGBUILD
+          ! grep -q '@VERSION@' build/arch/PKGBUILD
+          compgen -G 'build/arch/fast-dm-*.tar.gz' > /dev/null
+
       - name: Upload release binary
         uses: actions/upload-artifact@v6
         with:
