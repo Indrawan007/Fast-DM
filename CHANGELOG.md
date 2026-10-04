@@ -3,6 +3,38 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [4.0.2] - 2026-10-04
+
+Unduhan yang ditolak server (HTTP 403/401) kini lebih sering bisa
+diselesaikan Fast-DM sendiri; serah-balik ke browser tetap ada sebagai jaring
+terakhir. Dua perubahan: jejak request dikurangi dan percobaan kedua memakai
+"wajah browser".
+
+### Changed
+
+- **Probe probe nama/ukuran tidak lagi memakai `GET Range: bytes=0-0` bila nama
+  file sudah diketahui** (`aria2::resolve_filename`) — HEAD saja. Setiap request
+  probe tambahan membakar tautan sekali-pakai dan menambah hitungan rate-limit
+  pada file-host ketat, yang justru memicu 403 pada aria2. Perilaku lama
+  (GET dulu, HEAD cadangan) tetap dipakai bila nama masih perlu ditanyakan.
+- **Ekstensi meneruskan `Accept-Language` dan `Sec-Fetch-Site`** — nilainya
+  diambil dari yang browser benar-benar punya (`navigator.languages`; perbandingan
+  origin URL vs `Referer`), bukan dikarang. `HEADER_ALLOWLIST` IPC memuat
+  `sec-fetch-site`; `Accept-Encoding`/`Accept` sengaja TIDAK diteruskan (aria2
+  tidak mendekode brotli/zstd → file bisa tersimpan terkompresi apa adanya).
+- **Percobaan kedua "mode browser" saat server menolak** (`aria2.rs` per-proses
+  dan `aria2_rpc.rs` daemon): satu kali, dengan SATU koneksi dan satu segmen
+  (`--split=1`, `--max-connection-per-server=1`) — pola multi-koneksi + Range
+  berlapis adalah yang paling sering ditandai hotlink-protection/rate-limiter.
+  Bila percobaan ini juga ditolak, `access_denied` dipasang kembali sehingga
+  handback ke browser (v3.3.2) tetap berjalan seperti sebelumnya.
+
+### Fixed
+
+- `background.js`: `navigator` yang tidak ada sama sekali tidak lagi
+  melempar ReferenceError saat menyusun `Accept-Language` (varian `no-navigator`
+  di test suite menangkapnya) — memakai `typeof navigator !== "undefined"`.
+
 ## [4.0.1] - 2026-10-04
 
 Dua regresi yang ikut terbawa saat migrasi ke Arch/Wayland-only: banner

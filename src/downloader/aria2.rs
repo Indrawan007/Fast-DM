@@ -126,6 +126,71 @@ pub async fn download(
     for path in cleanup_files {
         let _ = std::fs::remove_file(path);
     }
+
+    // v4.0.2 (R2): server menolak request pertama (403/401) → ulangi SEKALI
+    // dalam mode browser (satu koneksi, satu segmen). Bila percobaan ini juga
+    // ditolak, `run_aria2c` menandai `access_denied` lagi sehingga handback ke
+    // browser tetap berjalan seperti sebelumnya — tidak ada unduhan yang hilang.
+    let retry_command = {
+        let i = info.lock().await;
+        if i.access_denied && !i.stop_requested() {
+            match build_aria2_cmd(&i, config) {
+                Ok((mut command, cleanup)) => {
+                    apply_browser_mode(&mut command);
+                    Some((command, cleanup))
+                }
+                Err(e) => {
+                    tracing::warn!("mode browser tidak bisa disiapkan: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+    if let Some((command, cleanup_files)) = retry_command {
+        {
+            let mut i = info.lock().await;
+            if i.stop_requested() {
+                return;
+            }
+            i.status = DownloadStatus::Downloading;
+            i.error_msg.clear();
+            // Percobaan baru dinilai ulang oleh `run_aria2c`; kalau gagal lagi
+            // karena penolakan server, penandanya dipasang kembali di sana.
+            i.access_denied = false;
+            i.status_detail = BROWSER_MODE_DETAIL.to_string();
+            let _ = tx.send(DownloadEvent::Progress(i.clone()));
+        }
+        tracing::info!("aria2c: ulang dalam mode browser (1 koneksi)");
+        run_aria2c(command, info.clone(), tx.clone()).await;
+        for path in cleanup_files {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// v4.0.2 (R2): teks status saat unduhan diulang dalam "mode browser".
+pub(crate) const BROWSER_MODE_DETAIL: &str =
+    "Server menolak Fast-DM — mencoba ulang dengan koneksi tunggal (mode browser)…";
+
+/// v4.0.2 (R2): ubah perintah aria2 yang sudah dibangun menjadi "mode browser".
+///
+/// Penolakan server (403/401) pada file-host biasanya datang dari pola khas
+/// download manager: beberapa koneksi paralel dengan Range berlapis. Mode ini
+/// memaksa SATU koneksi & satu segmen — tanpa akselerasi, tetapi satu unduhan
+/// tanpa akselerasi jauh lebih baik daripada gagal lalu diserahkan ke browser.
+/// Nilainya tetap dalam rentang sah manual aria2 (`split` ≥ 1,
+/// `max-connection-per-server` ≥ 1); kedua argumen selalu ada karena
+/// `build_aria2_cmd` menulisnya tanpa syarat.
+fn apply_browser_mode(cmd: &mut [String]) {
+    for arg in cmd.iter_mut() {
+        if arg.starts_with("--split=") {
+            *arg = "--split=1".into();
+        } else if arg.starts_with("--max-connection-per-server=") {
+            *arg = "--max-connection-per-server=1".into();
+        }
+    }
 }
 
 fn build_aria2_cmd(
@@ -914,9 +979,16 @@ pub(crate) async fn resolve_filename(
     info: &Arc<Mutex<DownloadInfo>>,
     config: &Config,
 ) -> Result<(), String> {
-    let (url, headers) = {
+    let (url, headers, name_known) = {
         let i = info.lock().await;
-        (i.url.clone(), i.headers.clone())
+        // v4.0.2 (R1): nama yang SUDAH diketahui (bukan placeholder Fast-DM,
+        // bukan nama tanpa ekstensi) tidak perlu ditanyakan lagi ke server —
+        // lihat pemilihan metode probe di bawah.
+        (
+            i.url.clone(),
+            i.headers.clone(),
+            !should_probe_filename(&i.filename),
+        )
     };
 
     let client = resolve_client(config)?;
@@ -945,18 +1017,24 @@ pub(crate) async fn resolve_filename(
         req
     };
 
-    // Try GET with Range 0-0 (more reliable than HEAD for Content-Disposition)
-    let resp = build_get().send().await;
-
-    let resp = match resp {
-        Ok(r) => r,
-        Err(_) => {
+    // v4.0.2 (R1): GET `Range: bytes=0-0` lebih dulu HANYA bila nama masih
+    // perlu ditanyakan — `Content-Disposition` sering hanya dikirim pada GET.
+    // Bila nama sudah diketahui, HEAD saja cukup: tiap request probe tambahan
+    // membakar tautan sekali-pakai dan menambah hitungan rate-limit pada
+    // file-host ketat (yang justru memicu HTTP 403 pada aria2).
+    let resp = if name_known {
+        build_head().send().await.ok()
+    } else {
+        match build_get().send().await {
+            Ok(r) => Some(r),
             // Fallback: try HEAD
-            match build_head().send().await {
-                Ok(r) => r,
-                Err(_) => return Ok(()),
-            }
+            Err(_) => build_head().send().await.ok(),
         }
+    };
+    // Tidak ada respons sama sekali (DNS/connect/timeout) — serahkan ke aria2,
+    // yang punya pesan kegagalannya sendiri (perilaku lama).
+    let Some(resp) = resp else {
+        return Ok(());
     };
 
     // v3.3.1 (T1): simpan dulu header nama dari respons PROBE. Bila probe
@@ -988,9 +1066,15 @@ pub(crate) async fn resolve_filename(
         resp
     } else {
         let first = resp.status().as_u16();
-        let retry = match build_head().send().await {
-            Ok(r) if r.status().is_success() => Some(r),
-            _ => None,
+        // Saat nama sudah diketahui, respons di atas SUDAH HEAD — mengulang
+        // HEAD yang sama hanya menambah request tanpa informasi baru.
+        let retry = if name_known {
+            None
+        } else {
+            match build_head().send().await {
+                Ok(r) if r.status().is_success() => Some(r),
+                _ => None,
+            }
         };
         match retry {
             Some(r) => r,
@@ -1632,6 +1716,41 @@ mod tests {
         assert!(cookie_expired(now - 1, now));
         assert!(!cookie_expired(now + 1, now));
         assert!(!cookie_expired(i64::MAX, now));
+    }
+
+    #[test]
+    fn browser_mode_forces_a_single_connection() {
+        let id = format!("browser-{}", uuid::Uuid::new_v4().simple());
+        let item = DownloadInfo::new(
+            id,
+            "https://example.test/archive.zip".into(),
+            "archive.zip".into(),
+            "/tmp".into(),
+            Default::default(),
+            None,
+        );
+        let cfg = Config::default();
+        let (mut args, cleanup) = build_aria2_cmd(&item, &cfg).unwrap();
+        // Prasyarat: perintah normal memang multi-koneksi (mode cepat).
+        assert!(
+            args.iter()
+                .any(|a| a == &format!("--split={}", cfg.max_connections.max(1))),
+            "{args:?}"
+        );
+
+        apply_browser_mode(&mut args);
+        assert!(args.iter().any(|a| a == "--split=1"), "{args:?}");
+        assert!(
+            args.iter().any(|a| a == "--max-connection-per-server=1"),
+            "{args:?}"
+        );
+        // Argumen lain tidak tersentuh — resume & nama output dipertahankan.
+        assert!(args.iter().any(|a| a == "--continue=true"));
+        assert!(args.iter().any(|a| a == "--out=archive.zip"));
+
+        for path in cleanup {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]

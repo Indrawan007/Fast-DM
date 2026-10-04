@@ -96,10 +96,21 @@ const MAX_REQUEST_LINE: usize = 1024 * 1024;
 /// Lapisan kedua tetap ada: `downloader::redact_for_persist` membuang header
 /// sensitif dari snapshot session (membersihkan `session.json` warisan
 /// ≤2.9.4), dan tiap runner men-strip `\r\n` sebelum membentuk argumen CLI.
-pub(crate) const HEADER_ALLOWLIST: &[&str] =
-    &["referer", "origin", "accept-language", "user-agent"];
+/// v4.0.2 (R1): `sec-fetch-site` ikut diizinkan — extension menghitungnya dari
+/// origin URL vs `Referer` (nilai asli yang dikirim Chrome), dan banyak WAF
+/// menolak request download-manager yang tidak membawanya. Hanya header yang
+/// nilainya BISA diketahui benar dari browser yang masuk daftar ini: nilai
+/// karangan (mis. `Accept-Encoding: br` padahal aria2 tidak mendekode brotli,
+/// atau `Accept: text/html` untuk fetch file) justru merusak/melemahkan.
+pub(crate) const HEADER_ALLOWLIST: &[&str] = &[
+    "referer",
+    "origin",
+    "accept-language",
+    "user-agent",
+    "sec-fetch-site",
+];
 
-/// Batas jumlah header per permintaan. Dengan allow-list 4 nama saat ini batas
+/// Batas jumlah header per permintaan. Dengan allow-list 5 nama saat ini batas
 /// ini praktis tak terjangkau (kunci HashMap unik) — dipasang sebagai penjaga
 /// bila daftar diperluas, supaya argumen CLI tidak bisa tumbuh tanpa batas.
 pub(crate) const MAX_HEADERS: usize = 16;
@@ -1042,6 +1053,21 @@ mod tests {
         // Pastikan tidak lolos dalam casing apa pun.
         let raw2 = headers_of(&[("COOKIE", "a=b"), ("authorization", "x")]);
         assert!(sanitize_headers(raw2).is_empty());
+    }
+
+    #[test]
+    fn allowlist_accepts_sec_fetch_site_and_still_rejects_credentials() {
+        // v4.0.2 (R1): `Sec-Fetch-Site` lolos; `Accept-Encoding` sengaja TIDAK
+        // (aria2 tidak mendekode brotli/zstd → file akan tersimpan terkompresi
+        // apa adanya), dan kredensial tetap ditolak seperti sebelumnya.
+        let raw = [
+            ("Sec-Fetch-Site", "same-site"),
+            ("Accept-Encoding", "gzip, deflate, br, zstd"),
+            ("Cookie", "sid=secret"),
+        ];
+        let got = sanitize_headers(headers_of(&raw));
+        assert_eq!(got.len(), 1, "got {got:?}");
+        assert_eq!(got["Sec-Fetch-Site"], "same-site");
     }
 
     #[test]
