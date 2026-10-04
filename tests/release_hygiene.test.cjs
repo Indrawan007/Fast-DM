@@ -22,13 +22,43 @@ test("PKGBUILD valid dan skrip packaging lolos guard shell dasar", () => {
   assert.match(pkgbuild, /cd "\$srcdir\/\$pkgname-\$pkgver" \|\| return 1/g);
 
   const arch = read("packaging/build-arch.sh");
+  const archSyntax = spawnSync("bash", ["-n", "packaging/build-arch.sh"], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
+  assert.equal(archSyntax.status, 0, archSyntax.stderr || archSyntax.stdout);
+  assert.match(arch, /--exclude=\.\/node_modules/);
   assert.doesNotMatch(arch, /PKGFILE=\$\(ls\b/);
 });
 
-test("paket Debian selalu dinormalisasi menjadi milik root", () => {
-  const script = read("packaging/build-deb.sh");
-  assert.match(script, /dpkg-deb --root-owner-group --build "\$PKG"/);
-  assert.doesNotMatch(script, /\ndpkg-deb --build "\$PKG"/);
+test("paket hanya menargetkan Arch + Hyprland/Wayland", () => {
+  const pkgbuild = read("packaging/PKGBUILD");
+  const desktop = read("packaging/fast-dm.desktop");
+  const app = read("src/app.rs");
+  const main = read("src/main.rs");
+  const window = read("src/gui/window.rs");
+
+  assert.match(pkgbuild, /wl-clipboard/);
+  assert.match(pkgbuild, /Hyprland|Wayland/i);
+  assert.doesNotMatch(pkgbuild, /xclip|X11|\.deb|Debian/i);
+  assert.match(desktop, /GDK_BACKEND=wayland/);
+  assert.match(app, /WAYLAND_DISPLAY/);
+  assert.match(app, /GDK_BACKEND/);
+  assert.match(main, /set_var\("GDK_BACKEND", backend\)/);
+  assert.match(window, /wl-paste/);
+  assert.doesNotMatch(window, /xclip|X11/);
+  assert.equal(fs.existsSync(path.join(ROOT, "packaging/build-deb.sh")), false);
+  assert.equal(fs.existsSync(path.join(ROOT, "packaging/control")), false);
+});
+
+test("CI dan release menjalankan build di container Arch saja", () => {
+  const ci = read(".github/workflows/ci.yml");
+  const release = read(".github/workflows/release.yml");
+  const workflows = `${ci}\n${release}`;
+
+  assert.match(workflows, /image:\s*archlinux:latest/);
+  assert.match(workflows, /packaging\/build-arch\.sh/);
+  assert.doesNotMatch(workflows, /apt-get|dpkg-deb|build-deb\.sh|\.deb/);
 });
 
 test("reqwest hanya mengaktifkan backend rustls", () => {
@@ -62,21 +92,20 @@ test("reqwest hanya mengaktifkan backend rustls", () => {
   }
 });
 
-test("workflow CI memakai action Node 24 dan cache workspace yang valid", () => {
+test("workflow Arch menyediakan tool Node dan artifact memakai action terbaru", () => {
   const ci = read(".github/workflows/ci.yml");
   const release = read(".github/workflows/release.yml");
   const workflows = `${ci}\n${release}`;
 
   assert.doesNotMatch(workflows, /actions\/checkout@v4/);
-  assert.doesNotMatch(workflows, /actions\/setup-node@v4/);
   assert.doesNotMatch(workflows, /actions\/upload-artifact@v[45]/);
   assert.match(workflows, /actions\/checkout@v5/);
-  assert.match(workflows, /actions\/setup-node@v5/);
   assert.match(ci, /actions\/upload-artifact@v6/);
 
-  // Baris "target" sebagai workspace membuat rust-cache mencoba cwd yang
-  // belum ada. Default action sudah benar: workspace `.` → target `target`.
-  assert.doesNotMatch(ci, /workspaces:\s*\|[\s\S]*?^\s+target\s*$/m);
+  assert.match(ci, /nodejs/);
+  assert.match(release, /nodejs/);
+  assert.match(ci, /npm ci/);
+  assert.match(release, /npm ci/);
 });
 
 test("workflow rilis menjalankan seluruh security gate sebelum publish", () => {

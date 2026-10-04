@@ -1,9 +1,9 @@
 [package]
 name = "fast-dm"
-version = "3.3.4"
+version = "4.0.0"
 edition = "2021"
 authors = ["FastDM Contributors"]
-description = "High-speed download manager with browser integration"
+description = "Arch Linux download manager for Hyprland/Wayland with browser integration"
 license = "MIT"
 
 [[bin]]

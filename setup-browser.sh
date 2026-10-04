@@ -139,8 +139,8 @@ if [ "$WRITTEN" -eq 0 ]; then
 fi
 
 if [ ! -x "$NATIVE_PATH" ]; then
-  echo "! $NATIVE_PATH belum ada — install paket .deb dulu, atau jalankan aplikasi"
-  echo "  sekali supaya manifest diarahkan ke binary hasil build."
+  echo "! $NATIVE_PATH belum ada — pasang paket Arch .pkg.tar.zst terlebih dahulu,"
+  echo "  atau jalankan aplikasi sekali agar manifest diarahkan ke binary hasil build."
 fi
 
 echo "Done ($WRITTEN manifest, $(printf '%s' "$IDS" | wc -w) origin). Restart browser dan reload extension."

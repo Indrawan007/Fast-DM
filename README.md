@@ -1,438 +1,83 @@
-[![CI](https://github.com/Indrawan007/Fast-DM/actions/workflows/ci.yml/badge.svg)](https://github.com/Indrawan007/Fast-DM/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+# Fast-DM — Arch Linux + Hyprland
 
-Fast-DM adalah aplikasi Download Manager untuk Linux dengan dukungan browser extension untuk mempermudah pengiriman tautan unduh ke aplikasi.
+Fast-DM adalah download manager GTK4 untuk **Arch Linux x86_64 pada sesi Hyprland/Wayland**. Unduhan ditangani oleh `aria2` dan `yt-dlp`; ekstensi Chromium dapat mengirim tautan langsung dari browser.
+
+GUI Fast-DM menggunakan backend GTK Wayland secara eksplisit. **Sesi X11/XWayland dan paket distro selain Arch bukan target dukungan proyek ini.** CI membangun dan menguji paket di Arch Linux; compositor Hyprland tidak dijalankan di CI.
 
 ## Fitur
 
-- 🚀 **Download accelerator** via `aria2c` (multi-connection, segment, resume, limit global live via daemon RPC)
-- 🎬 **YouTube & 1800+ situs** via `yt-dlp` (TikTok, IG, FB, X, Vimeo, HLS/DASH)
-- 🔌 **Browser extension** (Chrome/Chromium/Brave/Edge/Opera/Vivaldi) dengan Native Messaging
-- 🎯 **Overlay IDM-like** di YouTube player — klik ⚡ pilih kualitas
-- 🍪 **Cookie per-domain** — download login-protected dari subdomain CDN
-- 🌑 **Tema Catppuccin Mocha** untuk GTK4 GUI
-- ⏸️ **Pause/resume/cancel** dengan SIGTERM (resume-friendly, bukan kill paksa)
-- 📋 **Session persist** — unduhan yang belum selesai otomatis di-resume saat restart (bisa dimatikan di Pengaturan)
-- 🔒 **IPC lokal aman** — socket di `XDG_RUNTIME_DIR` (0700) + verifikasi UID peer + allow-list header dari extension; cookies & file token tidak pernah ditulis ke `/tmp` publik; extension ID baru yang diizinkan memanggil native host diumumkan lewat notifikasi desktop
-- 🌐 **Proxy global** (HTTP/SOCKS5, kredensial di URL) — satu kolom di Pengaturan, berlaku untuk aria2 & yt-dlp
-- 📋 **Clipboard monitor** (opt-in) — URL yang disalin terdeteksi otomatis dengan banner "Unduh", ala IDM
-- 🐧 **Multi-distro** — paket `.deb` (Debian/Ubuntu) **dan** `.pkg.tar.zst` (Arch/Manjaro/EndeavourOS); pesan "tool tidak terinstall" otomatis memakai `pacman`/`apt`/`dnf`/`zypper` sesuai distro
+- Unduhan multi-koneksi, jeda/lanjutkan, retry, dan pemulihan sesi melalui `aria2`.
+- YouTube dan banyak situs lain melalui `yt-dlp`, termasuk pilihan kualitas serta audio/video.
+- Ekstensi Chromium untuk mencegat unduhan, membawa cookie/Referer, dan menampilkan pilihan kualitas di pemutar video.
+- Pemantauan clipboard Wayland secara opsional melalui `wl-paste`.
+- Pengaturan folder, batas kecepatan, koneksi, proxy, dan verifikasi TLS.
+- Integrasi browser Native Messaging dan notifikasi desktop opsional.
 
-## Perubahan v3.3.4
+## Dependensi Arch + Hyprland
 
-- **Nama asli video PikPak tidak lagi hilang** — file
-  `bangbrosclips.26.09.29.rika.fane.and.dalila.lapiedra.mp4` tidak lagi
-  tersimpan sebagai `download.unknown_video`. Tautan bertanda tangan PikPak
-  tidak memuat nama file, sedangkan nama aslinya hanya ada di header
-  `Content-Disposition`. Fast-DM hanya membaca header itu di jalur aria2;
-  tautan tanpa ekstensi (seperti PikPak) justru dialihkan ke yt-dlp, yang
-  menamai file dari path bertanda tangan. Kini jalur yt-dlp juga menanyakan
-  nama ke server (HEAD, lalu ranged GET) sebelum mengunduh, jadi nama di disk
-  dan nama di kartu GUI sama-sama nama asli.
-- Nama ber-ekstensi, nama pilihan user dari dialog "Simpan Sebagai…", dan
-  manifest `.m3u8`/`.mpd` (yang harus di-merge) tidak pernah ditimpa probe ini.
-- Tabrakan nama memakai skema `name (1).ext` yang sama dengan jalur aria2,
-  karena yt-dlp dianggil dengan `--no-overwrites` dan akan gagal bila file
-  dengan nama itu sudah ada.
+Dependensi utama dipasang otomatis oleh paket Fast-DM. Untuk instalasi dari source:
 
-## Perubahan v3.3.3
+```bash
+sudo pacman -S --needed gtk4 aria2 yt-dlp ffmpeg xdg-utils wl-clipboard
+```
 
-- **Fast-DM tidak lagi terbuka sendiri saat popup extension dibuka** — native
-  host dulu menyalakan GUI untuk SETIAP aksi yang gagal diteruskan ke socket,
-  termasuk `ping` yang dikirim popup setiap kali dibuka; status "Fast DM tidak
-  berjalan" pun hampir tak pernah tampil karena cold start selalu membuatnya
-  "terhubung". Kini hanya `download` yang boleh menyalakan aplikasi
-  (`gui_unavailable_response` di `src/native_host/mod.rs`); `ping`, `list`, `pause`,
-  `resume`, `cancel`, dan `handback` dijawab "Fast DM tidak berjalan" tanpa
-  side effect.
-- **Tidak ada lagi spawn berulang setelah Fast-DM ditutup** — poll `handback`
-  extension (2 dtk sekali, hingga 120 dtk) tidak lagi memicu cold start GUI
-  berkali-kali; poll pertama dijawab gagal dan extension berhenti bertanya.
-- Setelah memperbarui, **reload** extension di `chrome://extensions`.
+Opsional untuk integrasi desktop Hyprland/GTK yang lebih lengkap:
 
-## Perubahan v3.3.2
+```bash
+sudo pacman -S --needed libnotify xdg-desktop-portal-hyprland xdg-desktop-portal-gtk
+```
 
-- **Unduhan yang ditolak server kembali ke browser otomatis** — bila file-host menjawab HTTP 403/401 atau halaman HTML untuk Fast-DM (anti-bot, hotlink-protection, sesi terikat browser) sebelum satu byte pun diterima, unduhan yang dicegat extension diserahkan kembali ke browser dan diunduh di sana. Kartunya di Fast-DM ditandai "Diserahkan ke browser"; tidak ada lagi unduhan yang hilang.
-- **Tidak ada lagi pesan error basi** — kartu yang sedang dicoba ulang tidak lagi menampilkan error percobaan sebelumnya.
-- **Penolakan server tidak di-retry otomatis** — tombol **Ulangi** langsung aktif; gangguan jaringan sementara tetap di-retry otomatis.
-
-## Perubahan v3.3.1
-
-- **Nama file asli tidak lagi hilang pada tautan tanpa nama** (mis. Google Drive `…/open?id=…`): selama nama masih placeholder `download_<millis>_<hex>`, Fast-DM tidak memaksakannya ke aria2 — aria2 memakai `Content-Disposition`/URL final lalu namanya diadopsi balik, sehingga file di disk sudah benar sejak awal dan kartu unduhan ikut berubah.
-- **Pra-cek yang ditolak (403/405/416/429/5xx) tetap memakai `Content-Disposition` + URL final** untuk menamai file, dan tabrakan nama tetap diselesaikan gaya browser (`eee (1).mp4`).
-- Unduhan yang sudah punya nama spesifik (dari URL, header, atau dialog "Simpan Sebagai…") berperilaku persis sama seperti sebelumnya, termasuk saat resume.
-
-## Perubahan v3.3.0
-
-- **Audit 22 bug (K1-K11 kritis, M1-M8 medium, L1-L5 low)** — perbaikan menyeluruh hasil audit kode:
-  - Cookie freshness 24h konsisten di semua jalur (aria2, youtube, RPC), clipboard re-probe saat tool hilang, TOCTOU port race dihilangkan, rpc_secret invalid dibersihkan, backup config/session pakai millis+random anti-tabrakan, save_dir divalidasi (absolute, tanpa `..`, tolak `/` & `/tmp`) dengan inline error di Pengaturan, proxy inline validation, speed limit tolak spasi internal, shutdown daemon tidak simpan GID basi, filename fallback anti-collision millis+random, proxy length limit, cookies filename truncate. Setelah memperbarui, **reload** extension di `chrome://extensions`.
-- **Semua perbaikan CI/packaging v3.2.10 digabungkan kembali** — squash
-  merge v3.3.0 sempat menjatuhkannya, sehingga `cargo deny` dan paket Arch
-  merah lagi di CI; kini statusnya dipulihkan (lihat bagian v3.2.10).
-- **CI tidak lagi merah karena Clippy** — refactor cookie freshness di atas
-  meninggalkan satu fungsi yang tak terpakai di backend YouTube. Clippy
-  memblokir job build, tetapi selama ini tidak pernah terlihat karena
-  `cargo deny` gagal lebih dulu. Fungsi mati itu dibersihkan; tidak ada
-  perubahan cara mengunduh. Kegagalan Clippy berikutnya juga akan tampil
-  sebagai anotasi di halaman Actions, bukan sekadar "exit code 101".
-
-## Perubahan v3.2.10
-
-Perbaikan audit dikerjakan dalam empat tahap. Tahap 1 memperkuat fondasi build
-dan rilis:
-
-- `PKGBUILD` kembali valid, kebijakan lisensi menerima
-  `CDLA-Permissive-2.0`, dan cache Cargo tidak lagi mencoba workspace
-  `target` yang belum ada.
-- Paket `.deb` selalu menyimpan payload sebagai `root:root`, bukan UID runner
-  pembangun.
-- HTTP resolver hanya memakai Rustls; backend `native-tls`/OpenSSL yang tidak
-  disengaja dinonaktifkan.
-- Workflow memakai action berbasis Node 24 dan workflow rilis kini wajib lolos
-  format, audit, cargo-deny, Clippy, seluruh test, lint extension, serta
-  pemeriksa identifier sebelum artefak dipublikasikan.
-- Regression test `release_hygiene.test.cjs` mengunci aturan CI/packaging di
-  atas agar tidak kembali rusak.
-
-## Perubahan v3.2.9
-
-- **Unduhan ulang tidak lagi merusak nama file (keluhan "eee.eee.eee.mp4")**
-  — sebelumnya tabrakan nama diserahkan penuh ke `--auto-file-renaming`
-  aria2, yang menyisipkan `.1`/`.2` di antara nama dan ekstensi
-  (`eee.mp4` → `eee.1.mp4` → `eee.2.mp4`), sementara GUI tetap menampilkan
-  nama lama. Kini Fast-DM memilih nama bebas tabrakan sendiri bergaya
-  browser SEBELUM unduhan jalan: `eee.mp4` → `eee (1).mp4` → `eee (2).mp4`
-  — ekstensi `.mp4` selalu tunggal dan utuh. File yang sedang dijeda
-  (control file `.aria2`) tetap di-resume dengan nama aslinya; mematikan
-  setelan auto-rename di Pengaturan mengembalikan perilaku timpa
-  (overwrite). Setelah memperbarui extension, **reload** di
-  `chrome://extensions`.
-
-## Perubahan v3.2.8
-
-- Pemeriksa identifier extension (`tools/check-undeclared.cjs`) yang hilang
-  sejak v3.2.3 ditambahkan kembali, advisory `rustls`/`h2` diperbarui, dan
-  konflik flag LTO/debug paket Arch diperbaiki. **Koreksi v3.2.10:** klaim lama
-  bahwa CI sudah kembali hijau tidak tepat; keseluruhan workflow saat itu masih
-  gagal karena syntax `PKGBUILD` dan kebijakan lisensi `webpki-roots`. Dua
-  blocker tersisa itu baru diperbaiki di v3.2.10. Tidak ada perubahan cara
-  mengunduh pada v3.2.8.
-
-## Perubahan v3.2.7
-
-- 🔁 **Link lama tidak lagi diunduh ulang (dan Fast DM tidak lagi terbuka
-  sendiri) setiap kali browser dibuka** — Chrome memancarkan
-  `downloads.onCreated` untuk setiap entri riwayat unduhan saat start, dan
-  extension memperlakukannya sebagai unduhan baru. Kini hanya unduhan yang
-  benar-benar `in_progress` yang di-intercept; entri riwayat (`complete` /
-  `interrupted`, termasuk sisa unduhan `.zip` yang gagal di v3.2.2) diabaikan.
-  Setelah memperbarui, **reload extension** di `chrome://extensions` atau
-  restart browser. Entri lama di `chrome://downloads` tidak dihapus otomatis —
-  bersihkan manual bila perlu.
-
-## Perubahan v3.2.6
-
-- Extension kini mengirim User-Agent browser bersama cookie dan Referer untuk
-  mengurangi perbedaan sesi browser versus downloader. Header eksplisit tetap
-  dihormati. Setelah memperbarui aplikasi, **reload extension** di halaman
-  pengelolaan ekstensi browser dan mulai unduhan baru dari halaman sumber;
-  item lama tidak otomatis mendapat User-Agent terbaru.
-- Perubahan ini tidak meniru sidik jari TLS browser atau menyelesaikan CAPTCHA.
-  Jika server masih menolak aria2, gunakan browser dengan intersepsi dimatikan.
-
-## Perubahan v3.2.5
-
-- **Perbaikan cookie login pada unduhan HTTP 403/401** — opsi RPC `cookie`
-  yang tidak didukung aria2 dihapus. Unduhan dengan jar cookie kini memakai
-  proses aria2 terpisah dengan `--load-cookies`, sehingga aturan domain,
-  path, Secure, dan kedaluwarsa tetap berlaku saat redirect. Unduhan tanpa
-  jar cookie tetap memakai daemon RPC. Untuk jalur cookie, pembagian limit
-  kecepatan dihitung saat proses dimulai, bukan diubah live oleh daemon.
-
-### Jika server masih mengembalikan HTTP 403
-
-Buka kembali halaman sumber, login bila diperlukan, lalu klik tautan unduh
-baru lewat extension Fast-DM agar cookie dan Referer dikirim ulang. Menempel
-URL saja tidak membawa sesi browser; tombol **Ulangi** juga tidak memperbarui
-link yang kedaluwarsa. Jangan membagikan cookie atau URL bertoken di laporan
-bug. Jika hanya browser yang berhasil (misalnya CAPTCHA/anti-bot atau tautan
-sekali pakai), nonaktifkan intersepsi extension sementara dan unduh melalui
-browser. Perbaikan ini tidak melewati pembatasan akses server.
-
-## Perubahan v3.2.4
-
-- 📦 **Unduhan `.zip`/`.rar` dari file-host tidak lagi gagal "HTTP 403 — bukan
-  file video"** — pra-cek HTTP yang ditolak server (anti-bot / hotlink
-  protection / tanpa dukungan `Range`/`HEAD`) tidak lagi dianggap final; hanya
-  404/410 yang menghentikan unduhan, sisanya diserahkan ke aria2.
-- 💬 **Exit code aria2 diterjemahkan** — `aria2c gagal (exit 22): server
-menolak permintaan (HTTP 403/401…)` alih-alih angka mentah, di jalur
-  per-proses maupun daemon RPC.
-
-## Perubahan v3.2.3
-
-Rilis perbaikan hasil audit kode menyeluruh — tidak ada fitur baru, tidak ada
-perubahan antarmuka.
-
-- 🍪 **Cookie login tidak lagi terhapus diam-diam** — unduhan yang cookie-nya
-  tidak cocok dengan URL request dulu menghapus `cookies_<host>.txt` milik
-  unduhan lain yang baru saja login. Sekarang tidak menulis apa pun.
-- 📋 **Clipboard monitor tidak mati permanen** — bila `xclip`/`wl-paste` belum
-  terpasang, monitor dulu berhenti selamanya; kini ia mencoba lagi tiap 2,5
-  detik sehingga memasang tool-nya kemudian langsung berfungsi tanpa restart.
-- 🧹 **Shelf unduhan browser bersih** — entri "dibatalkan" tidak lagi tertinggal:
-  penghapusan menunggu status `interrupted`, bukan dipanggil di dalam callback
-  `cancel` (yang ditolak Chrome karena item masih berjalan).
-- 📁 **Folder tujuan ber-`%`** (mis. `50%_bonus`) tidak lagi dibaca yt-dlp
-  sebagai kode template.
-- 🔒 **`quality` dari extension disaring di boundary IPC** — nilai cacat
-  diabaikan (unduhan tetap jalan dengan kualitas default), bukan diteruskan ke
-  `--format`.
-- 🧪 **CI punya penjaga baru** — `tools/check-undeclared.cjs` menangkap
-  identifier yang dipakai tanpa pernah dideklarasikan di extension. Ini kelas
-  bug yang membuat context menu mati total di v3.2.1 dan lolos dari
-  `node --check` (yang hanya memvalidasi sintaks).
-
-> **Catatan intersep:** Chrome hanya mengizinkan **satu** extension menangani
-> `chrome.downloads.onDeterminingFilename`. Bila Anda memasang download manager
-> lain yang memakai API itu, jalur intersep Fast-DM lewat API tersebut tidak
-> dipanggil — intersep tetap berjalan lewat `downloads.onCreated`, tetapi tanpa
-> penentuan nama file awal.
-
-## Perubahan v3.2.0
-
-- 🐧 **Dukungan Arch Linux & turunannya** — `packaging/PKGBUILD` +
-  `packaging/build-arch.sh` menghasilkan `fast-dm-<versi>-1-x86_64.pkg.tar.zst`
-  dengan layout instalasi yang sama persis dengan `.deb`
-  (`/opt/fast-dm` + symlink `/usr/bin/fast-dm` + wrapper `fast-dm-native`),
-  sehingga `resolve_native_path()` dan `setup-browser.sh` tidak perlu tahu
-  distro apa yang dipakai. Dependensi dipetakan dari paket Debian
-  (`libgtk-4-1` → `gtk4`, `libnotify-bin` → `libnotify`).
-- 🧪 **CI punya job Arch** — build, `cargo fmt --check`, `cargo test --locked`,
-  test extension, dan `makepkg` sungguhan di container `archlinux`; rilis juga
-  meng-upload paket Arch beserta checksum-nya.
-- 💬 **Pesan "tool tidak terinstall" mengikuti distro** — modul baru `src/pkg.rs`
-  mendeteksi package manager dari `/etc/os-release` (fallback: keberadaan
-  binary) dan menghasilkan `sudo pacman -S aria2` / `sudo apt install aria2` /
-  `sudo dnf install aria2` / `sudo zypper install aria2` / `xbps-install` /
-  `apk add`. Sebelumnya semua distro disuruh menjalankan `sudo apt install`.
-
-## Perubahan v3.1.0
-
-- ⚡ **Optimasi Throughput Kecepatan Jaringan** — penambahan opsi buffer socket
-  `--socket-recv-buffer-size=1M`, `--http-accept-gzip=true`, dan
-  `--content-disposition-default-utf8=true` pada aria2c untuk menghilangkan
-  _TCP window bottleneck_ pada koneksi berkecepatan tinggi.
-- 🎬 **Anti-Throttle & Resiliensi yt-dlp** — buffer diperbesar ke 64K, deteksi
-  dan auto-restart stream YouTube lambat (`--throttled-rate 100K`), serta retry
-  fragmen streaming paralel dengan backoff cepat.
-- 🏷️ **Resolusi Nama File Universal** — nama file video dari query parameters
-  (`?file=...`, `?filename=...`, `?response-content-disposition=...`) dan header
-  `Content-Disposition` non-standar (URL-encoded / quote wrapping) diekstrak
-  secara akurat; nama output nyata dari yt-dlp disinkronkan langsung ke UI.
-
-## Perubahan v3.0.0
-
-**Release breaking (semver major): fitur download torrent & magnet link dihapus.**
-
-- Skema `magnet:` kini ditolak dengan pesan jelas — "Skema URL tidak didukung
-  — http, https, atau ftp." — di gate engine maupun IPC extension (sama
-  seperti `blob:`/`data:` dan skema non-download lain).
-- Deteksi `magnet:`, flag `--bt-*`/`--seed-time`, dan tampilan seeders/peers
-  dihapus dari jalur daemon RPC. **Daemon RPC tetap dipakai** untuk unduhan
-  http/https/ftp (limit kecepatan global live & pause/resume native).
-- File metafile (`.torrent`, `.nzb`, `.metalink`, `.meta4`) tetap di daftar
-  297 ekstensi file langsung dan tetap di-intercept extension, tetapi kini
-  **diunduh sebagai file biasa** — kedua jalur aria2 memakai
-  `--follow-torrent=false` / opsi `follow-torrent: "false"` sehingga aria2
-  tidak lagi mengikuti metadata-nya (default aria2 sebelumnya malah mengunduh
-  konten yang dideskripsikan torrent-nya).
-- Clipboard monitor tidak lagi memicu untuk `magnet:`. Input magnet yang
-  ditempel tetap lolos normalisasi apa adanya agar penolakan engine memakai
-  pesan skema yang jelas (bukan URL `https://magnet:…` sampah).
-
-## Stabilitas v2.11.2
-
-- **Unduhan hidup lagi** — nilai `min-split-size` `512K` (jalur per-proses DAN
-  opsi per-URI daemon) berada di luar rentang sah aria2 (`1M`–`1024M`), sehingga
-  aria2c keluar dengan exit code 28 sebelum mengunduh satu byte pun dan
-  `aria2.addUri` fault di jalur daemon; semua unduhan http/ftp serta magnet mati
-  sejak v2.10.5. Kini keduanya memakai konstanta `MIN_SPLIT_SIZE = "1M"` (nilai
-  terkecil yang sah = split paling agresif yang diizinkan), dijaga test
-  `min_split_size_within_aria2_documented_range` agar tidak "dioptimalkan" ke
-  bawah rentang lagi.
-
-## Stabilitas v2.11.1
-
-Rilis perbaikan — tidak ada fitur baru, tidak ada perubahan antarmuka.
-
-- **Homepage tidak lagi dianggap file** — URL tanpa path (`https://x.com`,
-  `https://cdn.example.com`, `https://sub.domain.com`, `https://x.com:8080`,
-  `https://user:pass@host.com`) dulu lolos sebagai "file langsung" karena
-  segmen terakhirnya adalah _host_, dan `.com` (executable DOS) memang ada di
-  daftar ekstensi. Halaman seperti itu kini benar-benar lewat resolver
-  universal (yt-dlp) lebih dulu. Ekstensi dibaca dari **path** saja: helper
-  `url_path_part` membuang `skema://user:pass@host:port`. File `.com` sungguhan
-  (`https://x.com/game.com`) tetap terdeteksi.
-- **Tombol "Pindai" menangkap semua format audio** — daftar media
-  `content.js` disamakan dengan `sniffer.js`/`background.js` (59 → 86; 27
-  format audio yang hilang ikut tertangkap), dan `href` berfragment
-  (`.../v.mp4#t=10`) kini juga terdeteksi.
-- **CI hijau** — 4 test extension yang gagal sejak v2.11.0 diperbaiki (mock
-  `chrome.downloads.onDeterminingFilename` belum ada): suite Node kini 8/8.
-- **Versi rilis dijaga test** — `tests/version_sync.rs` memastikan
-  `Cargo.toml`, `Cargo.lock`, dan `extension/manifest.json` selalu sama, jadi
-  bump versi yang lupa satu berkas gagal di `cargo test`, bukan diam-diam
-  terkirim. `packaging/build-deb.sh` kini memakai `--locked` seperti CI.
-- Kebersihan: 11 test di `youtube.rs` masuk ke `#[cfg(test)]` (tidak lagi ikut
-  terkompilasi ke build rilis), cabang fallback mati dihapus, komentar basi dan
-  typo diperbaiki.
-
-## Stabilitas v2.11.0
-
-- **297 jenis file** dikenali langsung → aria2 (video, audio, gambar, arsip, dokumen, installer, VM, torrent, font, 3D, DB) — dulu hanya ~50
-- **Extension intercept** diperluas: 86 video + 213 file (total 299 inc. m3u8/mpd) → semua jenis file dari situs apapun ter-intercept
-- **Sniffer media** 15 → 86 format (m3u8/mpd/mp4/mkv/webm/flv/avi/mov/mp3/flac/ogg/opus/dll)
-- **RAM hemat**: disk cache 64M→32M + `--enable-mmap=true`
-- **CPU hemat**: `--optimize-concurrent-downloads=true`, piece 1M
-- **Speed naik**: bt peers 55→100 + LPD, 5 concurrent (dari 3), yt-dlp chunk 10M + buffer 16K, fragment paralel mengikuti koneksi per server
-
-## Stabilitas v2.10.5
-
-- Fragmen HLS/DASH diunduh paralel (`--concurrent-fragments`, mengikuti
-  "Koneksi per server") — kecepatan situs streaming naik signifikan.
-- Merge video+audio memakai MKV (remux tanpa re-encode); MP4 hanya untuk
-  pilihan MP4/audio eksplisit. Tidak ada lagi re-encode lambat untuk stream
-  webm/VP9/AV1.
-- Unduhan magnet langsung selesai (seeding dinonaktifkan lewat `--seed-time=0`).
-- Format video-only dari dialog kualitas otomatis dipasangkan dengan audio.
-- Dialog kualitas muncul seketika; daftar format nyata menyusul secara asinkron.
-
-## Stabilitas v2.10.4
-
-- Lanjut Semua mengajukan resume unduhan paused/error menurut waktu pembuatan
-  (terlama dahulu), dengan ID sebagai pembanding ketika waktunya sama.
-  Urutan pengajuan tidak lagi bergantung pada iterasi HashMap; batas slot dan
-  pemeriksaan status tetap ditangani engine seperti sebelumnya.
-
-## Stabilitas v2.10.3
-
-- Tombol Jeda/Lanjut Semua memperhitungkan antrean dan resume/retry tertunda,
-  bukan hanya unduhan yang sedang mentransfer data.
-- Aksi tombol dibaca ulang dari engine saat diklik; klik berulang diblokir selama
-  operasi massal masih berlangsung.
-- Jeda individual maupun Jeda Semua membatalkan retry tertunda pada status Error
-  tanpa mengubah unduhan gagal biasa yang belum diminta retry.
-
-## Stabilitas v2.10.2
-
-- Start/resume berulang tidak membuat worker unduhan ganda. Resume yang diminta
-  saat backend masih berhenti akan menunggu cleanup selesai; pause ulang/cancel
-  membatalkan permintaan tersebut.
-- Worker yang sedang berhenti tetap memakai slot antrean. Item antrean juga dapat
-  dijeda satu per satu.
-- Unduhan yang dipromosikan dari antrean menggunakan konfigurasi terbaru.
-  Proses yang sudah aktif tidak direstart untuk mengganti seluruh argumennya.
-- Shutdown tidak mempromosikan pekerjaan baru. Flag lifecycle worker tidak
-  dipersistensikan sehingga tidak menghalangi pemulihan sesi berikutnya.
-
-## Stabilitas v2.10.1
-
-- Proxy HTTP/SOCKS juga digunakan saat memeriksa nama dan ukuran file; client
-  resolver mengikuti perubahan pengaturan proxy/TLS.
-- Pengaturan verifikasi TLS berlaku konsisten untuk metadata dan unduhan yt-dlp.
-  Verifikasi tetap aktif secara default; nonaktifkan hanya untuk server tepercaya.
-- Penambahan unduhan bersamaan melakukan pemeriksaan duplikat dan penyisipan
-  secara atomik.
-- Monitor clipboard berjalan asinkron, dengan timeout 1 detik per perintah dan
-  batas output 2 KiB, agar tool clipboard yang macet tidak membekukan GUI.
-- Tombol unduh hasil pemindaian popup menunggu konfirmasi aplikasi, menampilkan
-  kegagalan, dan menyediakan kesempatan mencoba lagi.
-
-## Download
-
-👉 https://github.com/Indrawan007/Fast-DM/releases/latest
-
-### Release Files
-
-- `fast-dm_<versi>_amd64.deb` — aplikasi Linux (Debian/Ubuntu & turunan)
-- `fast-dm-<versi>-1-x86_64.pkg.tar.zst` — aplikasi Linux (Arch & turunan)
-
-- `fast-dm-extension-v<versi>.zip` — browser extension
+`wl-clipboard` menyediakan `wl-paste` untuk fitur pemantauan clipboard. Fitur ini mati secara default dan dapat diaktifkan melalui **Pengaturan**.
 
 ## Instalasi
 
-### Debian / Ubuntu / Mint
+1. Unduh paket `fast-dm-<versi>-1-x86_64.pkg.tar.zst` dari [rilis terbaru](https://github.com/Indrawan007/Fast-DM/releases/latest).
+2. Pasang paket:
+
+   ```bash
+   sudo pacman -U ./fast-dm-*-x86_64.pkg.tar.zst
+   ```
+
+3. Jalankan **Fast Download Manager** dari launcher Hyprland, atau dari terminal:
+
+   ```bash
+   fast-dm
+   ```
+
+GUI memerlukan `WAYLAND_DISPLAY` dari sesi Wayland dan selalu memakai `GDK_BACKEND=wayland`; tidak ada fallback ke X11.
+
+### Ekstensi browser
+
+1. Unduh `fast-dm-extension-v<versi>.zip` dari halaman rilis dan ekstrak ke folder permanen, misalnya `~/.local/share/fast-dm-extension/`.
+2. Buka `chrome://extensions/`, aktifkan **Developer mode**, lalu pilih **Load unpacked** dan arahkan ke folder hasil ekstrak.
+3. Jalankan Fast-DM sekali agar Native Messaging terdaftar, lalu muat ulang ekstensi dan restart browser.
+
+Ekstensi ditujukan untuk Chrome, Chromium, Brave, Edge, Opera, dan Vivaldi.
+
+## Membangun dari source di Arch
+
+Jalankan sebagai pengguna biasa, bukan `root`:
 
 ```bash
-sudo apt install ./fast-dm_*_amd64.deb
-```
+sudo pacman -S --needed base-devel rust gtk4 aria2 yt-dlp ffmpeg xdg-utils wl-clipboard nodejs npm
 
-### Arch Linux / Manjaro / EndeavourOS
-
-```bash
-sudo pacman -U fast-dm-*-x86_64.pkg.tar.zst
-```
-
-Dependensi (`gtk4`, `aria2`, `yt-dlp`, `ffmpeg`, `xdg-utils`) ikut terpasang
-otomatis. Opsional: `libnotify` untuk notifikasi desktop, `xclip` /
-`wl-clipboard` untuk monitor clipboard.
-
-### Browser Extension
-
-1. Download `fast-dm-extension-v<versi>.zip` dari release
-2. Extract ke folder permanen (mis. `~/.local/share/fast-dm-extension/`)
-3. Buka `chrome://extensions/` → aktifkan **Developer mode**
-4. Klik **Load unpacked** → pilih folder hasil extract
-
-Catatan: ID extension akan otomatis ter-register di native messaging manifest saat pertama kali load.
-
-## Development
-
-### Build dari source
-
-```bash
-# Dependensi sistem (Ubuntu/Debian)
-sudo apt install build-essential libgtk-4-dev aria2 yt-dlp ffmpeg xdg-utils
-
-# Dependensi sistem (Arch Linux & turunan)
-sudo pacman -S --needed base-devel rust gtk4 aria2 yt-dlp ffmpeg xdg-utils
-
-# Build release
-cargo build --release
-
-# Jalankan tests
-cargo test
-
-# Regression test extension (Node.js 22+, tanpa npm install)
-node --test tests/extension.test.cjs
-
-# Buat .deb (Debian/Ubuntu)
-bash packaging/build-deb.sh
-
-# Buat .pkg.tar.zst (Arch — jalankan di Arch/container archlinux)
+cargo fmt --all -- --check
+cargo test --locked
+cargo build --release --locked
+npm ci
+npm test
+npm run lint
 bash packaging/build-arch.sh
 ```
 
-> `packaging/build-arch.sh` memakai `makepkg`, jadi hanya jalan di Arch Linux
-> (atau container `archlinux`), dan tidak boleh dijalankan sebagai root.
-> CI menjalankannya di job `arch` dengan user `builder`.
+Paket Arch hasil build disimpan di `build/`. `makepkg` tidak boleh dijalankan sebagai `root`.
 
-### Struktur Kode
+## Rilis
 
-- `src/lib.rs` — library crate (semua module publik)
-- `src/main.rs` — binary entry point (CLI dispatch: GUI / NMH)
-- `src/downloader/` — `aria2` (jalur per-proses + pipeline resolve), `aria2_rpc` (daemon RPC http/ftp: limit global live, pause/resume native; v3.0.0: jalur magnet dihapus), `youtube`, `universal` (resolver), `mod` (engine)
-- `src/ipc/` — Unix socket server untuk browser → GUI
-- `src/native_host/` — Chrome Native Messaging wrapper
-- `src/pkg.rs` — deteksi package manager distro (pacman/apt/dnf/zypper/xbps/apk) untuk pesan "tool tidak terinstall"
-- `src/gui/` — GTK4 window & dialog
-- `extension/` — Manifest V3 extension (background, content, sniffer, popup)
-- `packaging/` — `build-deb.sh` + `control` (Debian), `PKGBUILD` + `build-arch.sh` (Arch), `fast-dm.desktop` (dipakai keduanya)
-- `tests/` — integration test: `find_cookies.rs` (filesystem terisolasi via `std::env::temp_dir()` + override `XDG_CONFIG_HOME`, serial lewat `ENV_LOCK`), `version_sync.rs` (versi `Cargo.toml`/`Cargo.lock`/`manifest.json` harus sama; tanpa I/O runtime — berkas disematkan `include_str!`), `extension.test.cjs` (Node 22+, mock `chrome.*` lewat `vm`)
+Artefak resmi hanya mencakup:
 
-Lihat [CHANGELOG.md](CHANGELOG.md) untuk history rilis.
+- `fast-dm-<versi>-1-x86_64.pkg.tar.zst` — aplikasi untuk Arch Linux.
+- `fast-dm-extension-v<versi>.zip` — ekstensi browser.
+- `SHA256SUMS` — checksum artefak.
 
-## Lisensi
-
-MIT — lihat [LICENSE](LICENSE).
+Lihat [CHANGELOG](CHANGELOG.md) untuk riwayat perubahan dan [LICENSE](LICENSE) untuk lisensi MIT.

@@ -37,8 +37,8 @@ pub struct Config {
     /// tetap bisa dibaca.
     #[serde(default)]
     pub proxy_url: String,
-    /// v2.4.0 (D1): deteksi URL unduhan dari clipboard ala IDM — butuh
-    /// `wl-clipboard` (Wayland) atau `xclip` (X11). Default OFF (opt-in).
+    /// Deteksi URL unduhan dari clipboard pada sesi Wayland — memakai
+    /// `wl-paste` dari paket `wl-clipboard`. Default OFF (opt-in).
     #[serde(default)]
     pub clipboard_monitor: bool,
     /// v2.7.0 (B2): port daemon RPC aria2 (loopback-only). Ubah bila 6800
@@ -264,8 +264,8 @@ impl Config {
         Some(t)
     }
 
-    /// Isi file .desktop XDG autostart. Path dgn spasi → dikutip
-    /// (spesifikasi desktop-entry mengizinkan quoting pada Exec).
+    /// Isi file .desktop XDG autostart dengan backend Wayland eksplisit.
+    /// Path dgn spasi dikutip sesuai spesifikasi desktop-entry.
     pub(crate) fn desktop_entry_for(exe: &Path) -> String {
         let raw = exe.to_string_lossy();
         let exec = if raw.contains(' ') {
@@ -274,7 +274,7 @@ impl Config {
             raw.to_string()
         };
         format!(
-            "[Desktop Entry]\nType=Application\nName=Fast DM\nComment=Fast Download Manager\nExec={}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+            "[Desktop Entry]\nType=Application\nName=Fast DM\nComment=Fast Download Manager for Hyprland\nExec=/usr/bin/env GDK_BACKEND=wayland {}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
             exec
         )
     }
@@ -955,10 +955,12 @@ mod tests {
     #[test]
     fn desktop_entry_quoting_and_shape() {
         let e = Config::desktop_entry_for(Path::new("/usr/bin/fast-dm"));
-        assert!(e.contains("Exec=/usr/bin/fast-dm\n"));
+        assert!(e.contains("Exec=/usr/bin/env GDK_BACKEND=wayland /usr/bin/fast-dm\n"));
         assert!(e.starts_with("[Desktop Entry]"));
         let e2 = Config::desktop_entry_for(Path::new("/home/a b/Fast-DM/target/debug/fast-dm"));
-        assert!(e2.contains("Exec=\"/home/a b/Fast-DM/target/debug/fast-dm\"\n"));
+        assert!(e2.contains(
+            "Exec=/usr/bin/env GDK_BACKEND=wayland \"/home/a b/Fast-DM/target/debug/fast-dm\"\n"
+        ));
     }
 
     #[test]

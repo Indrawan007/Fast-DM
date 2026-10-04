@@ -1,14 +1,12 @@
 # AGENTS.md — Panduan AI/Contributor Fast-DM
 
-Version: 0.2.2 (0.2.0: disinkronkan dengan arsitektur kode nyata; 0.2.1:
-menambahkan aturan "tampilkan kode lama + kode baru" pada setiap perbaikan;
-0.2.2: native host hanya men-spawn GUI untuk aksi `download` — v3.3.3)
+Version: 0.3.0 (0.3.0: target proyek dipersempit ke Arch Linux + Hyprland/Wayland;
+rilis utama v4.0.0)
 
 ## 1. Role & Objective
 
 - **Role:** Systems Engineer (Rust specialist) untuk Fast-DM.
-- **Objective:** Merawat download manager Linux: GUI GTK4 + integrasi browser,
-  dengan kecepatan didelegasikan ke **aria2c** dan **yt-dlp** sebagai subprocess CLI.
+- **Objective:** Merawat download manager untuk **Arch Linux x86_64 + Hyprland/Wayland**: GUI GTK4 Wayland-only + integrasi browser, dengan kecepatan didelegasikan ke **aria2c** dan **yt-dlp** sebagai subprocess CLI. Distro lain dan X11 bukan target dukungan.
 
 ## 2. Arsitektur Nyata (baca ini sebelum menyentuh kode)
 
@@ -100,9 +98,11 @@ fast-dm --native  ──1 baris JSON──►  Unix socket (Config::ipc_socket_p
   versi yang lupa satu berkas gagal di `cargo test`, bukan diam-diam terkirim.
 - `EXT_ID` = extension ID stabil (dipin lewat `key` manifest) — dipakai
   `allowed_origins`; JANGAN diganti sembarangan.
-- Rilis `.deb` HANYA via `packaging/build-deb.sh` (versi dibaca dari Cargo.toml;
-  sejak v2.11.1 build-nya `--locked`, sama seperti CI dan `release.yml`).
-  Tiada lagi `build.sh` (dihapus: postinst-nya memasang wildcard origin = lubang keamanan).
+- Artefak aplikasi resmi hanya paket Arch `.pkg.tar.zst`, dibangun lewat
+  `packaging/build-arch.sh` sebagai user biasa; jangan tambahkan packaging distro lain.
+- GUI hanya memakai backend GTK Wayland. Pertahankan guard `WAYLAND_DISPLAY`,
+  jangan menambahkan fallback X11/XWayland atau tool clipboard `xclip`.
+- CI dan release workflow wajib membangun serta menguji dalam container Arch Linux.
 - `src/native_host/setup.rs` satu-satunya yang menulis manifest NMH saat runtime
   (register extension ID unpacked) — perluas daftar browser di satu tempat saja.
 

@@ -4,6 +4,7 @@ use crate::ipc;
 
 use gtk4::prelude::*;
 use gtk4::Application;
+use std::ffi::OsStr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -22,6 +23,11 @@ impl FastDmApp {
     /// `Err(msg)` jika inisialisasi gagal (runtime Tokio, GTK build, dll).
     /// Tidak pernah panic — semua error dipropagasi ke `main()`.
     pub fn run(&self) -> Result<(), String> {
+        // Guard juga berlaku bila FastDmApp dipanggil langsung sebagai library;
+        // entry point CLI sudah menetapkan GDK_BACKEND=wayland sebelum GTK.
+        wayland_backend(std::env::var_os("WAYLAND_DISPLAY").as_deref())
+            .map_err(|error| error.to_string())?;
+
         // Bangun runtime SEBELUM Application agar error bisa dipropagasi.
         // Disimpan di AppInit (di-leak 'static) supaya bisa direferensikan
         // dari callback GTK yang di-move. Runtime leak ini satu-satunya
@@ -77,6 +83,17 @@ impl FastDmApp {
     }
 }
 
+/// Pilih backend GTK yang didukung. Tidak mengandalkan fallback X11/XWayland.
+pub fn wayland_backend(display: Option<&OsStr>) -> Result<&'static str, &'static str> {
+    if display.is_some_and(|value| !value.is_empty()) {
+        Ok("wayland")
+    } else {
+        Err(
+            "Fast-DM membutuhkan sesi Wayland (target desktop: Hyprland); WAYLAND_DISPLAY tidak ditemukan.",
+        )
+    }
+}
+
 /// Inisialisasi yang mahal (Tokio runtime) — dibangun sekali SEBELUM
 /// callback GTK agar kegagalannya bisa di-propagasi ke main(), bukan
 /// dipanic di tengah handler.
@@ -124,6 +141,16 @@ mod tests {
     /// verifikasi signature di sini. `AppInit` private sehingga tidak bisa
     /// di-smoke-test dari `tests/`; bila kelak butuh uji runtime nyata,
     /// export helper khusus test (bukan memanggil `try_new` langsung).
+    #[test]
+    fn gui_requires_a_wayland_display_and_selects_wayland_backend() {
+        assert_eq!(
+            wayland_backend(Some(std::ffi::OsStr::new("wayland-1"))),
+            Ok("wayland")
+        );
+        assert!(wayland_backend(None).is_err());
+        assert!(wayland_backend(Some(std::ffi::OsStr::new(""))).is_err());
+    }
+
     #[test]
     fn app_init_signature_returns_result() {
         // Force compiler untuk verifikasi signature try_new() = Result

@@ -136,7 +136,7 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
                         return resp;
                     }
                     // Launch GUI dengan setsid agar TIDAK jadi child dari browser.
-                    // Jangan paksa GDK_BACKEND=x11 — pada sesi Wayland-only GUI tidak bisa start.
+                    // Target Hyprland: pertahankan backend GTK Wayland-only.
                     use std::os::unix::process::CommandExt;
                     let gui_path = resolve_gui_path();
                     // B4: stdio wajib diputus (null) — GUI TIDAK boleh mewarisi
@@ -145,6 +145,7 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
                     // native messaging.
 
                     let _ = std::process::Command::new(&gui_path)
+                        .env("GDK_BACKEND", "wayland")
                         .process_group(0) // New process group
                         .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())

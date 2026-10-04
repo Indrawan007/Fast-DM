@@ -1,6 +1,5 @@
 # Maintainer: FastDM Contributors
-# PKGBUILD Fast-DM — paket pacman untuk Arch Linux & turunannya
-# (Manjaro, EndeavourOS, Garuda, CachyOS, …).
+# PKGBUILD Fast-DM — paket pacman untuk Arch Linux x86_64 + Hyprland/Wayland.
 #
 # JANGAN jalankan `makepkg` langsung dari folder ini. Berkas ini memakai
 # placeholder @VERSION@/@PKGREL@ dan membutuhkan source tarball yang dibuat
@@ -11,25 +10,21 @@
 # Skrip itu menyalin PKGBUILD ke staging dir (build/arch), membuat
 # fast-dm-<versi>.tar.gz dari working tree, lalu menjalankan makepkg.
 #
-# Layout instalasi SENGAJA disamakan dengan paket .deb (/opt/fast-dm +
-# symlink /usr/bin/fast-dm + wrapper fast-dm-native) supaya
-# `native_host::resolve_native_path()` dan `setup-browser.sh` tidak perlu
-# tahu distro apa yang sedang dipakai.
+# Layout instalasi Arch (/opt/fast-dm + symlink /usr/bin/fast-dm + wrapper
+# fast-dm-native) dipakai oleh `native_host::resolve_native_path()` dan
+# `setup-browser.sh`.
 pkgname=fast-dm
 pkgver=@VERSION@
 pkgrel=@PKGREL@
-pkgdesc="High-speed download manager with browser integration (aria2 + yt-dlp)"
+pkgdesc="Arch Linux download manager for Hyprland/Wayland (aria2 + yt-dlp)"
 arch=('x86_64')
 url="https://github.com/Indrawan007/Fast-DM"
 license=('MIT')
-# Pemetaan dari paket Debian (packaging/control):
-#   libgtk-4-1 -> gtk4 · aria2 -> aria2 · yt-dlp -> yt-dlp
-#   ffmpeg -> ffmpeg · xdg-utils -> xdg-utils · libnotify-bin -> libnotify
-depends=('gtk4' 'aria2' 'yt-dlp' 'ffmpeg' 'xdg-utils')
+depends=('gtk4' 'aria2' 'yt-dlp' 'ffmpeg' 'xdg-utils' 'wl-clipboard')
 optdepends=(
   'libnotify: notifikasi desktop saat unduhan selesai/gagal'
-  'xclip: monitor clipboard di sesi X11'
-  'wl-clipboard: monitor clipboard di sesi Wayland'
+  'xdg-desktop-portal-hyprland: portal untuk sesi Hyprland'
+  'xdg-desktop-portal-gtk: portal GTK, termasuk pemilih file'
   'chrome: browser untuk extension Native Messaging'
 )
 makedepends=('cargo' 'rust')
@@ -53,8 +48,8 @@ unset_makepkg_rust_flags() {
 build() {
   cd "$srcdir/$pkgname-$pkgver" || return 1
   unset_makepkg_rust_flags
-  # --locked: pakai Cargo.lock apa adanya — sama seperti CI (ci.yml),
-  # release.yml, dan packaging/build-deb.sh. LTO / codegen-units / strip /
+  # --locked: pakai Cargo.lock apa adanya — sama seperti CI (ci.yml)
+  # dan release.yml. LTO / codegen-units / strip /
   # panic=abort sudah diatur Cargo.toml [profile.release].
   cargo build --release --locked --target-dir "$srcdir/target"
 }
@@ -75,7 +70,7 @@ package() {
   install -Dm755 "$srcdir/target/release/$pkgname" \
     "$pkgdir/opt/$pkgname/$pkgname"
   # Wrapper native messaging host: manifest NMH tidak bisa membawa argumen,
-  # jadi Chrome memanggil wrapper ini (identik dengan paket .deb).
+  # jadi Chrome memanggil wrapper ini dengan mode --native.
   printf '#!/bin/sh\nexec /opt/fast-dm/fast-dm --native\n' >"$srcdir/$pkgname-native"
   install -Dm755 "$srcdir/$pkgname-native" \
     "$pkgdir/opt/$pkgname/$pkgname-native"

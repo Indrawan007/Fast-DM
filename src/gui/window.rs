@@ -108,7 +108,7 @@ pub fn build_window(
     // ── v2.4.0 (D1): banner URL clipboard (ala IDM) ──────────────────────
     // Clipboard memuat URL http(s) → tampilkan bar di bawah toolbar dengan
     // opsi "Unduh"; "✕" menutup. Default OFF — diaktifkan lewat Pengaturan;
-    // butuh wl-clipboard (Wayland) atau xclip (X11).
+    // memakai wl-clipboard pada sesi Wayland.
     let clip_banner = GtkBox::new(Orientation::Horizontal, 8);
     clip_banner.add_css_class("clipboard-banner");
     clip_banner.set_margin_start(12);
@@ -337,7 +337,7 @@ pub fn build_window(
         let rt_clip = rt.clone();
         let weak_window = window.downgrade();
         glib::spawn_future_local(async move {
-            let mut cached_tool: Option<&'static str> = None;
+            let mut clipboard_available = false;
             loop {
                 glib::timeout_future(std::time::Duration::from_millis(2500)).await;
                 if weak_window.upgrade().is_none() {
@@ -350,40 +350,33 @@ pub fn build_window(
                 }
                 let result = rt_clip
                     .spawn(async move {
-                        let tool = match cached_tool {
-                            Some(t) => Some(t),
-                            None => clipboard_probe().await,
+                        let available = clipboard_available || clipboard_probe().await;
+                        let text = if available {
+                            clipboard_text().await
+                        } else {
+                            None
                         };
-                        let text = match tool {
-                            Some(t) => clipboard_text(t).await,
-                            None => None,
-                        };
-                        (tool, text)
+                        (available, text)
                     })
                     .await;
-                let Ok((tool, text)) = result else { continue };
-                if let Some(t) = tool {
-                    cached_tool = Some(t);
-                } else {
-                    // v3.2.3 (A3) fix v2: jangan cache None — probe lagi next tick.
-                    cached_tool = None;
+                let Ok((available, text)) = result else { continue };
+                if !available {
+                    // Probe ulang jika wl-clipboard belum terpasang atau belum siap.
+                    clipboard_available = false;
                     continue;
                 }
+                clipboard_available = true;
                 // Pengaturan bisa dimatikan ketika request masih berjalan.
                 if !en.get() {
                     ban_t.set_visible(false);
                     *pend_t.borrow_mut() = None;
                     continue;
                 }
-                // M3: jika tool ada tapi text None = tool hilang/timeout → re-probe next tick
+                // Jika wl-paste gagal/hilang, kosongkan cache agar probe ulang.
                 let Some(txt) = text else {
-                    // Jika clipboard_text gagal (tool hilang), kosongkan cache agar probe ulang
-                    cached_tool = None;
+                    clipboard_available = false;
                     continue;
                 };
-                if txt == *last_t.borrow() {
-                    continue;
-                }
                 *last_t.borrow_mut() = txt.clone();
                 if !is_clipboard_url(&txt) {
                     ban_t.set_visible(false);
@@ -1267,7 +1260,7 @@ where
 
     // v2.4.0 (D1): toggle deteksi clipboard
     let clip_chk = gtk4::CheckButton::with_label(
-        "Deteksi URL unduhan dari clipboard (butuh xclip / wl-clipboard)",
+        "Deteksi URL unduhan dari clipboard (butuh wl-clipboard)",
     );
     clip_chk.set_active(cur.clipboard_monitor);
     content.append(&clip_chk);
@@ -1480,8 +1473,8 @@ fn is_clipboard_url(text: &str) -> bool {
         .any(|s| lower.starts_with(s))
 }
 
-/// Semua subprocess clipboard dibatasi waktu + output, dijalankan di Tokio,
-/// dan di-reap. Termasuk probe tool agar Wayland/X11 yang macet tetap aman.
+/// Proses clipboard dibatasi waktu + output, dijalankan di Tokio, dan di-reap
+/// agar wl-paste yang macet tidak membekukan GUI Hyprland.
 async fn clipboard_command(bin: &str, args: &[&str]) -> Option<String> {
     use tokio::io::AsyncReadExt;
 
@@ -1525,30 +1518,12 @@ async fn clipboard_command(bin: &str, args: &[&str]) -> Option<String> {
     output
 }
 
-async fn clipboard_probe() -> Option<&'static str> {
-    let order: &[&'static str] = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        &["wl-paste", "xclip"]
-    } else {
-        &["xclip", "wl-paste"]
-    };
-    for bin in order {
-        let args: &[&str] = if *bin == "wl-paste" {
-            &["--version"]
-        } else {
-            &["-version"]
-        };
-        if clipboard_command(bin, args).await.is_some() {
-            return Some(bin);
-        }
-    }
-    None
+async fn clipboard_probe() -> bool {
+    clipboard_command("wl-paste", &["--version"]).await.is_some()
 }
 
-async fn clipboard_text(tool: &'static str) -> Option<String> {
-    match tool {
-        "wl-paste" => clipboard_command(tool, &["--no-newline"]).await,
-        _ => clipboard_command(tool, &["-o", "-selection", "clipboard"]).await,
-    }
+async fn clipboard_text() -> Option<String> {
+    clipboard_command("wl-paste", &["--no-newline"]).await
 }
 
 #[cfg(test)]

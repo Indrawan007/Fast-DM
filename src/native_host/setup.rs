@@ -339,7 +339,7 @@ fn shell_quote(value: &str) -> String {
 }
 
 pub fn resolve_native_path() -> String {
-    // Prioritas: /opt/fast-dm/fast-dm-native (dari .deb install)
+    // Prioritas: /opt/fast-dm/fast-dm-native (paket Arch resmi).
     if Path::new(NATIVE_PATH).exists() {
         return NATIVE_PATH.to_string();
     }
@@ -350,7 +350,7 @@ pub fn resolve_native_path() -> String {
             // B16: Development (cargo run/build) — exe ada di target/<profile>/.
             // Buat/refresh wrapper kecil di situ (manifest NMH tidak bisa
             // membawa argumen --native), sehingga native messaging bisa diuji
-            // tanpa install .deb. Wrapper yang sudah ada juga di-refresh agar
+            // tanpa memasang paket resmi. Wrapper yang sudah ada juga di-refresh agar
             // format quoting dan permission lama tidak dipertahankan.
             let in_target = parent
                 .file_name()

@@ -32,6 +32,8 @@ static RE_CD_SINGLE_QUOTED: LazyLock<Regex> =
 static RE_CD_UNQUOTED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"filename\s*=\s*([^\s;]+)"#).unwrap());
 
+// User-Agent HTTP Chrome Linux yang umum dipakai server; token `X11` di sini
+// bukan backend GUI Fast-DM (GUI tetap Wayland-only).
 pub(crate) const CHROME_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 /// Jalur unduhan per-proses (`aria2c` sebagai subprocess).
@@ -297,8 +299,8 @@ async fn run_aria2c(
         Ok(c) => c,
         Err(e) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
-                // Perintah install mengikuti distro user (pacman/apt/dnf/…) —
-                // lihat `crate::pkg`; dulu hardcoded `sudo apt install`.
+                // Petunjuk instalasi mengikuti target Arch Linux (`pacman`);
+                // lihat helper `crate::pkg`.
                 crate::pkg::missing_tool_msg("aria2c", "aria2")
             } else {
                 format!("aria2c: {}", e)

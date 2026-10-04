@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Fast Download Manager
-Comment=High-speed download manager
-Exec=/opt/fast-dm/fast-dm
+Comment=Arch Linux download manager for Hyprland/Wayland
+Exec=/usr/bin/env GDK_BACKEND=wayland /opt/fast-dm/fast-dm
 Icon=io.github.fastdm.FastDownloadManager
 Type=Application
 Terminal=false

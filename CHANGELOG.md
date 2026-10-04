@@ -3,6 +3,15 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [4.0.0] - 2026-10-04
+
+### Changed
+
+- Target dukungan dipersempit ke Arch Linux x86_64 + Hyprland/Wayland; paket Debian dan deteksi package manager distro lain dihapus.
+- GUI memilih backend GTK Wayland secara eksplisit dan menolak start tanpa `WAYLAND_DISPLAY`; X11/XWayland bukan lagi target.
+- Pemantauan clipboard menggunakan `wl-paste` saja. `wl-clipboard` menjadi dependensi paket Arch.
+- CI, build paket, dan rilis hanya berjalan untuk Arch Linux; panduan instalasi difokuskan pada Arch + Hyprland.
+
 ## [3.3.4] - 2026-09-30
 
 Unduhan dari file-host yang nama aslinya hanya ada di header HTTP — PikPak dan

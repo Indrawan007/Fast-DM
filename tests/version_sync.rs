@@ -6,8 +6,8 @@
 //!
 //! * `Cargo.lock` tertinggal → `cargo build --locked` GAGAL. CI memakai
 //!   `--locked` (job `test-and-build`, langkah "Build release binary") dan
-//!   `packaging/build-deb.sh` sekarang juga, jadi drift ini baru ketahuan di
-//!   runner/paket, bukan di mesin dev.
+//!   `packaging/build-arch.sh` memakai `--locked`, jadi drift ini baru
+//!   ketahuan di CI/paket, bukan di mesin dev.
 //! * `extension/manifest.json` tertinggal → extension di browser tetap
 //!   melaporkan versi lama. Tidak ada yang error; yang muncul adalah laporan
 //!   bug "sudah update tapi perilaku lama", padahal native host dan aplikasi
@@ -123,7 +123,7 @@ fn all_version_sources_match() {
         lock_version, toml_version,
         "Cargo.lock tertinggal dari Cargo.toml. Perbaiki dengan \
          `cargo update -p fast-dm` (atau `cargo build`) lalu commit; CI dan \
-         build-deb.sh memakai --locked sehingga drift ini membuat build gagal."
+         build-arch.sh memakai --locked sehingga drift ini membuat build gagal."
     );
 
     assert_eq!(

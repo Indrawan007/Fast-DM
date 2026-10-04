@@ -33,7 +33,7 @@ pub enum Outcome {
 /// tetapi membiarkan `error_msg` KOSONG — komentarnya menyebut `crate::pkg`,
 /// panggilannya tidak ada — sehingga GUI menampilkan kartu "GAGAL" tanpa teks
 /// apa pun dan retry supervisor mengulang kegagalan yang sama dalam diam.
-/// Pesan install mengikuti distro user (`pacman`/`apt`/`dnf`/…), sama seperti
+/// Pesan install mengikuti target Arch Linux (`pacman`), sama seperti
 /// `youtube.rs` dan `aria2.rs` — satu sumber di `crate::pkg`.
 fn mark_missing_tool(info: &mut DownloadInfo, binary: &str, pkg: &str) {
     info.status = DownloadStatus::Error;
@@ -198,7 +198,7 @@ pub async fn download(
         if i.stop_requested() {
             return Outcome::Failed;
         }
-        // Pesan install mengikuti distro user — lihat `mark_missing_tool`.
+        // Petunjuk install paket mengikuti target Arch — lihat `mark_missing_tool`.
         mark_missing_tool(&mut i, "yt-dlp", "yt-dlp");
 
         let _ = tx.send(DownloadEvent::Error(i.clone()));

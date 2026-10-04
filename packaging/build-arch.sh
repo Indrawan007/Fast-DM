@@ -1,17 +1,15 @@
-#!/bin/bash
-# Build paket Arch Linux (pacman) → output: build/fast-dm_<versi>-<pkgrel>-x86_64.pkg.tar.zst
-#
+#!/bin/bash#!/bin/bash
+# Build paket Arch Linux x86_64 untuk Hyprland/Wayland.
+# Output: build/fast-dm-<versi>-<pkgrel>-x86_64.pkg.tar.zst
 # Jalankan di Arch Linux (atau container `archlinux`) dengan:
-#   sudo pacman -S --needed base-devel rust gtk4 aria2 yt-dlp ffmpeg xdg-utils
-#
-# Padanan Debian/Ubuntu-nya adalah packaging/build-deb.sh.
+#   sudo pacman -S --needed base-devel rust gtk4 aria2 yt-dlp ffmpeg xdg-utils wl-clipboard
 #
 # Kenapa tidak langsung `makepkg` di folder packaging/?
 #   1. PKGBUILD memakai placeholder @VERSION@/@PKGREL@ yang diisi dari
 #      Cargo.toml (satu sumber versi, AGENTS.md §5),
 #   2. PKGBUILD mengharapkan source tarball fast-dm-<versi>.tar.gz, jadi
 #      working tree harus dibungkus dulu,
-#   3. artefak harus mendarat di build/ seperti paket .deb.
+#   3. artefak paket harus dikumpulkan ke direktori build/.
 set -e
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
@@ -25,8 +23,7 @@ if [ -z "$VER" ]; then
 fi
 
 if ! command -v makepkg >/dev/null 2>&1; then
-  echo "✗ makepkg tidak ditemukan — skrip ini hanya untuk Arch Linux." >&2
-  echo "  Di Debian/Ubuntu pakai: bash packaging/build-deb.sh" >&2
+  echo "✗ makepkg tidak ditemukan — skrip ini membutuhkan Arch Linux." >&2
   exit 1
 fi
 
@@ -51,6 +48,7 @@ tar -czf "$STAGE/fast-dm-$VER.tar.gz" \
     --exclude=./.git \
     --exclude=./target \
     --exclude=./build \
+    --exclude=./node_modules \
     --transform "s,^\./,fast-dm-$VER/," \
     -C "$ROOT" .
 
@@ -61,7 +59,7 @@ sed "s/@VERSION@/$VER/; s/@PKGREL@/$PKGREL/" packaging/PKGBUILD > "$STAGE/PKGBUI
 cd "$STAGE"
 makepkg -f --noconfirm
 
-# 4. Kumpulkan artefak ke build/ (sejajar dengan .deb).
+# 4. Kumpulkan artefak ke build/.
 cp "$STAGE"/*.pkg.tar.* "$ROOT/build/"
 # Jangan parse output `ls`: glob Bash mempertahankan nama dengan spasi dan
 # `-f` membedakan glob yang tidak cocok dari artefak sungguhan.

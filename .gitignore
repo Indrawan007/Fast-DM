@@ -2,7 +2,6 @@
 build/
 dist/
 target/
-*.deb
 *.AppImage
 *.zip
 # Development

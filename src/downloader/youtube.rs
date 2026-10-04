@@ -676,7 +676,7 @@ pub(crate) async fn run_ytdlp_with_stdin(
         Ok(c) => c,
         Err(e) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
-                // Perintah install mengikuti distro user — lihat `crate::pkg`.
+                // Petunjuk install mengikuti target Arch — lihat `crate::pkg`.
                 crate::pkg::missing_tool_msg("yt-dlp", "yt-dlp")
             } else {
                 format!("yt-dlp: {}", e)

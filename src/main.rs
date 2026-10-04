@@ -12,7 +12,12 @@ use fast_dm::{app, native_host};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "fast-dm", version, about = "Fast Download Manager")]
+
+#[command(
+    name = "fast-dm",
+    version,
+    about = "Fast Download Manager for Arch Linux + Hyprland/Wayland"
+)]
 struct Cli {
     /// Run as Chrome native messaging host
     #[arg(long)]
@@ -46,6 +51,18 @@ fn main() {
         native_host::run();
         return;
     }
+
+    // Belum ada worker thread pada jalur GUI ini. Kunci backend GTK ke
+    // Wayland agar tidak fallback ke X11/XWayland.
+    let backend = match app::wayland_backend(std::env::var_os("WAYLAND_DISPLAY").as_deref()) {
+        Ok(backend) => backend,
+        Err(error) => {
+            tracing::error!("{}", error);
+            eprintln!("Fast DM gagal start: {}", error);
+            std::process::exit(1);
+        }
+    };
+    std::env::set_var("GDK_BACKEND", backend);
 
     // Auto-setup browser NMH manifests
     if let Err(e) = native_host::setup::check_and_setup() {
