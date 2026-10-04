@@ -324,6 +324,25 @@ pub(crate) fn adduri_options(
     Value::Object(o)
 }
 
+/// v4.0.2 (R2): opsi `addUri` untuk percobaan kedua "mode browser" — satu
+/// koneksi, satu segmen. Penolakan 403/401 pada file-host biasanya datang dari
+/// pola khas download manager (beberapa koneksi paralel + Range berlapis);
+/// tanpa akselerasi tetap jauh lebih baik daripada gagal. Nilai 1 tetap sah
+/// menurut manual aria2 (`split` ≥ 1, `max-connection-per-server` ≥ 1).
+fn adduri_options_browser_mode(
+    save_dir: &str,
+    filename: Option<&str>,
+    headers: &HashMap<String, String>,
+    cfg: &Config,
+) -> Value {
+    let mut o = adduri_options(save_dir, filename, headers, cfg);
+    if let Some(map) = o.as_object_mut() {
+        map.insert("split".into(), json!("1"));
+        map.insert("max-connection-per-server".into(), json!("1"));
+    }
+    o
+}
+
 /// Nilai `max-overall-download-limit` untuk daemon: kosong/whitespace → "0"
 /// (tanpa batas), selain itu apa adanya ("512K", "2M", …).
 fn speed_limit_value(cfg: &Config) -> String {
@@ -931,7 +950,7 @@ pub async fn download(
             gid_origin = GidOrigin::Reused;
         }
     }
-    let gid = match gid {
+    let mut gid = match gid {
         Some(g) => g,
         None => {
             // pause-true dulu: hindari balapan "sudah jalan" sebelum tick
@@ -1007,6 +1026,8 @@ pub async fn download(
     // (±1.6 update/detik). 300ms = ±3.3 update/detik — lebih responsif, biaya
     // tellStatus loopback dapat diabaikan.
     let mut tick = tokio::time::interval(Duration::from_millis(300));
+    // v4.0.2 (R2): percobaan "mode browser" hanya SEKALI per unduhan.
+    let mut browser_retry_used = false;
     loop {
         tick.tick().await;
 
@@ -1079,10 +1100,105 @@ pub async fn download(
                 return RpcOutcome::Done;
             }
             "error" | "removed" => {
-                let mut i = info.lock().await;
-                if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
-                    continue;
+                let denied = {
+                    let i = info.lock().await;
+                    if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
+                        continue;
+                    }
+                    p.error_code.is_some_and(aria2::is_access_denied_exit)
+                };
+
+                // v4.0.2 (R2): server menolak (403/401) → coba SEKALI lagi
+                // dalam mode browser (satu koneksi, satu segmen) sebelum
+                // menyerah ke handback. Bila percobaan ini juga ditolak, jalur
+                // error di bawah menandai `access_denied` kembali sehingga
+                // handback ke browser tetap berjalan.
+                if denied && !browser_retry_used {
+                    browser_retry_used = true;
+                    let _ = rpc
+                        .call("removeDownloadResult", vec![json!(gid.as_str())])
+                        .await;
+                    let opts =
+                        adduri_options_browser_mode(&save_dir, out.as_deref(), &headers, cfg);
+                    match rpc.call("addUri", vec![json!([url]), json!(opts)]).await {
+                        Ok(v) => {
+                            // Bentuk balasan sama dengan addUri awal: string GID
+                            // atau array berisi GID.
+                            let new_gid = match v.as_str() {
+                                Some(s) => s.to_string(),
+                                None => v
+                                    .as_array()
+                                    .and_then(|a| a.first())
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            };
+                            if !new_gid.is_empty() {
+                                // Sama seperti addUri awal: task lahir paused
+                                // dan WAJIB berhasil di-unpause; kalau tidak,
+                                // task dibuang agar tak menggantung, lalu alur
+                                // jatuh ke jalur error di bawah (handback ke
+                                // browser tetap tersedia).
+                                let unpaused =
+                                    rpc.call("unpause", vec![json!(new_gid.as_str())]).await;
+                                match unpaused {
+                                    Ok(_) => {
+                                        tracing::info!(
+                                            "aria2 daemon: ulang dalam mode browser (1 koneksi), GID {new_gid}"
+                                        );
+                                        gid = new_gid;
+                                        // Hormati pause/cancel yang datang di
+                                        // sela RPC (pola sama dengan `aborted`
+                                        // setelah addUri di atas): keputusan
+                                        // user TIDAK boleh tertimpa.
+                                        let stopped = {
+                                            let mut i = info.lock().await;
+                                            if matches!(
+                                                i.status,
+                                                DownloadStatus::Cancelled | DownloadStatus::Paused
+                                            ) {
+                                                Some(i.status)
+                                            } else {
+                                                i.rpc_gid = Some(gid.clone());
+                                                i.status = DownloadStatus::Downloading;
+                                                i.error_msg.clear();
+                                                i.access_denied = false;
+                                                i.status_detail =
+                                                    aria2::BROWSER_MODE_DETAIL.to_string();
+                                                let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                                                None
+                                            }
+                                        };
+                                        match stopped {
+                                            Some(DownloadStatus::Paused) => {
+                                                info.lock().await.rpc_gid = Some(gid.clone());
+                                                let _ = rpc
+                                                    .call("forcePause", vec![json!(gid.as_str())])
+                                                    .await;
+                                                return RpcOutcome::Done;
+                                            }
+                                            Some(_) => {
+                                                info.lock().await.rpc_gid = None;
+                                                let _ = forget(&rpc, &gid).await;
+                                                return RpcOutcome::Done;
+                                            }
+                                            None => continue,
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "unpause GID mode browser gagal — serahkan ke browser: {e}"
+                                        );
+                                        let _ = forget(&rpc, &new_gid).await;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => tracing::warn!("addUri mode browser ditolak daemon: {e}"),
+                    }
                 }
+
+                let mut i = info.lock().await;
                 // "error" yang disebabkan forceRemove hasil cancel user
                 // sudah dibersihkan di cabang Cancelled di atas; di sini
                 // task benar-benar mati → GID tak bisa di-resume.
@@ -1208,6 +1324,23 @@ mod tests {
         let e = parse_response(json!({"error": {"code": 1, "message": "Unauthorized"}}));
 
         assert!(e.unwrap_err().contains("Unauthorized"));
+    }
+
+    #[test]
+    fn browser_mode_options_use_a_single_connection() {
+        let cfg = Config::default();
+        let base = adduri_options("/dl", None, &HashMap::new(), &cfg);
+        // Prasyarat: mode normal memang multi-koneksi (mode cepat).
+        assert_ne!(base["split"], "1");
+        assert_ne!(base["max-connection-per-server"], "1");
+
+        let o = adduri_options_browser_mode("/dl", None, &HashMap::new(), &cfg);
+        assert_eq!(o["split"], "1");
+        assert_eq!(o["max-connection-per-server"], "1");
+        // Sisanya tidak berubah: folder, nama, header, dan pause-true tetap.
+        assert_eq!(o["dir"], base["dir"]);
+        assert_eq!(o["pause"], "true");
+        assert_eq!(o["continue"], "true");
     }
 
     #[test]

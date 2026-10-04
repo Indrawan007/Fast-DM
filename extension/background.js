@@ -454,6 +454,31 @@ function sendToNative(message) {
   });
 }
 
+// `Sec-Fetch-Site` ala Chrome, dihitung dari URL vs `Referer` (bukan ditebak
+// dari tempat lain): origin sama → same-origin; host yang masih satu domain
+// induk (mis. CDN `cdn.` vs halaman) → same-site; selebihnya cross-site.
+// Tanpa referrer → tidak dikirim, sama seperti Chrome pada navigasi langsung.
+function secFetchSiteFor(url, referrer) {
+  try {
+    if (!referrer) return null;
+    const target = new URL(url);
+    const ref = new URL(referrer);
+    if (target.origin === ref.origin) return "same-origin";
+    const host = target.hostname;
+    const refHost = ref.hostname;
+    if (
+      host === refHost ||
+      host.endsWith(`.${refHost}`) ||
+      refHost.endsWith(`.${host}`)
+    ) {
+      return "same-site";
+    }
+    return "cross-site";
+  } catch (e) {
+    return null;
+  }
+}
+
 async function sendDownload(
   url,
   filename = null,
@@ -497,6 +522,27 @@ async function sendDownload(
     navigator.userAgent
   ) {
     requestHeaders["User-Agent"] = navigator.userAgent;
+  }
+
+  // v4.0.2 (R1): WAF/hotlink-protection sering menolak request
+  // download-manager yang tidak membawa `Accept-Language` / `Sec-Fetch-Site`.
+  // Keduanya di sini diambil dari nilai yang browser benar-benar punya —
+  // bukan ditebak — supaya tidak ada header yang justru tidak konsisten.
+  const hasHeader = (name) =>
+    Object.keys(requestHeaders).some((key) => key.toLowerCase() === name);
+  if (!hasHeader("accept-language")) {
+    // `typeof` (bukan `navigator?.`) — identifier yang tidak ada sama sekali
+    // melempar ReferenceError; optional chaining hanya menjaga null/undefined.
+    const nav = typeof navigator !== "undefined" ? navigator : null;
+    const langs =
+      nav && Array.isArray(nav.languages) && nav.languages.length
+        ? nav.languages.slice(0, 5).join(",")
+        : (nav && nav.language) || "";
+    if (langs) requestHeaders["Accept-Language"] = langs;
+  }
+  if (!hasHeader("sec-fetch-site")) {
+    const site = secFetchSiteFor(url, headers.Referer || headers.referer);
+    if (site) requestHeaders["Sec-Fetch-Site"] = site;
   }
 
   const message = {

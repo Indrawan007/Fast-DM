@@ -150,7 +150,11 @@ function background(cookieJar = [], sniffedCandidates = []) {
   };
   const context = vm.createContext({
     URL,
-    navigator: { userAgent: "FastDM-Test-Browser/150.0" },
+    navigator: {
+      userAgent: "FastDM-Test-Browser/150.0",
+      language: "id-ID",
+      languages: ["id-ID", "en-US"],
+    },
     setTimeout: () => 1,
     clearTimeout: () => {},
     console: {
@@ -422,6 +426,16 @@ test("intercepted download is erased only after it reports interrupted", async (
   assert.equal(
     b.requests[0].message.headers.Referer,
     "https://example.com/watch",
+  );
+  // v4.0.2 (R1): header yang browser benar-benar punya ikut diteruskan —
+  // WAF/hotlink-protection sering menolak request tanpa keduanya.
+  assert.equal(
+    b.requests[0].message.headers["Accept-Language"],
+    "id-ID,en-US",
+  );
+  assert.equal(
+    b.requests[0].message.headers["Sec-Fetch-Site"],
+    "same-origin",
   );
 
   // Delta yang tidak relevan (masih berjalan) tidak boleh memicu erase.
