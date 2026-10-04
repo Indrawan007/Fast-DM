@@ -1,4 +1,4 @@
-#!/bin/bash#!/bin/bash
+#!/bin/bash
 # Build paket Arch Linux x86_64 untuk Hyprland/Wayland.
 # Output: build/fast-dm-<versi>-<pkgrel>-x86_64.pkg.tar.zst
 # Jalankan di Arch Linux (atau container `archlinux`) dengan:

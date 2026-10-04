@@ -3,6 +3,28 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [4.0.1] - 2026-10-04
+
+Dua regresi yang ikut terbawa saat migrasi ke Arch/Wayland-only: banner
+clipboard yang tidak lagi bisa ditutup, dan skrip build paket yang tidak bisa
+dijalankan langsung.
+
+### Fixed
+
+- **Banner URL clipboard muncul lagi 2,5 detik setelah ditutup** — loop
+  pemantau clipboard (`src/gui/window.rs`) kehilangan pemeriksaan "konten
+  clipboard sama" ketika jalur `wl-paste`-only ditulis, sehingga `clip_last`
+  menjadi write-only: menekan "✕" tidak lagi bertahan — URL yang sama dipasang
+  ulang tiap tick 2,5 dtk selama masih ada di clipboard, dan teks banner
+  ditulis ulang tanpa henti. Pemeriksaan dedup dikembalikan sebelum teks
+  diteruskan ke UI.
+- **`packaging/build-arch.sh` gagal bila dijalankan langsung** — baris pertama
+  menjadi `#!/bin/bash#!/bin/bash` (shebang ganda), jadi
+  `./packaging/build-arch.sh` gagal dengan "bad interpreter": kernel menganggap
+  interpreter-nya `/bin/bash#!/bin/bash`. `bash -n` tidak menangkap kelas
+  kesalahan ini, karena itu `tests/release_hygiene.test.cjs` kini ikut mengunci
+  bentuk baris pertama skrip dan menolak shebang ganda.
+
 ## [4.0.0] - 2026-10-04
 
 ### Changed

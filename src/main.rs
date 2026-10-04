@@ -12,7 +12,6 @@ use fast_dm::{app, native_host};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-
 #[command(
     name = "fast-dm",
     version,

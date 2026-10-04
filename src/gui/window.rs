@@ -377,6 +377,12 @@ pub fn build_window(
                     clipboard_available = false;
                     continue;
                 };
+                // Konten yang sama tidak diproses ulang: tanpa ini banner
+                // yang baru ditutup user (✕) muncul kembali tiap tick (2,5 dtk)
+                // selama URL yang sama masih ada di clipboard.
+                if txt == *last_t.borrow() {
+                    continue;
+                }
                 *last_t.borrow_mut() = txt.clone();
                 if !is_clipboard_url(&txt) {
                     ban_t.set_visible(false);

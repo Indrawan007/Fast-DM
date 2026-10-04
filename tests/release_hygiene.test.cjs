@@ -27,6 +27,11 @@ test("PKGBUILD valid dan skrip packaging lolos guard shell dasar", () => {
     encoding: "utf8",
   });
   assert.equal(archSyntax.status, 0, archSyntax.stderr || archSyntax.stdout);
+  // `bash -n` hanya memeriksa sintaks: shebang ganda/rusak
+  // ("#!/bin/bash#!/bin/bash") tetap lolos di sana, padahal menjalankan skrip
+  // langsung (./packaging/build-arch.sh) gagal dengan "bad interpreter".
+  assert.match(arch, /^#!\/bin\/bash\n/);
+  assert.doesNotMatch(arch, /^#!.*#!/m);
   assert.match(arch, /--exclude=\.\/node_modules/);
   assert.doesNotMatch(arch, /PKGFILE=\$\(ls\b/);
 });
