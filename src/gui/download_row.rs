@@ -67,8 +67,10 @@ impl DownloadRow {
         row2.append(&progress_bar);
         row2.append(&pct_label);
 
-        // Row 3: details
-        let row3 = GtkBox::new(Orientation::Horizontal, 0);
+        // Row 3: details. Both details and actions wrap in narrow Hyprland tiles
+        // instead of forcing the card wider than the window.
+        let row3 = crate::gui::adaptive_flow_box(3, 12, 2);
+        row3.add_css_class("download-details");
 
         let size_lbl = Label::new(Some(&format!(
             "{} / {}",
@@ -77,6 +79,8 @@ impl DownloadRow {
         )));
         size_lbl.set_hexpand(true);
         size_lbl.set_halign(gtk4::Align::Start);
+        size_lbl.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        size_lbl.set_max_width_chars(32);
         size_lbl.add_css_class("detail-label");
 
         let speed_lbl = Label::new(Some(&info.speed_fmt()));
@@ -86,7 +90,6 @@ impl DownloadRow {
         let eta_lbl = Label::new(Some(&info.eta_fmt()));
         eta_lbl.add_css_class("detail-label");
         eta_lbl.set_halign(gtk4::Align::End);
-        eta_lbl.set_margin_start(16);
 
         row3.append(&size_lbl);
         row3.append(&speed_lbl);
@@ -108,9 +111,9 @@ impl DownloadRow {
         error_box.append(&status_icon);
         error_box.append(&error_lbl);
 
-        // Row 4: buttons
-        let row4 = GtkBox::new(Orientation::Horizontal, 6);
-        row4.set_halign(gtk4::Align::End);
+        // Row 4: buttons — FlowBox automatically moves actions to extra rows.
+        let row4 = crate::gui::adaptive_flow_box(6, 6, 6);
+        row4.add_css_class("download-actions");
         row4.set_margin_top(4);
 
         // B4: tombol selalu tampil (layout stabil) — yang tidak relevan di-disable
@@ -298,6 +301,7 @@ fn status_label(status: &DownloadStatus) -> &'static str {
 
 fn make_btn(label: &str, classes: &[&str], tooltip: &str) -> Button {
     let btn = Button::with_label(label);
+    btn.set_halign(gtk4::Align::Start);
     btn.set_tooltip_text(Some(tooltip));
     for c in classes {
         btn.add_css_class(c);

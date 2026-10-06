@@ -12,6 +12,7 @@ GUI Fast-DM menggunakan backend GTK Wayland secara eksplisit. **Sesi X11/XWaylan
 - Pemantauan clipboard Wayland secara opsional melalui `wl-paste`.
 - Pengaturan folder, batas kecepatan, koneksi, proxy, dan verifikasi TLS.
 - Integrasi browser Native Messaging dan notifikasi desktop opsional.
+- Layout adaptif untuk Hyprland: toolbar, statistik, rincian unduhan, dan tombol kartu membungkus otomatis saat jendela ditile sempit; Pengaturan dapat digulir dan labelnya ikut membungkus.
 
 ## Dependensi Arch + Hyprland
 

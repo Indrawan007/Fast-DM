@@ -137,7 +137,7 @@ where
     );
     // B2: samakan tema dialog dengan window utama
     dialog.add_css_class("fast-dm-window");
-    dialog.set_default_size(480, 460);
+    dialog.set_default_size(460, 440);
 
     let content = dialog.content_area();
     content.set_spacing(10);
@@ -182,8 +182,9 @@ where
 
     // Quality radio buttons
     let scroll = ScrolledWindow::new();
+    scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
     scroll.set_vexpand(true);
-    scroll.set_min_content_height(200);
+    scroll.set_min_content_height(180);
 
     let quality_box = GtkBox::new(Orientation::Vertical, 4);
     let selected = std::rc::Rc::new(std::cell::RefCell::new("best_mp4".to_string()));
@@ -286,15 +287,27 @@ fn quality_row(
         radio.set_active(true);
     }
     let row = GtkBox::new(Orientation::Horizontal, 8);
+    let text_box = GtkBox::new(Orientation::Vertical, 2);
+    text_box.set_hexpand(true);
+
     let label = Label::new(Some(label_txt));
+    label.set_hexpand(true);
     label.set_halign(gtk4::Align::Start);
-    row.append(&radio);
-    row.append(&label);
+    label.set_wrap(true);
+    label.set_max_width_chars(52);
+    text_box.append(&label);
+
     if !desc.is_empty() {
         let d = Label::new(Some(desc));
+        d.set_hexpand(true);
+        d.set_halign(gtk4::Align::Start);
+        d.set_wrap(true);
+        d.set_max_width_chars(56);
         d.add_css_class("detail-label");
-        row.append(&d);
+        text_box.append(&d);
     }
+    row.append(&radio);
+    row.append(&text_box);
     let sel = selected.clone();
     let owned = id.to_string();
     radio.connect_toggled(move |btn| {

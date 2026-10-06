@@ -31,7 +31,7 @@ pub const THEME_CSS: &str = r#"
 /* Toolbar */
 .fast-dm-window .toolbar-box {
     background-color: #181825;
-    padding: 10px 16px;
+    padding: 10px 12px;
     border-bottom: 1px solid rgba(69, 71, 90, 0.5);
 }
 .fast-dm-window .url-entry {
@@ -79,7 +79,7 @@ pub const THEME_CSS: &str = r#"
     background-color: #1e1e2e;
     border-radius: 12px;
     border: 1px solid #313244;
-    margin: 4px 12px;
+    margin: 4px 8px;
 }
 .fast-dm-window .download-card:hover {
     background-color: #232336;
@@ -87,7 +87,17 @@ pub const THEME_CSS: &str = r#"
 }
 
 .fast-dm-window .card-inner {
-    padding: 14px 16px;
+    padding: 12px;
+}
+
+/* FlowBox children stay visually transparent; the box wraps controls naturally. */
+.fast-dm-window .toolbar-box flowboxchild,
+.fast-dm-window .stats-box flowboxchild,
+.fast-dm-window .download-details flowboxchild,
+.fast-dm-window .download-actions flowboxchild {
+    background-color: transparent;
+    border: none;
+    padding: 0;
 }
 
 /* Labels */
@@ -181,7 +191,7 @@ pub const THEME_CSS: &str = r#"
 
 /* Action Buttons */
 .fast-dm-window .btn-action {
-    padding: 5px 14px;
+    padding: 5px 10px;
     border-radius: 8px;
     font-size: 11px;
     font-weight: 700;
@@ -235,7 +245,7 @@ pub const THEME_CSS: &str = r#"
 /* Stats Bar */
 .fast-dm-window .stats-box {
     background-color: #181825;
-    padding: 8px 20px;
+    padding: 8px 12px;
     border-top: 1px solid rgba(69, 71, 90, 0.5);
 }
 .fast-dm-window .stats-label {

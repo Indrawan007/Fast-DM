@@ -3,6 +3,16 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [4.1.0] - 2026-10-06
+
+Layout GTK4 kini lebih nyaman dipakai pada jendela kecil dan split/tile Hyprland.
+
+### Changed
+
+- Toolbar dan statistik menggunakan FlowBox agar kontrol otomatis berpindah baris saat lebar window menyempit.
+- Kartu unduhan membungkus rincian serta tombol aksi, dan padding kartu diperkecil agar konten tidak terpotong.
+- Dialog Pengaturan memakai form vertikal yang membungkus label serta area scroll; pilihan kualitas video juga membungkus teks panjang.
+
 ## [4.0.1] - 2026-10-04
 
 Dua regresi yang ikut terbawa saat migrasi ke Arch/Wayland-only: banner

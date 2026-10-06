@@ -65,21 +65,26 @@ pub fn build_window(
     root.append(&header);
 
     // ── Toolbar ──
-    let toolbar = GtkBox::new(Orientation::Horizontal, 8);
+    // GtkFlowBox membungkus kontrol ke baris berikutnya saat jendela ditile
+    // sempit; pada lebar normal kontrol tetap tersusun horizontal.
+    let toolbar = crate::gui::adaptive_flow_box(6, 8, 8);
     toolbar.add_css_class("toolbar-box");
 
     // B1: satu bahasa (Indonesia) di seluruh UI
     let url_entry = Entry::new();
     url_entry.set_placeholder_text(Some("Tempel URL unduhan di sini..."));
+    url_entry.set_width_chars(24);
     url_entry.set_hexpand(true);
     url_entry.add_css_class("url-entry");
 
     let add_btn = Button::with_label("Unduh");
+    add_btn.set_halign(gtk4::Align::Start);
     add_btn.add_css_class("btn-download");
 
     // v2.5.0 (D2): dialog "Simpan Sebagai…" ala IDM — tentukan folder & nama
     // file sebelum unduhan mulai.
     let save_as_btn = Button::with_label("Simpan Sebagai…");
+    save_as_btn.set_halign(gtk4::Align::Start);
     save_as_btn.add_css_class("btn-clear");
     save_as_btn.set_tooltip_text(Some(
         "Pilih folder & nama file sebelum mengunduh — untuk URL video, dialog \
@@ -87,14 +92,17 @@ pub fn build_window(
     ));
 
     let pause_all_btn = Button::with_label("Jeda Semua");
+    pause_all_btn.set_halign(gtk4::Align::Start);
     pause_all_btn.add_css_class("btn-clear");
     pause_all_btn.set_tooltip_text(Some("Jeda semua unduhan aktif / lanjutkan semua"));
     pause_all_btn.set_sensitive(false); // di-enable oleh event listener saat ada unduhan
 
     let clear_btn = Button::with_label("Bersihkan Selesai");
+    clear_btn.set_halign(gtk4::Align::Start);
     clear_btn.add_css_class("btn-clear");
 
     let settings_btn = Button::with_label("Pengaturan");
+    settings_btn.set_halign(gtk4::Align::Start);
     settings_btn.add_css_class("btn-clear");
 
     toolbar.append(&url_entry);
@@ -154,6 +162,10 @@ pub fn build_window(
     ph_title.add_css_class("ph-title");
     let ph_sub = Label::new(Some("Tempel URL di atas atau pakai ekstensi browser"));
     ph_sub.add_css_class("ph-sub");
+    ph_sub.set_wrap(true);
+    ph_sub.set_max_width_chars(36);
+    ph_sub.set_justify(gtk4::Justification::Center);
+    ph_sub.add_css_class("ph-sub");
 
     placeholder.append(&ph_icon);
     placeholder.append(&ph_title);
@@ -164,17 +176,21 @@ pub fn build_window(
     root.append(&scroll);
 
     // ── Stats ──
-    let statsbar = GtkBox::new(Orientation::Horizontal, 24);
+    let statsbar = crate::gui::adaptive_flow_box(4, 24, 4);
     statsbar.add_css_class("stats-box");
 
     // B3: statistik memisahkan aktif vs antrian
     let stats_active = Label::new(Some("Aktif 0"));
+    stats_active.set_halign(gtk4::Align::Start);
     stats_active.add_css_class("stats-value");
     let stats_speed = Label::new(Some("0 B/s"));
+    stats_speed.set_halign(gtk4::Align::Start);
     stats_speed.add_css_class("stats-speed");
     let stats_queued = Label::new(Some("Antri 0"));
+    stats_queued.set_halign(gtk4::Align::Start);
     stats_queued.add_css_class("stats-value");
     let stats_total = Label::new(Some("Total 0"));
+    stats_total.set_halign(gtk4::Align::Start);
     stats_total.add_css_class("stats-value");
 
     statsbar.append(&stats_active);
@@ -1129,13 +1145,25 @@ fn update_batch_button(button: &Button, action: BatchAction) {
 }
 
 fn settings_row(label: &str, widget: &impl IsA<gtk4::Widget>) -> GtkBox {
-    let row = GtkBox::new(Orientation::Horizontal, 10);
+    let row = GtkBox::new(Orientation::Vertical, 4);
     let lbl = Label::new(Some(label));
     lbl.set_hexpand(true);
     lbl.set_halign(gtk4::Align::Start);
+    lbl.set_wrap(true);
     row.append(&lbl);
     row.append(widget);
     row
+}
+
+/// Keep longer setting labels readable when the modal is narrowed by a tiling WM.
+fn wrapped_check_button(label: &str) -> gtk4::CheckButton {
+    let button = gtk4::CheckButton::new();
+    let text = Label::new(Some(label));
+    text.set_hexpand(true);
+    text.set_halign(gtk4::Align::Start);
+    text.set_wrap(true);
+    button.set_child(Some(&text));
+    button
 }
 
 /// Dialog settings — perubahan berlaku untuk download baru tanpa restart.
@@ -1158,7 +1186,7 @@ where
     );
     // B2: samakan tema dialog dengan window utama (CSS di-scope ke class ini)
     dialog.add_css_class("fast-dm-window");
-    dialog.set_default_size(460, -1);
+    dialog.set_default_size(480, 620);
 
     let content = dialog.content_area();
     content.set_spacing(10);
@@ -1167,11 +1195,15 @@ where
     content.set_margin_start(20);
     content.set_margin_end(20);
 
+    let form = GtkBox::new(Orientation::Vertical, 10);
+    form.add_css_class("settings-form");
+
     // ── C1: folder unduhan + tombol "Pilih Folder…" + K6 validasi ──
     let folder_box = GtkBox::new(Orientation::Vertical, 4);
     let folder_row = GtkBox::new(Orientation::Horizontal, 8);
     let folder_entry = Entry::new();
     folder_entry.set_text(&cur.download_dir);
+    folder_entry.set_width_chars(20);
     folder_entry.set_hexpand(true);
     let browse_btn = Button::with_label("Pilih Folder…");
     browse_btn.add_css_class("btn-clear");
@@ -1221,6 +1253,22 @@ where
     let speed_box = GtkBox::new(Orientation::Vertical, 4);
     let speed_entry = Entry::new();
     speed_entry.set_text(&cur.max_overall_speed);
+    form.append(&settings_row("Folder unduhan", &folder_box));
+
+    let conn_spin = gtk4::SpinButton::with_range(1.0, 32.0, 1.0);
+    conn_spin.set_value(cur.max_connections as f64);
+    form.append(&settings_row("Koneksi per server", &conn_spin));
+
+    let conc_spin = gtk4::SpinButton::with_range(1.0, 10.0, 1.0);
+    conc_spin.set_value(cur.max_concurrent as f64);
+    form.append(&settings_row("Unduhan bersamaan (antrian)", &conc_spin));
+
+    // ── A3: batas kecepatan + hint format · A2: pesan error inline ──
+    let speed_box = GtkBox::new(Orientation::Vertical, 4);
+    let speed_entry = Entry::new();
+    speed_entry.set_text(&cur.max_overall_speed);
+    speed_entry.set_width_chars(18);
+    speed_entry.set_hexpand(true);
     speed_entry.set_placeholder_text(Some("0, 512K, 2M, 10G"));
     let speed_hint = Label::new(Some("0 = tanpa batas · contoh: 512K, 2M, 10G"));
     speed_hint.add_css_class("detail-label");
@@ -1233,17 +1281,17 @@ where
     speed_box.append(&speed_entry);
     speed_box.append(&speed_hint);
     speed_box.append(&speed_error);
-    content.append(&settings_row("Batas kecepatan total", &speed_box));
+    form.append(&settings_row("Batas kecepatan total", &speed_box));
 
-    let verify_tls_chk = gtk4::CheckButton::with_label("Verifikasi sertifikat TLS (aman)");
+    let verify_tls_chk = wrapped_check_button("Verifikasi sertifikat TLS (aman)");
     verify_tls_chk.set_active(cur.verify_tls);
-    content.append(&verify_tls_chk);
+    form.append(&verify_tls_chk);
 
     // v2.3.0 (K5): toggle auto-resume hasil restore sesi
     let auto_resume_chk =
-        gtk4::CheckButton::with_label("Lanjutkan otomatis unduhan tertunda saat aplikasi dibuka");
+        wrapped_check_button("Lanjutkan otomatis unduhan tertunda saat aplikasi dibuka");
     auto_resume_chk.set_active(cur.auto_resume);
-    content.append(&auto_resume_chk);
+    form.append(&auto_resume_chk);
 
     // ── v2.4.0 (D3): proxy untuk semua engine (aria2 --all-proxy ·
     // yt-dlp --proxy). Kredensial boleh di dalam URL proxy.
@@ -1251,6 +1299,7 @@ where
     let proxy_box = GtkBox::new(Orientation::Vertical, 4);
     let proxy_entry = Entry::new();
     proxy_entry.set_text(&cur.proxy_url);
+    proxy_entry.set_width_chars(28);
     proxy_entry.set_placeholder_text(Some(
         "http://127.0.0.1:8080 · socks5://host:1080 — kosong = tanpa proxy",
     ));
@@ -1262,25 +1311,33 @@ where
     proxy_error.set_visible(false);
     proxy_box.append(&proxy_entry);
     proxy_box.append(&proxy_error);
-    content.append(&settings_row("Proxy", &proxy_box));
+    form.append(&settings_row("Proxy", &proxy_box));
 
     // v2.4.0 (D1): toggle deteksi clipboard
-    let clip_chk = gtk4::CheckButton::with_label(
-        "Deteksi URL unduhan dari clipboard (butuh wl-clipboard)",
-    );
+    let clip_chk =
+        wrapped_check_button("Deteksi URL unduhan dari clipboard (butuh wl-clipboard)");
     clip_chk.set_active(cur.clipboard_monitor);
-    content.append(&clip_chk);
+    form.append(&clip_chk);
 
     // ── v2.8.0 (D8): close-behavior + autostart ──
-    let minimize_chk = gtk4::CheckButton::with_label(
+    let minimize_chk = wrapped_check_button(
         "Tetap jalankan di latar saat jendela ditutup (buka lagi: jalankan ulang Fast DM)",
     );
     minimize_chk.set_active(cur.minimize_to_close);
-    content.append(&minimize_chk);
+    form.append(&minimize_chk);
 
-    let autostart_chk = gtk4::CheckButton::with_label("Jalankan Fast DM otomatis saat login");
+    let autostart_chk = wrapped_check_button("Jalankan Fast DM otomatis saat login");
     autostart_chk.set_active(cur.autostart);
-    content.append(&autostart_chk);
+    form.append(&autostart_chk);
+
+    let form_scroll = ScrolledWindow::new();
+    form_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    form_scroll.set_min_content_height(280);
+    form_scroll.set_max_content_height(460);
+    form_scroll.set_propagate_natural_height(true);
+    form_scroll.set_vexpand(true);
+    form_scroll.set_child(Some(&form));
+    content.append(&form_scroll);
 
     // Buttons
     let btn_box = GtkBox::new(Orientation::Horizontal, 8);
