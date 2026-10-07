@@ -499,10 +499,8 @@ mod tests {
     #[test]
     fn impersonation_target_prefers_desktop_chrome() {
         let table = "Client OS Version\nchrome windows 131\nchrome_mobile android 131\n";
-        assert_eq!(
-            parse_impersonation_target(table).as_deref(),
-            Some("chrome")
-        );
+        let picked = parse_impersonation_target(table);
+        assert_eq!(picked.as_deref(), Some("chrome"));
     }
 
     /// Hanya keluarga chrome lain (mobile) → tetap "chrome", bukan None:
@@ -510,20 +508,16 @@ mod tests {
     #[test]
     fn impersonation_target_falls_back_to_chrome_family() {
         let table = "Client OS Version\nchrome_mobile android 120\n";
-        assert_eq!(
-            parse_impersonation_target(table).as_deref(),
-            Some("chrome")
-        );
+        let picked = parse_impersonation_target(table);
+        assert_eq!(picked.as_deref(), Some("chrome"));
     }
 
     /// Tanpa keluarga chrome (atau daftar kosong/keluarannya error) → None:
     /// argumen `--impersonate` dilewati, yt-dlp polos yang jalan.
     #[test]
     fn impersonation_target_absent_without_chrome() {
-        assert_eq!(
-            parse_impersonation_target("Client OS Version\nsafari macos 18\n"),
-            None
-        );
+        let picked = parse_impersonation_target("Client OS Version\nsafari macos 18\n");
+        assert_eq!(picked, None);
         assert_eq!(parse_impersonation_target(""), None);
     }
 }

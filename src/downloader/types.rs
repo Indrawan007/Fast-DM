@@ -381,6 +381,13 @@ impl DownloadInfo {
             && !self.resume_pending
     }
 
+    /// v4.2.0: penolakan server yang tangganya belum habis masih akan dicoba
+    /// Fast-DM sendiri (retry eskalasi) — extension harus menunggu, bukan
+    /// mulai mengunduh lewat browser.
+    pub(crate) fn ladder_running(&self) -> bool {
+        self.access_denied && self.downloaded == 0 && self.escalation < MAX_ESCALATION
+    }
+
     /// v4.2.0: extension mendorong cookie/header TERBARU untuk unduhan yang
     /// sedang berjalan (aksi IPC `refresh`) — sesi situs sering berotasi
     /// setelah intersep, dan cookie stale adalah penyebab umum penolakan.
@@ -546,10 +553,8 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("Accept".to_string(), "octet-stream".to_string());
         merge_browser_navigation_headers(&mut headers);
-        assert_eq!(
-            headers.get("Accept").map(String::as_str),
-            Some("octet-stream")
-        );
+        let accept = headers.get("Accept").map(String::as_str);
+        assert_eq!(accept, Some("octet-stream"));
         assert!(headers.contains_key("Sec-Fetch-Dest"));
         // Accept-Encoding absen dengan sengaja: aria2 menyimpan byte respons
         // apa adanya, jadi menawarkan br/zstd berisiko file rusak.

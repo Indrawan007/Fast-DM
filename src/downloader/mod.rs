@@ -870,11 +870,7 @@ pub(crate) fn handback_state_of(i: &DownloadInfo) -> HandbackState {
         // v4.2.0: penolakan server yang tangganya belum habis masih akan
         // dicoba Fast-DM sendiri (retry eskalasi) — extension harus menunggu,
         // bukan mulai mengunduh lewat browser.
-        DownloadStatus::Error
-            if i.access_denied && i.downloaded == 0 && i.escalation < MAX_ESCALATION =>
-        {
-            HandbackState::Pending
-        }
+        DownloadStatus::Error if i.ladder_running() => HandbackState::Pending,
         _ => HandbackState::Done,
     }
 }
