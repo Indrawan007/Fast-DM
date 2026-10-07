@@ -515,6 +515,42 @@ async fn handle_message(msg: IpcMessage, engine: &DownloadEngine) -> IpcResponse
             }
         }
 
+        // v4.2.0: extension mendorong cookie + header TERBARU untuk unduhan
+        // yang sedang berjalan (sesi situs berotasi setelah intersep — salah
+        // satu penyebab utama penolakan 403). Cookie ditulis ulang ke
+        // cookies_<host>.txt (divalidasi terhadap URL item, bukan `domain`
+        // client) dan header digabung ke item; percobaan berikutnya memakai
+        // kredensial baru ini. Tidak mengubah status apa pun.
+        "refresh" => {
+            let Some(id) = msg.id.as_deref() else {
+                return IpcResponse {
+                    success: false,
+                    id: None,
+                    error: Some("No ID untuk aksi refresh".into()),
+                    message: None,
+                };
+            };
+            let accepted = match engine.url_of(id).await {
+                Some(url) => {
+                    if let Some(cookies) = msg.cookies.as_deref() {
+                        if let Err(e) = write_cookies_txt(cookies, &url) {
+                            tracing::warn!("refresh cookies: {}", e);
+                        }
+                    }
+                    engine
+                        .merge_request_headers(id, sanitize_headers(msg.headers))
+                        .await
+                }
+                None => false,
+            };
+            IpcResponse {
+                success: accepted,
+                id: Some(id.to_string()),
+                error: None,
+                message: None,
+            }
+        }
+
         "list" => {
             let downloads = engine.get_all_downloads().await;
             let list: Vec<serde_json::Value> = downloads

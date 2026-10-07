@@ -685,3 +685,47 @@ test("download that starts flowing is never handed back", async () => {
   assert.equal(b.requests.length, 3, "polling berhenti pada done");
   assert.equal(b.downloaded.length, 0);
 });
+
+// v4.2.0: sesudah Fast-DM menerima intersep, extension mendorong cookie &
+// header TERBARU (aksi IPC `refresh`) supaya percobaan berikutnya di tangga
+// eskalasi memakai kredensial terkini — unduhan tetap dipegang Fast-DM
+// (multi-koneksi + resume), bukan browser.
+test("accepted intercept pushes fresh credentials to Fast-DM", async () => {
+  const b = background();
+  const flushed = () => new Promise(setImmediate);
+  // Hanya timer push kredensial (5 dtk) & poll handback (2 dtk) yang
+  // dijalankan; timeout native (25 dtk) dan timer badge tetap mati.
+  b.context.setTimeout = (callback, delay) => {
+    if (delay === 2000 || delay === 5000) setImmediate(callback);
+    return 1;
+  };
+  const url = "https://files.example/rotating.zip?sig=abc";
+  void b.onDownloadsCreated({
+    id: 9,
+    url,
+    finalUrl: url,
+    filename: "/home/user/Downloads/rotating.zip",
+    fileSize: 50_000_000,
+    mime: "application/zip",
+    referrer: "https://files.example/page",
+    state: "in_progress",
+  });
+  await flushed();
+  assert.equal(b.requests[0].message.action, "download");
+  b.requests[0].callback({ success: true, id: "dl_rot" });
+
+  for (let i = 0; i < 5; i++) await flushed();
+  const push = b.requests.find((r) => r.message.action === "refresh");
+  assert.ok(push, "push kredensial wajib menyusul intersep yang diterima");
+  assert.equal(push.message.id, "dl_rot");
+  assert.equal(push.message.headers["User-Agent"], "FastDM-Test-Browser/150.0");
+  assert.ok(Array.isArray(push.message.cookies), "cookie jar ikut didorong");
+  push.callback({ success: true });
+
+  // Protokol poll handback tidak berubah: `done` = tidak ada unduhan browser.
+  const poll = b.requests.find((r) => r.message.action === "handback");
+  assert.ok(poll);
+  poll.callback({ success: true, id: "dl_rot", message: "done" });
+  for (let i = 0; i < 5; i++) await flushed();
+  assert.equal(b.downloaded.length, 0, "done = tidak ada unduhan browser");
+});

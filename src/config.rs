@@ -55,6 +55,15 @@ pub struct Config {
     /// user menggeser toggle di Pengaturan (bukan tiap save).
     #[serde(default)]
     pub autostart: bool,
+    /// v4.2.0: setelah tangga eskalasi "Fast-DM dulu" habis (retry dengan
+    /// cookie/header segar + yt-dlp ber-impersonasi TLS), unduhan yang masih
+    /// ditolak server diserahkan ke browser (perilaku v3.3.2). Matikan bila
+    /// lebih suka unduhan tetap dipegang Fast-DM sampai akhir: kartu berhenti
+    /// sebagai GAGAL dengan tombol Ulangi — unduhan browser single-connection
+    /// dan tidak bisa dilanjut, jadi sebagian user lebih suka memegang
+    /// kendali penuh.
+    #[serde(default = "default_true")]
+    pub auto_browser_handback: bool,
 }
 
 /// Envelope konfigurasi v1. Config lama yang langsung berisi field settings
@@ -160,6 +169,7 @@ impl Default for Config {
             rpc_port: 6800,
             minimize_to_close: false,
             autostart: false,
+            auto_browser_handback: true,
         }
     }
 }

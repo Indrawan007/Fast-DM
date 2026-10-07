@@ -7,10 +7,11 @@ GUI Fast-DM menggunakan backend GTK Wayland secara eksplisit. **Sesi X11/XWaylan
 ## Fitur
 
 - Unduhan multi-koneksi, jeda/lanjutkan, retry, dan pemulihan sesi melalui `aria2`.
+- Tangga eskalasi untuk unduhan yang ditolak server (HTTP 403/login/anti-bot): retry dengan cookie/header terbaru dari browser, lalu yt-dlp dengan impersonasi sidik jari TLS Chrome — unduhan tetap ditangani Fast-DM (multi-koneksi + bisa dilanjut), dan penyerahan ke browser hanya jalan terakhir yang bisa dimatikan dari Pengaturan.
 - YouTube dan banyak situs lain melalui `yt-dlp`, termasuk pilihan kualitas serta audio/video.
 - Ekstensi Chromium untuk mencegat unduhan, membawa cookie/Referer, dan menampilkan pilihan kualitas di pemutar video.
 - Pemantauan clipboard Wayland secara opsional melalui `wl-paste`.
-- Pengaturan folder, batas kecepatan, koneksi, proxy, dan verifikasi TLS.
+- Pengaturan folder, batas kecepatan, koneksi, proxy, verifikasi TLS, dan pilihan menyerahkan ke browser bila server terus menolak Fast-DM.
 - Integrasi browser Native Messaging dan notifikasi desktop opsional.
 - Layout adaptif untuk Hyprland: toolbar, statistik, rincian unduhan, dan tombol kartu membungkus otomatis saat jendela ditile sempit; Pengaturan dapat digulir dan labelnya ikut membungkus.
 

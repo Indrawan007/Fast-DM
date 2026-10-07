@@ -1330,6 +1330,17 @@ where
     autostart_chk.set_active(cur.autostart);
     form.append(&autostart_chk);
 
+    // v4.2.0: penyerahan ke browser adalah JALAN TERAKHIR tangga eskalasi
+    // (cookie/header segar → yt-dlp impersonasi TLS). Unduhan browser lambat
+    // (satu koneksi) dan tak bisa dilanjut, jadi user boleh mematikannya agar
+    // unduhan tetap dipegang Fast-DM sampai akhir (kartu GAGAL + Ulangi).
+    let handback_chk = wrapped_check_button(
+        "Serahkan ke browser bila server terus menolak Fast-DM (unduh browser \
+         satu koneksi & tak bisa dilanjut)",
+    );
+    handback_chk.set_active(cur.auto_browser_handback);
+    form.append(&handback_chk);
+
     let form_scroll = ScrolledWindow::new();
     form_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
     form_scroll.set_min_content_height(280);
@@ -1419,7 +1430,7 @@ where
     // loop yang bisa menggantung, jadi guard close_request pola lama hilang).
     let cfg_base = cur.clone();
     let on_ok = std::rc::Rc::new(std::cell::RefCell::new(Some(on_ok)));
-    let (fe, cs, cc, se, vt, ar, px, cb, mz, au) = (
+    let (fe, cs, cc, se, vt, ar, px, cb, mz, au, hb) = (
         folder_entry.clone(),
         conn_spin.clone(),
         conc_spin.clone(),
@@ -1430,6 +1441,7 @@ where
         clip_chk.clone(),
         minimize_chk.clone(),
         autostart_chk.clone(),
+        handback_chk.clone(),
     );
     dialog.connect_response(move |d, resp| {
         if resp == gtk4::ResponseType::Ok {
@@ -1453,6 +1465,8 @@ where
             // v2.8.0 (D8.1)
             cfg.minimize_to_close = mz.is_active();
             cfg.autostart = au.is_active();
+            // v4.2.0
+            cfg.auto_browser_handback = hb.is_active();
             if let Some(f) = on_ok.borrow_mut().take() {
                 f(cfg);
             }

@@ -129,9 +129,9 @@ fn handle_native_message(msg: NativeMessage) -> NativeResponse {
                 Err(e) => {
                     // v3.3.3: hanya permintaan yang MEMBUAT unduhan boleh
                     // menyalakan Fast-DM. Pertanyaan/kendali (`ping`, `list`,
-                    // `handback`, `pause`, `resume`, `cancel`) dijawab apa
-                    // adanya — "tidak berjalan" — tanpa side effect. Lihat
-                    // `gui_unavailable_response`.
+                    // `handback`, `refresh`, `pause`, `resume`, `cancel`)
+                    // dijawab apa adanya — "tidak berjalan" — tanpa side
+                    // effect. Lihat `gui_unavailable_response`.
                     if let Some(resp) = gui_unavailable_response(&msg.action, &e) {
                         return resp;
                     }
@@ -352,6 +352,10 @@ mod tests {
         assert_launch_refused("ping");
         assert_launch_refused("list");
         assert_launch_refused("handback");
+        // v4.2.0: dorongan cookie/header terbaru untuk unduhan berjalan tidak
+        // boleh menyalakan aplikasi — sama seperti poll `handback` yang
+        // mengikutinya.
+        assert_launch_refused("refresh");
         assert_launch_refused("pause");
         assert_launch_refused("resume");
         assert_launch_refused("cancel");
