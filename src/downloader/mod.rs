@@ -578,7 +578,10 @@ impl DownloadEngine {
     pub async fn url_of(&self, id: &str) -> Option<String> {
         let downloads = self.downloads.read().await;
         let info = downloads.get(id)?;
-        Some(info.lock().await.url.clone())
+        // Nilai di-clone ke lokal dulu: guard Mutex sementara pada ekspresi
+        // ekor blok akan di-drop SETELAH `downloads` (E0597).
+        let url = info.lock().await.url.clone();
+        Some(url)
     }
 
     /// v4.2.0: gabungkan header/cookie-metadata terbaru yang didorong

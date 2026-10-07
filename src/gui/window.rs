@@ -1241,20 +1241,6 @@ where
     folder_error.set_visible(false);
     folder_box.append(&folder_row);
     folder_box.append(&folder_error);
-    content.append(&settings_row("Folder unduhan", &folder_box));
-
-    let conn_spin = gtk4::SpinButton::with_range(1.0, 32.0, 1.0);
-    conn_spin.set_value(cur.max_connections as f64);
-    content.append(&settings_row("Koneksi per server", &conn_spin));
-
-    let conc_spin = gtk4::SpinButton::with_range(1.0, 10.0, 1.0);
-    conc_spin.set_value(cur.max_concurrent as f64);
-    content.append(&settings_row("Unduhan bersamaan (antrian)", &conc_spin));
-
-    // ── A3: batas kecepatan + hint format · A2: pesan error inline ──
-    let speed_box = GtkBox::new(Orientation::Vertical, 4);
-    let speed_entry = Entry::new();
-    speed_entry.set_text(&cur.max_overall_speed);
     form.append(&settings_row("Folder unduhan", &folder_box));
 
     let conn_spin = gtk4::SpinButton::with_range(1.0, 32.0, 1.0);

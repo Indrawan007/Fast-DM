@@ -20,6 +20,7 @@ dimatikan sama sekali dari Pengaturan.
 ### Fixed
 
 - **Gerbang `cargo fmt` CI merah di main** — rust 1.99 di image Arch memperbarui rustfmt dan meminta tiga perubahan format di `src/gui/window.rs` (let-else satu baris → blok, pemanggilan 100 kolom digabung, rantai method dipecah). Drift ini ada sebelum rilis ini; diterapkan agar gerbang hijau lagi.
+- **Error kompilasi di HEAD main ("Update GUI")** — dialog Pengaturan memuat blok baris ganda: Folder unduhan/Koneksi per server/Unduhan bersamaan di-append dua kali (langsung ke isi dialog DAN ke form scroll), plus sisa deklarasi `speed_box` yang tak terpakai sehingga clippy `-D warnings` menolak CI. Blok mati dibuang; setiap baris kini muncul sekali di dalam form yang bisa digulir.
 
 ### Changed
 
