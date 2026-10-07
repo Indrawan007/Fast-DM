@@ -375,7 +375,9 @@ pub fn build_window(
                         (available, text)
                     })
                     .await;
-                let Ok((available, text)) = result else { continue };
+                let Ok((available, text)) = result else {
+                    continue;
+                };
                 if !available {
                     // Probe ulang jika wl-clipboard belum terpasang atau belum siap.
                     clipboard_available = false;
@@ -1314,8 +1316,7 @@ where
     form.append(&settings_row("Proxy", &proxy_box));
 
     // v2.4.0 (D1): toggle deteksi clipboard
-    let clip_chk =
-        wrapped_check_button("Deteksi URL unduhan dari clipboard (butuh wl-clipboard)");
+    let clip_chk = wrapped_check_button("Deteksi URL unduhan dari clipboard (butuh wl-clipboard)");
     clip_chk.set_active(cur.clipboard_monitor);
     form.append(&clip_chk);
 
@@ -1596,7 +1597,9 @@ async fn clipboard_command(bin: &str, args: &[&str]) -> Option<String> {
 }
 
 async fn clipboard_probe() -> bool {
-    clipboard_command("wl-paste", &["--version"]).await.is_some()
+    clipboard_command("wl-paste", &["--version"])
+        .await
+        .is_some()
 }
 
 async fn clipboard_text() -> Option<String> {

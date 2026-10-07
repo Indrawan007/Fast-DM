@@ -26,6 +26,7 @@ optdepends=(
   'xdg-desktop-portal-hyprland: portal untuk sesi Hyprland'
   'xdg-desktop-portal-gtk: portal GTK, termasuk pemilih file'
   'chrome: browser untuk extension Native Messaging'
+  'python-curl_cffi: impersonasi sidik jari TLS browser untuk server yang menolak aria2'
 )
 makedepends=('cargo' 'rust')
 # Arch mengaktifkan lto+debug+CFLAGS di /etc/makepkg.conf. cargo build

@@ -15,6 +15,11 @@ dimatikan sama sekali dari Pengaturan.
 - **Tangga eskalasi "Fast-DM dulu" (2 tahap) sebelum handback ke browser** — tahap 1 retry dengan cookie/header TERBARU yang didorong extension ditambah set header navigasi browser (`Accept`, `Sec-Fetch-*`, `Upgrade-Insecure-Requests`; `Accept-Encoding` sengaja absen agar file tersimpan tidak ikut terkompresi); tahap 2 menjalankan resolver universal yt-dlp dengan impersonasi sidik jari TLS Chrome (`--impersonate`, target dideteksi otomatis lewat `--list-impersonate-targets` — bila yt-dlp tanpa curl_cffi, argumen dilewati dan yt-dlp polos yang jalan). Hanya setelah kedua tahap gagal, jaring pengaman v3.3.2 (browser mengunduh sendiri) berlaku lagi.
 - **Aksi IPC `refresh`** — ±5 detik setelah intersep diterima, extension mendorong cookie + header terkini (`User-Agent`, `Accept-Language`, jar cookie lengkap) untuk unduhan yang sedang berjalan; cookie ditulis ulang ke `cookies_<host>.txt` setelah divalidasi terhadap host item. Sama seperti `handback`, aksi ini tidak menyalakan GUI.
 - **Pengaturan baru "Serahkan ke browser bila server terus menolak Fast-DM"** (default ON, kompatibel v3.3.2). Dimatikan = unduhan tetap dipegang Fast-DM sampai akhir: kartu berhenti sebagai GAGAL dengan tombol Ulangi, dan extension tidak memulai unduhan browser yang lambat & tak bisa dilanjut.
+- `packaging/PKGBUILD`: `python-curl_cffi` menjadi optdepend — dibutuhkan yt-dlp untuk `--impersonate`; tanpa paket itu tahap 2 otomatis jatuh ke yt-dlp polos.
+
+### Fixed
+
+- **Gerbang `cargo fmt` CI merah di main** — rust 1.99 di image Arch memperbarui rustfmt dan meminta tiga perubahan format di `src/gui/window.rs` (let-else satu baris → blok, pemanggilan 100 kolom digabung, rantai method dipecah). Drift ini ada sebelum rilis ini; diterapkan agar gerbang hijau lagi.
 
 ### Changed
 
