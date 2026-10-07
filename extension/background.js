@@ -748,6 +748,47 @@ function isLiveDownload(downloadItem) {
 const HANDBACK_POLL_MS = 2_000;
 const HANDBACK_MAX_MS = 120_000;
 
+// v4.2.0: dorong cookie & header TERBARU ke Fast-DM beberapa detik setelah
+// unduhan diterima. Sesi situs sering berotasi SETELAH intersep (token sekali
+// pakai, cookie CSRF, hitungan mundur file-host) — cookie stale adalah salah
+// satu penyebab utama HTTP 403 yang berakhir "diserahkan ke browser" (satu
+// koneksi, tak bisa dilanjut). Dengan dorongan ini percobaan berikut di
+// tangga eskalasi Fast-DM memakai kredensial terkini, sehingga aria2/yt-dlp
+// tetap memegang unduhan alih-alih browser.
+const CREDENTIAL_PUSH_MS = 5_000;
+
+function pushFreshCredentials(id, url) {
+  if (typeof id !== "string" || !id) return;
+  setTimeout(async () => {
+    const headers = {};
+    if (typeof navigator !== "undefined" && navigator.userAgent) {
+      headers["User-Agent"] = navigator.userAgent;
+    }
+    const langs =
+      (typeof navigator !== "undefined" && navigator.languages) || [];
+    const lang = langs.length ? langs.join(", ") : navigator.language;
+    if (lang) headers["Accept-Language"] = lang;
+
+    let cookies = null;
+    let domain = null;
+    try {
+      const jar = await chrome.cookies.getAll({ url });
+      if (Array.isArray(jar)) {
+        cookies = jar;
+        domain = new URL(url).hostname;
+      }
+    } catch (e) {
+      /* ignore — tetap dorong header saja */
+    }
+
+    try {
+      await sendToNative({ action: "refresh", id, cookies, domain, headers });
+    } catch (e) {
+      // Fast-DM ditutup di tengah unduhan — tidak ada yang perlu di-update.
+    }
+  }, CREDENTIAL_PUSH_MS);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -806,6 +847,7 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
 
   const result = await sendDownload(url, filename, headers).catch(() => null);
   if (result && result.success) {
+    pushFreshCredentials(result.id, url);
     void watchForHandback(result.id, url);
   } else {
     // Fallback: restart download in Chrome normally.
@@ -843,6 +885,7 @@ chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
 
   sendDownload(url, filename, headers).then((result) => {
     if (result && result.success) {
+      pushFreshCredentials(result.id, url);
       void watchForHandback(result.id, url);
     } else {
       // v3.2.3 (A7): lihat catatan di `onCreated` — `saveAs: true` saja.

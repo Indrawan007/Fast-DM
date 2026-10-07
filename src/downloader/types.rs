@@ -7,6 +7,56 @@ use std::time::{Duration, Instant};
 /// menyelamatkan kegagalan transient (network, resolver, atau daemon restart).
 pub(crate) const MAX_AUTO_RETRIES: u8 = 2;
 
+/// v4.2.0: jumlah tangga eskalasi "Fast-DM dulu" untuk unduhan yang servernya
+/// MENOLAK Fast-DM (HTTP 401/403/429 → aria2 exit 22/24, atau probe menerima
+/// halaman HTML). Retry identik memang sia-sia untuk penolakan seperti itu,
+/// tetapi setiap tahap tangga MENGUBAH request sehingga layak dicoba sebelum
+/// unduhan diserahkan ke browser (yang lambat & tak bisa dilanjut):
+///
+/// * tahap 1 = cookie/header terbaru dari extension + header navigasi browser;
+/// * tahap 2 = yt-dlp dengan impersonasi sidik jari TLS browser (`--impersonate`).
+///
+/// Setelah tahap terakhir gagal, barulah `needs_browser_handback` benar dan
+/// jaring pengaman v3.3.2 (browser mengunduh sendiri) berlaku lagi.
+pub(crate) const MAX_ESCALATION: u8 = 2;
+
+/// v4.2.0: set header navigasi browser yang digabung ke request pada tahap 1
+/// tangga eskalasi. Banyak file-host/anti-hotlink menolak request tanpa
+/// header-header ini walau cookie & Referer sudah benar.
+///
+/// `Accept-Encoding` SENGAJA tidak ada: aria2 menyimpan byte respons apa
+/// adanya, jadi menawarkan `br`/`zstd` berisiko menghasilkan file tersimpan
+/// yang masih terkompresi. `or_insert` di pemakai menjaga header yang sudah
+/// dikirim extension (mis. Accept khusus) tidak tertimpa.
+pub(crate) const BROWSER_NAVIGATION_HEADERS: &[(&str, &str)] = &[
+    (
+        "Accept",
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    ),
+    ("Sec-Fetch-Dest", "document"),
+    ("Sec-Fetch-Mode", "navigate"),
+    ("Sec-Fetch-Site", "none"),
+    ("Sec-Fetch-User", "?1"),
+    ("Upgrade-Insecure-Requests", "1"),
+];
+
+/// Gabung `BROWSER_NAVIGATION_HEADERS` tanpa menimpa entri yang sudah ada.
+pub(crate) fn merge_browser_navigation_headers(headers: &mut HashMap<String, String>) {
+    for (key, value) in BROWSER_NAVIGATION_HEADERS {
+        headers
+            .entry((*key).to_string())
+            .or_insert_with(|| (*value).to_string());
+    }
+}
+
+/// Keterangan tahap eskalasi untuk `status_detail` (ditampilkan kartu GUI).
+pub(crate) fn escalation_detail(stage: u8) -> &'static str {
+    match stage {
+        1 => "Server menolak Fast-DM — mencoba ulang dengan cookie & header navigasi browser",
+        _ => "Server masih menolak — mencoba via yt-dlp dengan sidik jari TLS browser",
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DownloadStatus {
@@ -88,6 +138,18 @@ pub struct DownloadInfo {
     /// `handback`). Runtime-only: direset setiap start.
     #[serde(skip)]
     pub(crate) access_denied: bool,
+    /// v4.2.0: tahap tangga eskalasi "Fast-DM dulu" yang sudah dijadwalkan
+    /// (0 = belum, 1 = retry header navigasi browser, 2 = yt-dlp impersonasi
+    /// TLS). Selama belum mencapai `MAX_ESCALATION`, penolakan server masih
+    /// di-retry dengan request yang BERBEDA; setelah itu baru unduhan boleh
+    /// diserahkan ke browser (`needs_browser_handback`). Runtime-only.
+    #[serde(skip)]
+    pub(crate) escalation: u8,
+    /// v4.2.0: hint dispatch tahap 2 — supervisor menjalankan resolver
+    /// universal yt-dlp dengan `--impersonate` alih-alih jalur aria2 yang
+    /// sudah dua kali ditolak server. Runtime-only.
+    #[serde(skip)]
+    pub(crate) impersonate: bool,
     /// v3.3.4: nama ini dipilih USER (dialog "Simpan Sebagai..."), bukan hasil
     /// tebakan Fast-DM atau browser. Probe `Content-Disposition` di jalur
     /// yt-dlp (`aria2::probe_real_filename`) TIDAK boleh menimpanya — user yang
@@ -131,6 +193,8 @@ impl DownloadInfo {
             retry_after: None,
             auto_retry_count: 0,
             access_denied: false,
+            escalation: 0,
+            impersonate: false,
             user_named: false,
             created: chrono::Utc::now().timestamp_millis(),
         }
@@ -183,6 +247,10 @@ impl DownloadInfo {
         // Percobaan baru dimulai bersih; kegagalan baru akan menulisnya lagi.
         self.error_msg.clear();
         self.access_denied = false;
+        // v4.2.0: percobaan manual (tombol Ulangi) adalah sesi baru — tangga
+        // eskalasi dimulai lagi dari awal, termasuk hint impersonasi.
+        self.escalation = 0;
+        self.impersonate = false;
         self.status = if slot_available {
             DownloadStatus::Resolving
         } else {
@@ -199,24 +267,54 @@ impl DownloadInfo {
     /// `resume_pending` sengaja dipakai supaya UI dapat membatalkan retry
     /// tertunda melalui tombol Jeda, sementara `retry_after` membedakannya
     /// dari resume biasa yang hanya menunggu cleanup worker lama.
+    ///
+    /// v4.2.0: penolakan server (`access_denied`) TIDAK lagi langsung terminal.
+    /// Selama tangga eskalasi belum habis, setiap penolakan menjadwalkan satu
+    /// percobaan lagi dengan request yang berbeda (tahap 1: header navigasi
+    /// browser + cookie/header terbaru dari extension; tahap 2: yt-dlp dengan
+    /// impersonasi TLS). Setelah `MAX_ESCALATION`, perilaku lama berlaku:
+    /// tanpa retry otomatis, unduhan diserahkan ke browser (`handback`).
     pub(crate) fn schedule_auto_retry(&mut self, retry_wait: u8) -> Option<Duration> {
-        if self.status != DownloadStatus::Error
-            || self.resume_pending
-            || self.access_denied
-            || self.auto_retry_count >= MAX_AUTO_RETRIES
-        {
+        if self.status != DownloadStatus::Error || self.resume_pending {
             return None;
         }
 
-        self.auto_retry_count = self.auto_retry_count.saturating_add(1);
-        let multiplier = 1u64 << u32::from(self.auto_retry_count - 1);
+        let denied = self.access_denied && self.downloaded == 0;
+        if denied {
+            if self.escalation >= MAX_ESCALATION {
+                return None;
+            }
+            self.escalation = self.escalation.saturating_add(1);
+            self.impersonate = self.escalation >= MAX_ESCALATION;
+            if self.escalation == 1 {
+                merge_browser_navigation_headers(&mut self.headers);
+            }
+        } else if self.auto_retry_count >= MAX_AUTO_RETRIES {
+            return None;
+        } else {
+            self.auto_retry_count = self.auto_retry_count.saturating_add(1);
+        }
+
+        let stage = if denied {
+            self.escalation
+        } else {
+            self.auto_retry_count
+        };
+        let multiplier = 1u64 << u32::from(stage - 1);
         let seconds = u64::from(retry_wait.max(1))
             .saturating_mul(multiplier)
             .min(60);
         let delay = Duration::from_secs(seconds);
         self.retry_after = Some(Instant::now() + delay);
         self.resume_pending = true;
-        self.status_detail = format!("Coba lagi otomatis dalam {seconds} detik…");
+        self.status_detail = if denied {
+            format!(
+                "{} — percobaan berikutnya dalam {seconds} detik…",
+                escalation_detail(self.escalation)
+            )
+        } else {
+            format!("Coba lagi otomatis dalam {seconds} detik…")
+        };
         Some(delay)
     }
 
@@ -270,12 +368,44 @@ impl DownloadInfo {
     /// data yang diterima, dan tidak ada worker/retry yang masih berjalan.
     /// Unduhan seperti ini sebaiknya diunduh ulang oleh browser (yang punya
     /// sesi, sidik jari TLS, dan header lengkap) daripada dibiarkan gagal.
+    ///
+    /// v4.2.0: penyerahan itu kini JALAN TERAKHIR — hanya setelah tangga
+    /// eskalasi habis (`escalation >= MAX_ESCALATION`), supaya Fast-DM sendiri
+    /// yang menangani unduhan sebanyak mungkin (multi-koneksi + resume).
     pub(crate) fn needs_browser_handback(&self) -> bool {
         self.status == DownloadStatus::Error
             && self.access_denied
             && self.downloaded == 0
+            && self.escalation >= MAX_ESCALATION
             && !self.worker_active
             && !self.resume_pending
+    }
+
+    /// v4.2.0: penolakan server yang tangganya belum habis masih akan dicoba
+    /// Fast-DM sendiri (retry eskalasi) — extension harus menunggu, bukan
+    /// mulai mengunduh lewat browser.
+    pub(crate) fn ladder_running(&self) -> bool {
+        self.access_denied && self.downloaded == 0 && self.escalation < MAX_ESCALATION
+    }
+
+    /// v4.2.0: extension mendorong cookie/header TERBARU untuk unduhan yang
+    /// sedang berjalan (aksi IPC `refresh`) — sesi situs sering berotasi
+    /// setelah intersep, dan cookie stale adalah penyebab umum penolakan.
+    /// Header baru digabung tanpa menghapus yang sudah ada; item terminal
+    /// (selesai/dibatalkan) tidak disentuh supaya tidak ada kejutan diam-diam.
+    pub(crate) fn absorb_fresh_headers(&mut self, headers: HashMap<String, String>) -> bool {
+        if matches!(
+            self.status,
+            DownloadStatus::Completed | DownloadStatus::Cancelled
+        ) {
+            return false;
+        }
+        for (key, value) in headers {
+            if !key.is_empty() && !value.is_empty() {
+                self.headers.insert(key, value);
+            }
+        }
+        true
     }
 
     pub fn total_size_fmt(&self) -> String {
@@ -358,20 +488,55 @@ mod tests {
         info.status = DownloadStatus::Error;
         info.error_msg = "aria2c gagal (exit 22): server menolak permintaan".into();
         info.access_denied = true;
+        info.escalation = MAX_ESCALATION;
+        info.impersonate = true;
         assert!(info.request_start(true));
         assert!(info.error_msg.is_empty());
         assert!(!info.access_denied);
+        // v4.2.0: percobaan manual memulai tangga eskalasi dari awal.
+        assert_eq!(info.escalation, 0);
+        assert!(!info.impersonate);
     }
 
+    /// v4.2.0: penolakan server menaiki tangga eskalasi (request BERBEDA tiap
+    /// tahap) sebelum boleh diserahkan ke browser — unduhan browser lambat
+    /// (satu koneksi) dan tidak bisa dilanjut, jadi Fast-DM mencoba dulu.
     #[test]
-    fn access_denied_is_not_auto_retried_and_needs_handback() {
+    fn access_denied_climbs_escalation_ladder_before_handback() {
         let mut info = lifecycle_info();
         assert!(info.request_start(true));
         info.status = DownloadStatus::Error;
         info.access_denied = true;
-        assert_eq!(info.schedule_auto_retry(1), None);
-        assert!(!info.needs_browser_handback(), "worker masih aktif");
+
+        // Tahap 1: header navigasi browser digabung; handback belum boleh.
+        let first = info.schedule_auto_retry(3).expect("eskalasi tahap 1");
+        assert_eq!(first, Duration::from_secs(3));
+        assert_eq!(info.escalation, 1);
+        assert!(!info.impersonate);
+        assert_eq!(
+            info.headers.get("Sec-Fetch-Mode").map(String::as_str),
+            Some("navigate")
+        );
+        assert!(
+            info.status_detail.contains("header navigasi browser"),
+            "kartu GUI harus menjelaskan tahapnya: {}",
+            info.status_detail
+        );
+        assert!(!info.needs_browser_handback());
+
+        // Worker lepas slot lalu tahap 1 ditolak lagi → tahap 2 (impersonasi).
+        info.resume_pending = false;
+        info.retry_after = None;
+        let second = info.schedule_auto_retry(3).expect("eskalasi tahap 2");
+        assert_eq!(second, Duration::from_secs(6));
+        assert_eq!(info.escalation, 2);
+        assert!(info.impersonate, "tahap 2 = yt-dlp --impersonate");
+        info.resume_pending = false;
+        info.retry_after = None;
         info.finish_worker(true);
+
+        // Tangga habis: tanpa retry otomatis, barulah browser boleh diambil.
+        assert_eq!(info.schedule_auto_retry(3), None);
         assert_eq!(info.status, DownloadStatus::Error);
         assert!(info.needs_browser_handback());
 
@@ -379,6 +544,43 @@ mod tests {
         // mengunduh ulang dari nol dan membuang progres).
         info.downloaded = 1;
         assert!(!info.needs_browser_handback());
+    }
+
+    /// v4.2.0: header navigasi hanya MENAMBAH — header yang sudah dikirim
+    /// extension (Accept khusus, UA, Referer) tidak boleh tertimpa.
+    #[test]
+    fn navigation_headers_never_override_existing_values() {
+        let mut headers = HashMap::new();
+        headers.insert("Accept".to_string(), "octet-stream".to_string());
+        merge_browser_navigation_headers(&mut headers);
+        let accept = headers.get("Accept").map(String::as_str);
+        assert_eq!(accept, Some("octet-stream"));
+        assert!(headers.contains_key("Sec-Fetch-Dest"));
+        // Accept-Encoding absen dengan sengaja: aria2 menyimpan byte respons
+        // apa adanya, jadi menawarkan br/zstd berisiko file rusak.
+        assert!(!headers.contains_key("Accept-Encoding"));
+    }
+
+    /// v4.2.0: dorongan cookie/header terbaru dari extension (IPC `refresh`)
+    // masuk ke item hidup, tetapi item terminal dibiarkan utuh.
+    #[test]
+    fn fresh_headers_are_absorbed_only_by_live_items() {
+        let mut info = lifecycle_info();
+        info.status = DownloadStatus::Error;
+        let mut fresh = HashMap::new();
+        fresh.insert("Accept-Language".to_string(), "id-ID".to_string());
+        assert!(info.absorb_fresh_headers(fresh.clone()));
+        assert_eq!(
+            info.headers.get("Accept-Language").map(String::as_str),
+            Some("id-ID")
+        );
+
+        for status in [DownloadStatus::Completed, DownloadStatus::Cancelled] {
+            let mut terminal = lifecycle_info();
+            terminal.status = status;
+            assert!(!terminal.absorb_fresh_headers(fresh.clone()));
+            assert!(terminal.headers.is_empty());
+        }
     }
 
     #[test]

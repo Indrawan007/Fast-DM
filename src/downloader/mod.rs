@@ -545,12 +545,20 @@ impl DownloadEngine {
     /// pemeriksaannya) lalu browser mengunduhnya sendiri dengan sesi,
     /// header, dan sidik jari TLS aslinya.
     pub async fn poll_browser_handback(&self, id: &str) -> HandbackState {
+        // v4.2.0: Pengaturan `auto_browser_handback` = OFF berarti Fast-DM
+        // harus menangani unduhan sendiri sampai akhir: jawaban handback
+        // diganti Done sehingga extension tidak memulai unduhan browser yang
+        // lambat & tak bisa dilanjut; item tetap Error dengan tombol Ulangi.
+        let auto_handback = self.config.read().await.auto_browser_handback;
         let downloads = self.downloads.read().await;
         let Some(info) = downloads.get(id) else {
             return HandbackState::Done;
         };
         let mut i = info.lock().await;
         if i.needs_browser_handback() {
+            if !auto_handback {
+                return HandbackState::Done;
+            }
             i.status = DownloadStatus::Cancelled;
             i.access_denied = false;
             i.error_msg.clear();
@@ -562,6 +570,40 @@ impl DownloadEngine {
             return HandbackState::Handback;
         }
         handback_state_of(&i)
+    }
+
+    /// v4.2.0: URL mentah sebuah item — dipakai aksi IPC `refresh` untuk
+    /// memvalidasi cookie dorongan extension terhadap host yang sama dengan
+    /// request (`write_cookies_txt` menolak cookie lintas host).
+    pub async fn url_of(&self, id: &str) -> Option<String> {
+        let downloads = self.downloads.read().await;
+        let info = downloads.get(id)?;
+        // Nilai di-clone ke lokal dulu: guard Mutex sementara pada ekspresi
+        // ekor blok akan di-drop SETELAH `downloads` (E0597).
+        let url = info.lock().await.url.clone();
+        Some(url)
+    }
+
+    /// v4.2.0: gabungkan header/cookie-metadata terbaru yang didorong
+    /// extension ke item hidup (rotasi sesi setelah intersep). Tidak mengubah
+    /// status: percobaan berikutnya (tangga eskalasi atau retry manual) yang
+    /// akan memakai header baru ini.
+    pub async fn merge_request_headers(
+        &self,
+        id: &str,
+        headers: std::collections::HashMap<String, String>,
+    ) -> bool {
+        let downloads = self.downloads.read().await;
+        let Some(info) = downloads.get(id) else {
+            return false;
+        };
+        let mut i = info.lock().await;
+        let accepted = i.absorb_fresh_headers(headers);
+        if accepted {
+            self.mark_dirty();
+            let _ = self.event_tx.send(DownloadEvent::Progress(i.clone()));
+        }
+        accepted
     }
 
     pub async fn clear_download(&self, id: &str) {
@@ -642,14 +684,40 @@ fn spawn_supervised(
             config.max_overall_speed =
                 aria2::resolve_speed_limit(&config.max_overall_speed, live_share);
         }
-        let (is_yt, url) = {
+        let (is_yt, url, stage) = {
             let i = info.lock().await;
-            (i.is_youtube, i.url.clone())
+            (i.is_youtube, i.url.clone(), i.escalation)
         };
 
         if is_yt {
             // YouTube: yt-dlp dengan dialog kualitas (behavior lama)
             youtube::download(info.clone(), tx.clone(), &config).await;
+        } else if stage >= MAX_ESCALATION {
+            // v4.2.0 tahap 2 tangga eskalasi: server sudah dua kali menolak
+            // request aria2, jadi resolver universal yt-dlp dijalankan dengan
+            // impersonasi sidik jari TLS browser (`universal::download`
+            // membaca flag `impersonate` dari item). TANPA fallback aria2:
+            // mengulang request yang sudah ditolak tidak akan mengubah
+            // jawaban server.
+            let outcome = universal::download(info.clone(), tx.clone(), &config).await;
+            if matches!(outcome, universal::Outcome::Failed) {
+                let mut i = info.lock().await;
+                if !matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
+                    // Jaring pengaman v3.3.2 tetap hidup: kegagalan di tahap
+                    // ini hampir pasti penolakan server lagi, jadi tandai
+                    // access_denied supaya `needs_browser_handback` (atau
+                    // Error terminal bila handback dimatikan) berlaku.
+                    // Status WAJIB kembali Error: universal meresetnya ke
+                    // Downloading untuk fallback aria2 yang di tahap ini tidak
+                    // ada — tanpa ini kartu menggantung di "MENGUNDUH" 0 B dan
+                    // poll handback menjawab pending selamanya.
+                    i.status = DownloadStatus::Error;
+                    i.access_denied = true;
+                    i.speed = 0;
+                    i.error_msg = String::from("Server tetap menolak semua percobaan Fast-DM.");
+                    let _ = tx.send(DownloadEvent::Progress(i.clone()));
+                }
+            }
         } else if is_direct_file_url(&url) {
             // v2.9.0 (B2.2): http/https/ftp file langsung → daemon RPC aria2 —
 
@@ -802,6 +870,10 @@ pub(crate) fn handback_state_of(i: &DownloadInfo) -> HandbackState {
         // Error yang worker-nya belum lepas slot, atau retry otomatis masih
         // tertunda: keputusan akhir belum ada (retry bisa saja berakhir 403).
         DownloadStatus::Error if i.worker_active || i.resume_pending => HandbackState::Pending,
+        // v4.2.0: penolakan server yang tangganya belum habis masih akan
+        // dicoba Fast-DM sendiri (retry eskalasi) — extension harus menunggu,
+        // bukan mulai mengunduh lewat browser.
+        DownloadStatus::Error if i.ladder_running() => HandbackState::Pending,
         _ => HandbackState::Done,
     }
 }
@@ -1712,6 +1784,8 @@ mod tests {
         {
             let mut i = info.lock().await;
             i.access_denied = true;
+            // v4.2.0: handback hanya setelah tangga eskalasi habis.
+            i.escalation = MAX_ESCALATION;
             i.error_msg = "aria2c gagal (exit 22): server menolak permintaan".into();
         }
         assert_eq!(
@@ -1776,6 +1850,59 @@ mod tests {
             HandbackState::Done
         );
         assert_eq!(other.lock().await.status, DownloadStatus::Error);
+    }
+
+    /// v4.2.0: selama tangga eskalasi belum habis, poll `handback` menjawab
+    /// PENDING — extension tidak boleh mulai mengunduh lewat browser sambil
+    /// Fast-DM masih mencoba dengan request yang berbeda.
+    #[tokio::test]
+    async fn handback_stays_pending_while_escalation_ladder_runs() {
+        let engine = lifecycle_engine();
+        let info = lifecycle_item(&engine, "ladder", DownloadStatus::Error).await;
+        {
+            let mut i = info.lock().await;
+            i.access_denied = true;
+            i.escalation = MAX_ESCALATION - 1;
+        }
+        assert_eq!(
+            engine.poll_browser_handback("ladder").await,
+            HandbackState::Pending
+        );
+        assert_eq!(
+            info.lock().await.status,
+            DownloadStatus::Error,
+            "item belum boleh diserahkan/dibatalkan"
+        );
+
+        // Tahap terakhir dijadwalkan & gagal → barulah handback terbuka.
+        info.lock().await.escalation = MAX_ESCALATION;
+        assert_eq!(
+            engine.poll_browser_handback("ladder").await,
+            HandbackState::Handback
+        );
+    }
+
+    /// v4.2.0: Pengaturan `auto_browser_handback = false` membuat Fast-DM
+    /// memegang unduhan sampai akhir — poll menjawab Done tanpa menandai item,
+    /// sehingga extension tidak memulai unduhan browser yang lambat & tak
+    /// bisa dilanjut; kartu tetap Error dengan tombol Ulangi.
+    #[tokio::test]
+    async fn handback_can_be_disabled_so_fast_dm_keeps_the_download() {
+        let engine = lifecycle_engine();
+        engine.config.write().await.auto_browser_handback = false;
+        let info = lifecycle_item(&engine, "keep", DownloadStatus::Error).await;
+        {
+            let mut i = info.lock().await;
+            i.access_denied = true;
+            i.escalation = MAX_ESCALATION;
+        }
+        assert_eq!(
+            engine.poll_browser_handback("keep").await,
+            HandbackState::Done
+        );
+        let i = info.lock().await;
+        assert_eq!(i.status, DownloadStatus::Error);
+        assert_ne!(i.status_detail, HANDBACK_DETAIL);
     }
 
     async fn lifecycle_item(

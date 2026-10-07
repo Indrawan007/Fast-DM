@@ -3,6 +3,31 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [4.2.0] - 2026-10-07
+
+Unduhan yang servernya menolak Fast-DM (HTTP 403/login/anti-bot) kini dicoba
+sendiri dulu oleh Fast-DM lewat tangga eskalasi — penyerahan ke browser
+(single-connection, tidak bisa dilanjut) menjadi jalan terakhir, dan bisa
+dimatikan sama sekali dari Pengaturan.
+
+### Added
+
+- **Tangga eskalasi "Fast-DM dulu" (2 tahap) sebelum handback ke browser** — tahap 1 retry dengan cookie/header TERBARU yang didorong extension ditambah set header navigasi browser (`Accept`, `Sec-Fetch-*`, `Upgrade-Insecure-Requests`; `Accept-Encoding` sengaja absen agar file tersimpan tidak ikut terkompresi); tahap 2 menjalankan resolver universal yt-dlp dengan impersonasi sidik jari TLS Chrome (`--impersonate`, target dideteksi otomatis lewat `--list-impersonate-targets` — bila yt-dlp tanpa curl_cffi, argumen dilewati dan yt-dlp polos yang jalan). Hanya setelah kedua tahap gagal, jaring pengaman v3.3.2 (browser mengunduh sendiri) berlaku lagi.
+- **Aksi IPC `refresh`** — ±5 detik setelah intersep diterima, extension mendorong cookie + header terkini (`User-Agent`, `Accept-Language`, jar cookie lengkap) untuk unduhan yang sedang berjalan; cookie ditulis ulang ke `cookies_<host>.txt` setelah divalidasi terhadap host item. Sama seperti `handback`, aksi ini tidak menyalakan GUI.
+- **Pengaturan baru "Serahkan ke browser bila server terus menolak Fast-DM"** (default ON, kompatibel v3.3.2). Dimatikan = unduhan tetap dipegang Fast-DM sampai akhir: kartu berhenti sebagai GAGAL dengan tombol Ulangi, dan extension tidak memulai unduhan browser yang lambat & tak bisa dilanjut.
+- `packaging/PKGBUILD`: `python-curl_cffi` menjadi optdepend — dibutuhkan yt-dlp untuk `--impersonate`; tanpa paket itu tahap 2 otomatis jatuh ke yt-dlp polos.
+
+### Fixed
+
+- **Gerbang `cargo fmt` CI merah di main** — rust 1.99 di image Arch memperbarui rustfmt dan meminta tiga perubahan format di `src/gui/window.rs` (let-else satu baris → blok, pemanggilan 100 kolom digabung, rantai method dipecah). Drift ini ada sebelum rilis ini; diterapkan agar gerbang hijau lagi.
+- **Error kompilasi di HEAD main ("Update GUI")** — dialog Pengaturan memuat blok baris ganda: Folder unduhan/Koneksi per server/Unduhan bersamaan di-append dua kali (langsung ke isi dialog DAN ke form scroll), plus sisa deklarasi `speed_box` yang tak terpakai sehingga clippy `-D warnings` menolak CI. Blok mati dibuang; setiap baris kini muncul sekali di dalam form yang bisa digulir.
+
+### Changed
+
+- `schedule_auto_retry`: penolakan server (`access_denied`) tidak lagi langsung terminal — selama tangga eskalasi belum habis, tiap penolakan menjadwalkan satu percobaan lagi dengan request yang BERBEDA; kegagalan transient tetap memakai budget lama (`MAX_AUTO_RETRIES`).
+- Poll IPC `handback` menjawab `pending` selama tangga eskalasi berjalan, supaya extension tidak mulai mengunduh lewat browser sambil Fast-DM masih mencoba; keterangan tahap ditampilkan di kartu (`status_detail`).
+- Tombol Ulangi memulai tangga eskalasi dari awal (percobaan manual = sesi baru).
+
 ## [4.1.0] - 2026-10-06
 
 Layout GTK4 kini lebih nyaman dipakai pada jendela kecil dan split/tile Hyprland.

@@ -56,6 +56,58 @@ fn ytdlp_partial_exists(save_dir: &str, filename: &str) -> bool {
     })
 }
 
+/// v4.2.0: target impersonasi TLS untuk tahap 2 tangga eskalasi.
+///
+/// `--impersonate` hanya ada bila yt-dlp dibangun dengan curl_cffi (opsional
+/// di Arch: `python-curl_cffi`). Probe gagal/daftar kosong → `None` dan
+/// unduhan jalan dengan yt-dlp polos, jadi tidak ada jalur yang mati karena
+/// fitur opsional ini absen.
+async fn impersonation_target() -> Option<String> {
+    static TARGET: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    if let Some(cached) = TARGET.get() {
+        return cached.clone();
+    }
+    let found = tokio::task::spawn_blocking(|| {
+        let out = Command::new("yt-dlp")
+            .arg("--list-impersonate-targets")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        parse_impersonation_target(&String::from_utf8_lossy(&out.stdout))
+    })
+    .await
+    .unwrap_or(None);
+    let _ = TARGET.set(found.clone());
+    found
+}
+
+/// Inti murni `impersonation_target`: kolom pertama tabel
+/// `--list-impersonate-targets` adalah keluarga client (`chrome`,
+/// `chrome_mobile`, `safari`, …). Keluarga chrome desktop diprioritaskan;
+/// keluarga chrome lain (mobile) tetap dipakai sebagai fallback karena
+/// `--impersonate chrome` diterima yt-dlp sebagai "chrome versi apa pun".
+pub(crate) fn parse_impersonation_target(list: &str) -> Option<String> {
+    let mut chrome_family = false;
+    for line in list.lines() {
+        let Some(client) = line.split_whitespace().next() else {
+            continue;
+        };
+        if client == "chrome" {
+            return Some("chrome".to_string());
+        }
+        if client.starts_with("chrome") {
+            chrome_family = true;
+        }
+    }
+    if chrome_family {
+        Some("chrome".to_string())
+    } else {
+        None
+    }
+}
+
 /// v3.3.4: tanyakan nama asli ke server lalu adopsi ke item unduhan — hanya
 /// bila nama sekarang benar-benar belum diketahui.
 ///
@@ -127,7 +179,7 @@ pub async fn download(
     // Guard: user bisa cancel/pause di jeda sebelum child proses lahir
     // (pid belum ada → kill_child_pid tidak berdampak). Tanpa guard, status
     // ditimpa Downloading dan download yang "dibatalkan" jalan terus.
-    let (url, save_dir, headers, quality, filename) = {
+    let (url, save_dir, headers, quality, filename, impersonate) = {
         let mut i = info.lock().await;
         if matches!(i.status, DownloadStatus::Cancelled | DownloadStatus::Paused) {
             return Outcome::Failed;
@@ -140,6 +192,7 @@ pub async fn download(
             i.headers.clone(),
             i.quality.clone(),
             i.filename.clone(),
+            i.impersonate,
         )
     };
 
@@ -278,6 +331,17 @@ pub async fn download(
         if !k.is_empty() && !v.is_empty() {
             cmd.push("--add-header".into());
             cmd.push(format!("{}:{}", k, v));
+        }
+    }
+    // v4.2.0 (tahap 2 tangga eskalasi): server yang menolak karena sidik jari
+    // TLS non-browser (WAF/anti-bot) tidak bisa diyakinkan lewat header apa
+    // pun. yt-dlp + curl_cffi mampu meniru handshake Chrome (`--impersonate`);
+    // target dipilih dari `--list-impersonate-targets` dan TANPA target yang
+    // tersedia argumen ini dilewati (yt-dlp polos tetap jalur fallback).
+    if impersonate {
+        if let Some(target) = impersonation_target().await {
+            cmd.push("--impersonate".into());
+            cmd.push(target);
         }
     }
     // Jangan taruh signed URL di argv (`/proc/<pid>/cmdline`). yt-dlp membaca
@@ -426,5 +490,34 @@ mod tests {
 
         let _ = std::fs::remove_file(path(".ytdl"));
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    // ── v4.2.0: pemilihan target impersonasi TLS ──
+
+    /// Tabel nyata yt-dlp (kolom Client/OS/Version) dengan chrome desktop →
+    /// target generik "chrome" (diterima sebagai "versi apa pun").
+    #[test]
+    fn impersonation_target_prefers_desktop_chrome() {
+        let table = "Client OS Version\nchrome windows 131\nchrome_mobile android 131\n";
+        let picked = parse_impersonation_target(table);
+        assert_eq!(picked.as_deref(), Some("chrome"));
+    }
+
+    /// Hanya keluarga chrome lain (mobile) → tetap "chrome", bukan None:
+    /// lebih baik sidik jari chrome mobile daripada tanpa impersonasi.
+    #[test]
+    fn impersonation_target_falls_back_to_chrome_family() {
+        let table = "Client OS Version\nchrome_mobile android 120\n";
+        let picked = parse_impersonation_target(table);
+        assert_eq!(picked.as_deref(), Some("chrome"));
+    }
+
+    /// Tanpa keluarga chrome (atau daftar kosong/keluarannya error) → None:
+    /// argumen `--impersonate` dilewati, yt-dlp polos yang jalan.
+    #[test]
+    fn impersonation_target_absent_without_chrome() {
+        let picked = parse_impersonation_target("Client OS Version\nsafari macos 18\n");
+        assert_eq!(picked, None);
+        assert_eq!(parse_impersonation_target(""), None);
     }
 }

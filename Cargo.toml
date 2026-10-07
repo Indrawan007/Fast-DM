@@ -1,6 +1,6 @@
 [package]
 name = "fast-dm"
-version = "4.1.0"
+version = "4.2.0"
 edition = "2021"
 authors = ["FastDM Contributors"]
 description = "Arch Linux download manager for Hyprland/Wayland with browser integration"
