@@ -166,9 +166,20 @@ fn build_aria2_cmd(
         format!("--dir={}", info.save_dir),
         format!(
             "--max-connection-per-server={}",
-            conn_per_server(config.max_connections)
+            if info.rate_limited {
+                1
+            } else {
+                conn_per_server(config.max_connections)
+            }
         ),
-        format!("--split={}", config.max_connections.max(1)),
+        format!(
+            "--split={}",
+            if info.rate_limited {
+                1
+            } else {
+                config.max_connections.max(1)
+            }
+        ),
         // v2.11.2 (F16): nilai datang dari konstanta yang sama dengan jalur
         // daemon RPC — lihat `MIN_SPLIT_SIZE` untuk alasan 512K tidak pernah sah.
         format!("--min-split-size={MIN_SPLIT_SIZE}"),
@@ -289,6 +300,13 @@ pub(crate) fn effective_user_agent(headers: &std::collections::HashMap<String, S
         .unwrap_or_else(|| CHROME_UA.to_string())
 }
 
+/// Apakah body penolakan menandakan pembatasan laju (rate limit) server,
+/// mis. DDoS-Guard: "Are you a bot or using download tools? ... rate limits".
+pub(crate) fn is_rate_limit_body(body: &str) -> bool {
+    let b = body.to_ascii_lowercase();
+    b.contains("rate limit") || b.contains("are you a bot")
+}
+
 /// Ringkasan respons pra-cek yang ditolak, untuk log debug. Hanya header
 /// identifikasi server/anti-bot dan potongan awal body, tanpa cookie.
 pub(crate) fn describe_probe_rejection(
@@ -320,6 +338,23 @@ pub(crate) fn describe_probe_rejection(
         antibot.join(","),
         snippet.trim()
     )
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::is_rate_limit_body;
+
+    #[test]
+    fn ddos_guard_rate_limit_body_is_detected() {
+        let body = "Are you a bot or using download tools? Please show respect and use reasonable rate limits with downloading (no more than 1 request per second, and 5 active downloads)";
+        assert!(is_rate_limit_body(body));
+    }
+
+    #[test]
+    fn ordinary_forbidden_body_is_not_rate_limit() {
+        assert!(!is_rate_limit_body("<html>403 Forbidden</html>"));
+        assert!(!is_rate_limit_body(""));
+    }
 }
 
 #[cfg(test)]
@@ -1094,9 +1129,18 @@ pub(crate) async fn resolve_filename(
             "Respons pra-cek ditolak: {}",
             describe_probe_rejection(first, &probe_headers, &probe_body)
         );
-        let retry = match build_head().send().await {
-            Ok(r) if r.status().is_success() => Some(r),
-            _ => None,
+        let rate_limited = is_rate_limit_body(&probe_body);
+        if rate_limited {
+            info.lock().await.rate_limited = true;
+        }
+        // Rate limit: HEAD ulang hanya menambah request yang memperparah pembatasan.
+        let retry = if rate_limited {
+            None
+        } else {
+            match build_head().send().await {
+                Ok(r) if r.status().is_success() => Some(r),
+                _ => None,
+            }
         };
         match retry {
             Some(r) => r,
@@ -1113,8 +1157,11 @@ pub(crate) async fn resolve_filename(
                     apply_content_disposition(&mut i, probe_cd.as_deref());
                     apply_final_url_name(&mut i, Some(probe_final_url.as_str()), &url);
                     apply_unique_filename(&mut i, config.auto_file_renaming);
-                    i.status_detail =
-                        format!("Pra-cek HTTP {first} diabaikan — mencoba langsung lewat aria2…");
+                    i.status_detail = if rate_limited {
+                        "Server membatasi laju unduhan — memakai 1 koneksi…".to_string()
+                    } else {
+                        format!("Pra-cek HTTP {first} diabaikan — mencoba langsung lewat aria2…")
+                    };
                     return Ok(());
                 }
             },

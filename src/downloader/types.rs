@@ -88,6 +88,11 @@ pub struct DownloadInfo {
     /// `handback`). Runtime-only: direset setiap start.
     #[serde(skip)]
     pub(crate) access_denied: bool,
+    /// Server membatasi laju (DDoS-Guard: ~1 request/detik, 5 unduhan aktif).
+    /// Unduhan seperti ini memakai 1 koneksi dan tidak mengulang probe HEAD.
+    /// Runtime-only: direset setiap percobaan.
+    #[serde(skip)]
+    pub(crate) rate_limited: bool,
     /// v3.3.4: nama ini dipilih USER (dialog "Simpan Sebagai..."), bukan hasil
     /// tebakan Fast-DM atau browser. Probe `Content-Disposition` di jalur
     /// yt-dlp (`aria2::probe_real_filename`) TIDAK boleh menimpanya — user yang
@@ -131,6 +136,7 @@ impl DownloadInfo {
             retry_after: None,
             auto_retry_count: 0,
             access_denied: false,
+            rate_limited: false,
             user_named: false,
             created: chrono::Utc::now().timestamp_millis(),
         }
@@ -183,6 +189,7 @@ impl DownloadInfo {
         // Percobaan baru dimulai bersih; kegagalan baru akan menulisnya lagi.
         self.error_msg.clear();
         self.access_denied = false;
+        self.rate_limited = false;
         self.status = if slot_available {
             DownloadStatus::Resolving
         } else {

@@ -899,7 +899,7 @@ pub async fn download(
     // sebagai opsi `out`. Daemon lalu memakai `Content-Disposition`/URL final
     // (lihat `aria2::should_force_out_name`), dan namanya diadopsi dari
     // `files[0].path` di loop poll bawah.
-    let (out, headers) = {
+    let (out, headers, rate_limited) = {
         let i = info.lock().await;
         // `if` eksplisit (bukan `bool::then`) supaya clone tidak dievaluasi
         // malas — sekaligus menghindari lint `unnecessary_lazy_evaluations`.
@@ -912,9 +912,14 @@ pub async fn download(
         } else {
             None
         };
-        (filename, i.headers.clone())
+        (filename, i.headers.clone(), i.rate_limited)
     };
-    let options = adduri_options(&save_dir, out.as_deref(), &headers, cfg);
+    let mut options = adduri_options(&save_dir, out.as_deref(), &headers, cfg);
+    if rate_limited {
+        // Server membatasi laju: satu koneksi per unduhan.
+        options["max-connection-per-server"] = json!("1");
+        options["split"] = json!("1");
+    }
 
     // pause-true dulu: hindari balapan "sudah jalan" sebelum tick pertama.
     // v2.9.1: pause/resume NATIVE — bila unduhan ini sebelumnya dijeda
