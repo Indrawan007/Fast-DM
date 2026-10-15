@@ -1649,7 +1649,7 @@ pub fn extract_filename_from_url(url: &str) -> String {
             let k_lower = k.to_ascii_lowercase();
             if matches!(
                 k_lower.as_str(),
-                "filename" | "file" | "name" | "title" | "fn"
+                "filename" | "file" | "f" | "name" | "title" | "fn"
             ) {
                 let cleaned = sanitize_filename(&v);
                 if !cleaned.is_empty() && cleaned.contains('.') && !is_script_extension(&cleaned) {
@@ -2911,5 +2911,16 @@ mod tests {
         assert!(!is_direct_file_url("https://x.test/manifest.mpd?v=2"));
         assert!(!DIRECT_FILE_EXTENSIONS.contains(&".m3u8"));
         assert!(!DIRECT_FILE_EXTENSIONS.contains(&".mpd"));
+    }
+}
+
+#[cfg(test)]
+mod f_param_filename_tests {
+    use super::extract_filename_from_url;
+
+    #[test]
+    fn short_f_query_param_gives_original_name() {
+        let url = "https://file.pawchive.pw/data/cc/0c/abc123.zip?f=NadineFD.zip";
+        assert_eq!(extract_filename_from_url(url), "NadineFD.zip");
     }
 }

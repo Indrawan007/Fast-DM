@@ -270,11 +270,18 @@ pub(crate) fn adduri_options(
     let hs: Vec<String> = headers
         .iter()
         .map(|(k, v)| (k.replace(['\r', '\n'], ""), v.replace(['\r', '\n'], "")))
-        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty() && !k.eq_ignore_ascii_case("user-agent"))
         .map(|(k, v)| format!("{k}: {v}"))
         .collect();
     if !hs.is_empty() {
         o.insert("header".into(), json!(hs));
+    }
+    // User-Agent browser jadi opsi per-URI tunggal (bukan header ganda).
+    if headers.keys().any(|k| k.eq_ignore_ascii_case("user-agent")) {
+        o.insert(
+            "user-agent".into(),
+            json!(aria2::effective_user_agent(headers)),
+        );
     }
     o.insert("timeout".into(), json!(cfg.timeout.to_string()));
     o.insert("connect-timeout".into(), json!("15"));

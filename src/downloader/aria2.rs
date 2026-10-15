@@ -193,7 +193,7 @@ fn build_aria2_cmd(
         "--max-resume-failure-tries=5".into(),
         format!("--disk-cache={}", config.disk_cache_size),
         format!("--file-allocation={}", config.file_allocation),
-        format!("--user-agent={}", CHROME_UA),
+        format!("--user-agent={}", effective_user_agent(&info.headers)),
         "--console-log-level=notice".into(),
         "--summary-interval=1".into(),
         "--human-readable=false".into(),
@@ -241,7 +241,8 @@ fn build_aria2_cmd(
     for (k, v) in &info.headers {
         let k = k.replace(['\r', '\n'], "");
         let v = v.replace(['\r', '\n'], "");
-        if !k.is_empty() && !v.is_empty() {
+        // User-Agent sudah dikirim lewat --user-agent; jangan dobel sebagai header.
+        if !k.is_empty() && !v.is_empty() && !k.eq_ignore_ascii_case("user-agent") {
             cmd.push(format!("--header={}: {}", k, v));
         }
     }
@@ -277,6 +278,71 @@ fn build_aria2_cmd(
 /// Sekarang: `ChildLines` (baca cancellation-safe), ticker 500ms untuk cek
 /// status walau child diam, wait pause terbatas 30 dtk dengan eskalasi SIGKILL,
 /// dan `kill_on_drop` sebagai jaring pengaman bila future seluruhnya di-drop.
+/// User-Agent untuk aria2: UA browser dari header extension bila ada (cookie
+/// anti-bot terikat ke browser itu), jika tidak pakai `CHROME_UA`.
+pub(crate) fn effective_user_agent(headers: &std::collections::HashMap<String, String>) -> String {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+        .map(|(_, v)| v.replace(['\r', '\n'], ""))
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| CHROME_UA.to_string())
+}
+
+/// Ringkasan respons pra-cek yang ditolak, untuk log debug. Hanya header
+/// identifikasi server/anti-bot dan potongan awal body, tanpa cookie.
+pub(crate) fn describe_probe_rejection(
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    body: &str,
+) -> String {
+    let get = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-")
+            .to_string()
+    };
+    let antibot: Vec<&str> = headers
+        .keys()
+        .map(|k| k.as_str())
+        .filter(|n| n.starts_with("cf-") || n.contains("ddos") || n.contains("challenge"))
+        .collect();
+    let snippet: String = body
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(200)
+        .collect();
+    format!(
+        "status={status} server={} content-type={} antibot-headers=[{}] body=\"{}\"",
+        get("server"),
+        get("content-type"),
+        antibot.join(","),
+        snippet.trim()
+    )
+}
+
+#[cfg(test)]
+mod user_agent_tests {
+    use super::{effective_user_agent, CHROME_UA};
+    use std::collections::HashMap;
+
+    #[test]
+    fn browser_user_agent_header_wins_over_default() {
+        let mut h = HashMap::new();
+        h.insert("User-Agent".to_string(), "BrowserUA/1.0".to_string());
+        assert_eq!(effective_user_agent(&h), "BrowserUA/1.0");
+    }
+
+    #[test]
+    fn falls_back_to_chrome_ua() {
+        assert_eq!(effective_user_agent(&HashMap::new()), CHROME_UA);
+        let mut h = HashMap::new();
+        h.insert("User-Agent".to_string(), "  ".to_string());
+        assert_eq!(effective_user_agent(&h), CHROME_UA);
+    }
+}
+
 /// Susun argumen aria2 untuk log debug. Nilai header disembunyikan (nama
 /// tetap terlihat) karena bisa membawa data sensitif.
 fn redact_argv(cmd: &[String]) -> String {
@@ -1022,6 +1088,12 @@ pub(crate) async fn resolve_filename(
         resp
     } else {
         let first = resp.status().as_u16();
+        let probe_headers = resp.headers().clone();
+        let probe_body = resp.text().await.unwrap_or_default();
+        tracing::debug!(
+            "Respons pra-cek ditolak: {}",
+            describe_probe_rejection(first, &probe_headers, &probe_body)
+        );
         let retry = match build_head().send().await {
             Ok(r) if r.status().is_success() => Some(r),
             _ => None,
