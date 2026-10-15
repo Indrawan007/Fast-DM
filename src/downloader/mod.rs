@@ -552,6 +552,9 @@ impl DownloadEngine {
         let mut i = info.lock().await;
         if i.needs_browser_handback() {
             i.status = DownloadStatus::Cancelled;
+            // Alasan asli penolakan (kode exit aria2 + stderr) dicatat dulu
+            // sebelum dihapus — tanpa ini log tidak pernah memuatnya.
+            tracing::debug!("Alasan asli penolakan {}: {}", i.id, i.error_msg);
             i.access_denied = false;
             i.error_msg.clear();
             i.speed = 0;

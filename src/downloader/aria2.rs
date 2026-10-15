@@ -117,6 +117,7 @@ pub async fn download(
         command
     };
 
+    tracing::debug!("aria2 argv: {}", redact_argv(&cmd));
     tracing::info!("Downloading: {}", info.lock().await.filename);
 
     // Spawn aria2c — v2.3.1 (M1): async penuh, tanpa spawn_blocking
@@ -276,6 +277,39 @@ fn build_aria2_cmd(
 /// Sekarang: `ChildLines` (baca cancellation-safe), ticker 500ms untuk cek
 /// status walau child diam, wait pause terbatas 30 dtk dengan eskalasi SIGKILL,
 /// dan `kill_on_drop` sebagai jaring pengaman bila future seluruhnya di-drop.
+/// Susun argumen aria2 untuk log debug. Nilai header disembunyikan (nama
+/// tetap terlihat) karena bisa membawa data sensitif.
+fn redact_argv(cmd: &[String]) -> String {
+    cmd.iter()
+        .map(|a| match a.strip_prefix("--header=") {
+            Some(rest) => format!(
+                "--header={}: <redacted>",
+                rest.split(':').next().unwrap_or("")
+            ),
+            None => a.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod redact_argv_tests {
+    use super::redact_argv;
+
+    #[test]
+    fn redacts_header_values_but_keeps_names() {
+        let cmd = vec![
+            "aria2c".to_string(),
+            "--header=Referer: https://site.example/page?token=abc".to_string(),
+            "--dir=/dl".to_string(),
+        ];
+        let out = redact_argv(&cmd);
+        assert!(out.contains("--header=Referer: <redacted>"));
+        assert!(!out.contains("token=abc"));
+        assert!(out.contains("--dir=/dl"));
+    }
+}
+
 async fn run_aria2c(
     cmd: Vec<String>,
     info: Arc<Mutex<DownloadInfo>>,
