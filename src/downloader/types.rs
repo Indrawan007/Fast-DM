@@ -7,6 +7,9 @@ use std::time::{Duration, Instant};
 /// menyelamatkan kegagalan transient (network, resolver, atau daemon restart).
 pub(crate) const MAX_AUTO_RETRIES: u8 = 2;
 
+/// Jeda minimum retry untuk unduhan yang terkena pembatasan laju server.
+pub(crate) const RATE_LIMIT_MIN_RETRY_SECS: u64 = 30;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DownloadStatus {
@@ -217,9 +220,13 @@ impl DownloadInfo {
 
         self.auto_retry_count = self.auto_retry_count.saturating_add(1);
         let multiplier = 1u64 << u32::from(self.auto_retry_count - 1);
-        let seconds = u64::from(retry_wait.max(1))
+        let mut seconds = u64::from(retry_wait.max(1))
             .saturating_mul(multiplier)
             .min(60);
+        // Pembatasan laju server (1 request/detik) butuh jeda lebih panjang.
+        if self.rate_limited {
+            seconds = seconds.max(RATE_LIMIT_MIN_RETRY_SECS);
+        }
         let delay = Duration::from_secs(seconds);
         self.retry_after = Some(Instant::now() + delay);
         self.resume_pending = true;
@@ -730,3 +737,40 @@ mod tests {
         assert!(info.status_detail.is_empty()); // field baru → default "" (M10)
     }
 }
+
+#[cfg(test)]
+mod rate_limit_retry_tests {
+    use super::*;
+
+    #[test]
+    fn rate_limited_download_waits_at_least_min_delay() {
+        let mut info = DownloadInfo::new(
+            "rl".into(),
+            "https://example.com/a.zip".into(),
+            "a.zip".into(),
+            "/tmp".into(),
+            HashMap::new(),
+            None,
+        );
+        info.status = DownloadStatus::Error;
+        info.rate_limited = true;
+        let delay = info.schedule_auto_retry(3).expect("retry dijadwalkan");
+        assert!(delay >= Duration::from_secs(RATE_LIMIT_MIN_RETRY_SECS));
+    }
+
+    #[test]
+    fn access_denied_is_never_auto_retried() {
+        let mut info = DownloadInfo::new(
+            "ad".into(),
+            "https://example.com/a.zip".into(),
+            "a.zip".into(),
+            "/tmp".into(),
+            HashMap::new(),
+            None,
+        );
+        info.status = DownloadStatus::Error;
+        info.access_denied = true;
+        assert!(info.schedule_auto_retry(3).is_none());
+    }
+}
+

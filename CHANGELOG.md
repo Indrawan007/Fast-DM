@@ -13,6 +13,7 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 - **Nama file dari `?f=`** dikenali sebagai nama asli (mis. `NadineFD.zip`, bukan hash).
 - **Unduhan dari host dengan pembatasan laju diblokir 403** — server (DDoS-Guard) membatasi 1 request/detik dan 5 unduhan aktif, sedangkan Fast-DM membuka 16 koneksi sekaligus. Unduhan yang terdeteksi dibatasi ke 1 koneksi dan tidak mengulang probe HEAD.
 - **Nama file dari `?f=` dipakai walau browser memberi nama hash** — nama hash (mis. `cc0c….zip`) kini diganti nama asli dari URL bila tersedia.
+- **Rate limit tidak lagi langsung diserahkan ke browser** — unduhan yang kena pembatasan laju server kini dijadwalkan ulang otomatis (minimal 30 detik), dan tidak menjalankan aria2 yang menambah request.
 - **Log pra-cek lebih informatif** — respons yang ditolak dicatat di level debug (status, server, header anti-bot, potongan body) tanpa cookie.
 
 ## [4.1.0] - 2026-10-06

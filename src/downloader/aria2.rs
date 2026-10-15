@@ -1180,6 +1180,15 @@ pub(crate) async fn resolve_filename(
                 _ => None,
             }
         };
+        // Rate limit: jangan jalankan aria2 (request tambahan yang memperparah
+        // pembatasan, lalu malah diserahkan ke browser). Gagalkan dengan pesan
+        // biasa — bukan `access_denied` — agar supervisor menjadwalkan ulang.
+        if rate_limited {
+            return Err(
+                "Server membatasi laju unduhan (rate limit). Dicoba lagi otomatis sebentar lagi."
+                    .to_string(),
+            );
+        }
         match retry {
             Some(r) => r,
             None => match probe_verdict(first) {
