@@ -341,6 +341,34 @@ pub(crate) fn describe_probe_rejection(
 }
 
 #[cfg(test)]
+mod hash_name_tests {
+    use super::*;
+
+    #[test]
+    fn hash_filename_is_upgraded_from_url_query() {
+        let url = "https://file.pawchive.pw/data/cc/0c/cc0c601a7a1c6d6f5a411739c409b58b774d6965d9c2bb213f9facf12b0bea5c.zip?f=NadineFD.zip";
+        let hash = "cc0c601a7a1c6d6f5a411739c409b58b774d6965d9c2bb213f9facf12b0bea5c.zip";
+        let mut item = DownloadInfo::new(
+            "h".into(),
+            url.into(),
+            hash.into(),
+            "unused".into(),
+            Default::default(),
+            None,
+        );
+        apply_final_url_name(&mut item, Some(url), url);
+        assert_eq!(item.filename, "NadineFD.zip");
+    }
+
+    #[test]
+    fn is_hash_filename_detects_hex_names_only() {
+        assert!(is_hash_filename("cc0c601a7a1c6d6f5a411739c409b58b774d6965d9c2bb213f9facf12b0bea5c.zip"));
+        assert!(!is_hash_filename("NadineFD.zip"));
+        assert!(!is_hash_filename("video.mp4"));
+    }
+}
+
+#[cfg(test)]
 mod rate_limit_tests {
     use super::is_rate_limit_body;
 
@@ -838,6 +866,16 @@ fn apply_content_disposition(i: &mut DownloadInfo, cd: Option<&str>) {
 /// Adopsi nama dari URL final setelah redirect — hanya bila nama sekarang
 /// masih generic (mis. `/open?id=…` → `/unduh/Goatwillow.zip`).
 fn apply_final_url_name(i: &mut DownloadInfo, final_url: Option<&str>, original_url: &str) {
+    // Nama hash (mis. dari Chrome untuk file tanpa nama) bukan nama asli:
+    // pakai nama dari URL asli bila ada (mis. `?f=NadineFD.zip`).
+    if is_hash_filename(&i.filename) {
+        let name = super::extract_filename_from_url(original_url);
+        if !is_generic_filename(&name) && !is_hash_filename(&name) {
+            tracing::info!("Filename from URL query: {}", name);
+            i.filename = name;
+            return;
+        }
+    }
     if !is_generic_filename(&i.filename) {
         return;
     }
@@ -1523,6 +1561,12 @@ pub(crate) fn is_placeholder_filename(name: &str) -> bool {
         && millis.chars().all(|c| c.is_ascii_digit())
         && rnd.len() == 4
         && rnd.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Nama berbentuk hash hex (sha256/md5 dsb.) — dibuat browser/CDN, bukan nama asli.
+pub(crate) fn is_hash_filename(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("");
+    stem.len() >= 32 && stem.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Apakah nama kita dikirim eksplisit ke aria2 (`--out=` / opsi RPC `out`)?
