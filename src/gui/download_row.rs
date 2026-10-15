@@ -46,7 +46,7 @@ impl DownloadRow {
         // C6: tunjukkan URL sumber saat hover (dua file bernama sama jadi bisa dibedakan)
         filename_lbl.set_tooltip_text(Some(&info.url));
 
-        let status_lbl = Label::new(Some(status_label(&info.status)));
+        let status_lbl = Label::new(Some(badge_label(info)));
         status_lbl.add_css_class("badge");
 
         row1.append(&filename_lbl);
@@ -192,7 +192,7 @@ impl DownloadRow {
             self.eta_lbl.set_text("");
         }
 
-        self.status_lbl.set_text(status_label(&info.status));
+        self.status_lbl.set_text(badge_label(info));
         self.update_badge(&info.status);
         self.update_progress_class(&info.status);
 
@@ -286,6 +286,18 @@ impl DownloadRow {
     }
 }
 
+/// Label badge untuk satu item. Item yang diserahkan ke browser (handback)
+/// berstatus `Cancelled` secara internal, tetapi itu bukan pembatalan oleh
+/// user — browser yang melanjutkan unduhannya — jadi badge-nya dibedakan.
+fn badge_label(info: &DownloadInfo) -> &'static str {
+    if info.status == DownloadStatus::Cancelled
+        && info.status_detail == crate::downloader::HANDBACK_DETAIL
+    {
+        return "DISERAHKAN";
+    }
+    status_label(&info.status)
+}
+
 /// B1: label status dalam Bahasa Indonesia (dipakai badge & tooltip).
 fn status_label(status: &DownloadStatus) -> &'static str {
     match status {
@@ -307,4 +319,38 @@ fn make_btn(label: &str, classes: &[&str], tooltip: &str) -> Button {
         btn.add_css_class(c);
     }
     btn
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info_with(status: DownloadStatus, detail: &str) -> DownloadInfo {
+        let mut info = DownloadInfo::new(
+            "id".into(),
+            "https://example.com/a.zip".into(),
+            "a.zip".into(),
+            "/tmp".into(),
+            std::collections::HashMap::new(),
+            None,
+        );
+        info.status = status;
+        info.status_detail = detail.to_string();
+        info
+    }
+
+    #[test]
+    fn handback_shows_diserahkan_not_dibatalkan() {
+        let info = info_with(
+            DownloadStatus::Cancelled,
+            crate::downloader::HANDBACK_DETAIL,
+        );
+        assert_eq!(badge_label(&info), "DISERAHKAN");
+    }
+
+    #[test]
+    fn user_cancel_still_shows_dibatalkan() {
+        let info = info_with(DownloadStatus::Cancelled, "");
+        assert_eq!(badge_label(&info), "DIBATALKAN");
+    }
 }

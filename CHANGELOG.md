@@ -3,6 +3,12 @@
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.1.0/),
 versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Unduhan yang diserahkan ke browser tampil "DIBATALKAN"** — saat server menolak Fast-DM (HTTP 403/anti-bot), item memang ditandai `Cancelled` secara internal, tetapi badge GUI tetap menulis DIBATALKAN padahal browser yang melanjutkan unduhannya. Badge kini menampilkan DISERAHKAN untuk kasus ini; pembatalan oleh user tetap DIBATALKAN.
+
 ## [4.1.0] - 2026-10-06
 
 Layout GTK4 kini lebih nyaman dipakai pada jendela kecil dan split/tile Hyprland.
