@@ -8,7 +8,6 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 ### Fixed
 
 - **Unduhan yang diserahkan ke browser tampil "DIBATALKAN"** — saat server menolak Fast-DM (HTTP 403/anti-bot), item memang ditandai `Cancelled` secara internal, tetapi badge GUI tetap menulis DIBATALKAN padahal browser yang melanjutkan unduhannya. Badge kini menampilkan DISERAHKAN untuk kasus ini; pembatalan oleh user tetap DIBATALKAN.
-- **Cookie basi masih dikirim ke aria2** — jar cookie kini dianggap segar hanya bila ada cookie yang belum kedaluwarsa, bukan hanya karena berkasnya baru diubah.
 - **User-Agent dikirim dua kali** — User-Agent browser dari extension kini menjadi User-Agent tunggal (jalur per-proses dan RPC), tidak lagi ganda dengan User-Agent bawaan.
 - **Nama file dari `?f=`** dikenali sebagai nama asli (mis. `NadineFD.zip`, bukan hash).
 - **Unduhan dari host dengan pembatasan laju diblokir 403** — server (DDoS-Guard) membatasi 1 request/detik dan 5 unduhan aktif, sedangkan Fast-DM membuka 16 koneksi sekaligus. Unduhan yang terdeteksi dibatasi ke 1 koneksi dan tidak mengulang probe HEAD.

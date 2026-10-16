@@ -493,38 +493,10 @@ impl Config {
                     .and_then(|m| m.elapsed().ok())
                     .map(|e| e.as_secs())
                     .unwrap_or(u64::MAX);
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                // Umur berkas saja tidak cukup: cookie anti-bot bisa kedaluwarsa
-                // jauh lebih cepat daripada 24 jam.
-                let has_live = fs::read_to_string(path)
-                    .map(|c| Self::cookie_file_has_live_cookie(&c, now))
-                    .unwrap_or(false);
-                meta.len() > 30 && age < Self::COOKIE_FRESH_SECS && has_live
+                meta.len() > 30 && age < Self::COOKIE_FRESH_SECS
             }
             Err(_) => false,
         }
-    }
-
-    /// Apakah isi file cookie (format Netscape) memuat minimal satu cookie yang
-    /// belum kedaluwarsa. Expiry 0 = cookie sesi, dianggap masih berlaku.
-    pub fn cookie_file_has_live_cookie(content: &str, now_secs: u64) -> bool {
-        content.lines().any(|line| {
-            let line = line.trim_end_matches('\r');
-            // `#HttpOnly_<domain>` tetap berisi cookie, bukan komentar.
-            let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
-            if line.starts_with('#') || line.trim().is_empty() {
-                return false;
-            }
-            let fields: Vec<&str> = line.split('\t').collect();
-            if fields.len() < 7 {
-                return false;
-            }
-            let expires: u64 = fields[4].trim().parse().unwrap_or(0);
-            expires == 0 || expires > now_secs
-        })
     }
 
     /// Cari file cookie yang fresh — wrapper `find_cookies_file` + freshness.
@@ -1063,33 +1035,5 @@ mod tests {
         assert!(!is_valid_proxy_url("ftp://proxy:21"));
         assert!(!is_valid_proxy_url("http://")); // host kosong
         assert!(!is_valid_proxy_url("not a url"));
-    }
-}
-
-#[cfg(test)]
-mod live_cookie_tests {
-    use super::Config;
-
-    #[test]
-    fn expired_only_jar_is_not_live() {
-        let jar = "# Netscape HTTP Cookie File\n.host.example\tTRUE\t/\tFALSE\t100\t__ddg8_\tx\n";
-        assert!(!Config::cookie_file_has_live_cookie(jar, 1_000));
-    }
-
-    #[test]
-    fn jar_with_one_future_cookie_is_live() {
-        let jar = "# Netscape\n.host.example\tTRUE\t/\tFALSE\t100\t__ddg8_\tx\n\
-                   .host.example\tTRUE\t/\tFALSE\t5000\t__ddg1_\ty\n";
-        assert!(Config::cookie_file_has_live_cookie(jar, 1_000));
-    }
-
-    #[test]
-    fn session_and_httponly_cookies_are_handled() {
-        assert!(Config::cookie_file_has_live_cookie(".h\tTRUE\t/\tFALSE\t0\tsid\tv\n", 1_000));
-        assert!(Config::cookie_file_has_live_cookie(
-            "#HttpOnly_.h\tTRUE\t/\tFALSE\t5000\tsid\tv\n",
-            1_000
-        ));
-        assert!(!Config::cookie_file_has_live_cookie("# hanya komentar\n", 1_000));
     }
 }
