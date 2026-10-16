@@ -7,6 +7,7 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ### Fixed
 
+- **Unduhan gagal "error tidak diketahui" saat RPC aria2 aktif di `aria2.conf`** — proses `aria2c` per-unduhan ikut membuka port RPC (6800) dari konfigurasi user dan bentrok dengan daemon ("Address already in use"), sehingga aria2 mati sebelum mengunduh. Proses per-unduhan kini selalu mematikan RPC (`--enable-rpc=false`).
 - **Unduhan yang diserahkan ke browser tampil "DIBATALKAN"** — saat server menolak Fast-DM (HTTP 403/anti-bot), item memang ditandai `Cancelled` secara internal, tetapi badge GUI tetap menulis DIBATALKAN padahal browser yang melanjutkan unduhannya. Badge kini menampilkan DISERAHKAN untuk kasus ini; pembatalan oleh user tetap DIBATALKAN.
 - **User-Agent dikirim dua kali** — User-Agent browser dari extension kini menjadi User-Agent tunggal (jalur per-proses dan RPC), tidak lagi ganda dengan User-Agent bawaan.
 - **Nama file dari `?f=`** dikenali sebagai nama asli (mis. `NadineFD.zip`, bukan hash).

@@ -162,6 +162,11 @@ fn build_aria2_cmd(
 
     let mut cmd = vec![
         "aria2c".into(),
+        // Proses per-unduhan tidak pernah membuka port RPC. Tanpa ini, RPC
+        // yang diaktifkan di `aria2.conf` user (default port 6800) ikut aktif
+        // dan bentrok dengan daemon RPC → "Address already in use", aria2
+        // mati sebelum mengunduh apa pun.
+        "--enable-rpc=false".into(),
         format!("--input-file={}", input_path.display()),
         format!("--dir={}", info.save_dir),
         format!(
@@ -2712,5 +2717,31 @@ mod tests {
         assert_eq!(&m[1], "1048576");
         assert_eq!(&m[2], "34896138");
         assert_eq!(&m[3], "3");
+    }
+}
+
+#[cfg(test)]
+mod enable_rpc_tests {
+    use super::*;
+
+    #[test]
+    fn cli_argv_disables_rpc_even_when_user_conf_enables_it() {
+        // Argv per-unduhan harus selalu mematikan RPC: jika tidak, RPC dari
+        // `aria2.conf` user ikut aktif dan bentrok dengan daemon (port 6800).
+        let item = DownloadInfo::new(
+            "rpc-off-test".into(),
+            "https://example.test/archive.zip".into(),
+            "archive.zip".into(),
+            "/tmp".into(),
+            Default::default(),
+            None,
+        );
+        let (args, cleanup) = build_aria2_cmd(&item, &Config::default()).unwrap();
+        assert!(args.iter().any(|a| a == "--enable-rpc=false"));
+        assert!(!args.iter().any(|a| a == "--enable-rpc=true"));
+        assert!(!args.iter().any(|a| a.starts_with("--rpc-listen-port")));
+        for path in cleanup {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
