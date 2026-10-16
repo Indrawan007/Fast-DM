@@ -300,6 +300,11 @@ pub(crate) fn effective_user_agent(headers: &std::collections::HashMap<String, S
         .unwrap_or_else(|| CHROME_UA.to_string())
 }
 
+/// Baris aria2 yang menandakan kegagalan (di stdout maupun stderr).
+pub(crate) fn is_aria2_error_line(line: &str) -> bool {
+    line.contains("[ERROR]") || line.contains("errorCode=") || line.contains("Exception")
+}
+
 /// Apakah body penolakan menandakan pembatasan laju (rate limit) server,
 /// mis. DDoS-Guard: "Are you a bot or using download tools? ... rate limits".
 pub(crate) fn is_rate_limit_body(body: &str) -> bool {
@@ -338,6 +343,18 @@ pub(crate) fn describe_probe_rejection(
         antibot.join(","),
         snippet.trim()
     )
+}
+
+#[cfg(test)]
+mod aria2_error_line_tests {
+    use super::is_aria2_error_line;
+
+    #[test]
+    fn detects_aria2_error_lines_only() {
+        assert!(is_aria2_error_line("01/01 00:00:00 [ERROR] CUID#7 - Download aborted."));
+        assert!(is_aria2_error_line("Exception: [download_helper.cc:451] errorCode=1"));
+        assert!(!is_aria2_error_line("[#82e100 123MiB/168MiB(73%) CN:1 DL:2.6MiB]"));
+    }
 }
 
 #[cfg(test)]
@@ -521,6 +538,9 @@ async fn run_aria2c(
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
     let mut aborted = None;
     let mut completed_name: Option<String> = None;
+    // aria2 menulis pesan kegagalan (`[ERROR] ...`) ke stdout, bukan stderr.
+    // Dulu baris ini dibuang sehingga pesan error hanya "error tidak diketahui".
+    let mut stdout_errors: Vec<String> = Vec::new();
 
     loop {
         let line = tokio::select! {
@@ -538,6 +558,13 @@ async fn run_aria2c(
                 continue;
             }
         };
+
+        if is_aria2_error_line(&line) {
+            stdout_errors.push(line.clone());
+            if stdout_errors.len() > 8 {
+                stdout_errors.remove(0);
+            }
+        }
 
         // Parse progress (dukung format raw & human-readable)
         if let Some(m) = RE_PROGRESS.captures(&line) {
@@ -613,7 +640,15 @@ async fn run_aria2c(
 
     // stdout EOF → proses akan selesai. Tunggu stderr selesai (pipe tertutup),
     // lalu exit code. (kill_on_drop tetap jadi jaring pengaman jalur panic.)
-    let (err_detail, completed_name_stderr) = stderr_task.await.unwrap_or_default();
+    let (stderr_detail, completed_name_stderr) = stderr_task.await.unwrap_or_default();
+    let err_detail = if stdout_errors.is_empty() {
+        stderr_detail
+    } else {
+        format!("{}\n{}", stdout_errors.join("\n"), stderr_detail)
+    };
+    if !err_detail.trim().is_empty() {
+        tracing::debug!("Detail error aria2: {}", err_detail.trim());
+    }
     let exit_code = child
         .wait()
         .await
